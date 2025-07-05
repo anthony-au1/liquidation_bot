@@ -1,5 +1,8 @@
-use crate::arbitrum::arbitrum::IChainlinkAggregator::IChainlinkAggregatorEvents;
-use crate::arbitrum::arbitrum::IL2Pool::{Borrow, IL2PoolEvents};
+use crate::arbitrum::arbitrum::IChainlinkAggregator::{AnswerUpdated, IChainlinkAggregatorEvents};
+use crate::arbitrum::arbitrum::IL2Pool::{
+    Borrow, IL2PoolEvents, LiquidationCall, Repay, ReserveDataUpdated,
+    ReserveUsedAsCollateralDisabled, ReserveUsedAsCollateralEnabled, Supply, Withdraw,
+};
 use alloy::eips::{BlockId, BlockNumberOrTag};
 use alloy::primitives::{Address, BlockNumber, Log};
 use alloy::providers::Provider;
@@ -9,8 +12,8 @@ use alloy::sol_types::SolEventInterface;
 use ndarray::{Array1, Array2, ArrayView, array};
 use std::collections::HashMap;
 use std::default::Default;
-use std::sync::{mpsc, Arc};
 use std::sync::mpsc::SyncSender;
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -284,33 +287,102 @@ pub async fn test_me() -> eyre::Result<()> {
     Ok(())
 }
 
-pub async fn start<P>(provider: Box<P>) -> eyre::Result<()>
+pub async fn start<P>(provider: Arc<P>) -> eyre::Result<()>
 where
-    P: Provider + Clone,
+    P: Provider + Clone + 'static,
 {
-    let tokens = setup(provider.clone()).await?;
+    let tokens = Arc::new(setup(provider.clone()).await?);
     let cache = Cache::default();
-    cache.init_lt(&tokens).await;
+    cache.init_lt(tokens.clone()).await;
 
     let (tx_events, rc_events) = mpsc::sync_channel::<AaveEvents>(1000_000);
     listen_events(provider.clone(), tx_events.clone()).await?;
-    listen_price_update(provider.clone(), &tokens, tx_events.clone()).await?;
+    listen_price_update(provider.clone(), tokens.clone(), tx_events.clone()).await?;
 
     let w_num = 4;
     let bound = 1000;
-    let supply_txs = cache.subscribe(w_num, bound, supply).await?;
-    let withdraw_txs = cache.subscribe(w_num, bound, withdraw).await?;
-    let borrow_txs = cache.subscribe(w_num, bound, borrow).await?;
-    let repay_txs = cache.subscribe(w_num, bound, repay).await?;
-    let reserve_used_as_collateral_enabled_txs = cache
-        .subscribe(w_num, bound, reserve_used_as_collateral_enabled)
-        .await?;
-    let reserve_used_as_collateral_disabled_txs = cache
-        .subscribe(w_num, bound, reserve_used_as_collateral_disabled)
-        .await?;
-    let liquidation_call_txs = cache.subscribe(w_num, bound, liquidation_call).await?;
-    let reserve_data_updated_txs = cache.subscribe(w_num, bound, reserve_data_updated).await?;
-    let answer_updated_txs = cache.subscribe(w_num, bound, answer_updated).await?;
+    let cache = Arc::new(Mutex::new(cache));
+    let supply_txs = Cache::subscribe(
+        cache.clone(),
+        w_num,
+        bound,
+        provider.clone(),
+        tokens.clone(),
+        supply,
+    )
+    .await?;
+    let withdraw_txs = Cache::subscribe(
+        cache.clone(),
+        w_num,
+        bound,
+        provider.clone(),
+        tokens.clone(),
+        withdraw,
+    )
+    .await?;
+    let borrow_txs = Cache::subscribe(
+        cache.clone(),
+        w_num,
+        bound,
+        provider.clone(),
+        tokens.clone(),
+        borrow,
+    )
+    .await?;
+    let repay_txs = Cache::subscribe(
+        cache.clone(),
+        w_num,
+        bound,
+        provider.clone(),
+        tokens.clone(),
+        repay,
+    )
+    .await?;
+    let reserve_used_as_collateral_enabled_txs = Cache::subscribe(
+        cache.clone(),
+        w_num,
+        bound,
+        provider.clone(),
+        tokens.clone(),
+        reserve_used_as_collateral_enabled,
+    )
+    .await?;
+    let reserve_used_as_collateral_disabled_txs = Cache::subscribe(
+        cache.clone(),
+        w_num,
+        bound,
+        provider.clone(),
+        tokens.clone(),
+        reserve_used_as_collateral_disabled,
+    )
+    .await?;
+    let liquidation_call_txs = Cache::subscribe(
+        cache.clone(),
+        w_num,
+        bound,
+        provider.clone(),
+        tokens.clone(),
+        liquidation_call,
+    )
+    .await?;
+    let reserve_data_updated_txs = Cache::subscribe(
+        cache.clone(),
+        w_num,
+        bound,
+        provider.clone(),
+        tokens.clone(),
+        reserve_data_updated,
+    )
+    .await?;
+    let answer_updated_txs = Cache::subscribe(
+        cache.clone(),
+        w_num,
+        bound,
+        provider.clone(),
+        tokens.clone(),
+        answer_updated,
+    )
+    .await?;
 
     #[derive(Default)]
     struct EventCounter {
@@ -324,7 +396,6 @@ where
         reserve_data_updated: usize,
         answer_updated: usize,
     }
-
     let mut counters = EventCounter::default();
     while let Ok(event) = rc_events.recv() {
         match event {
@@ -403,7 +474,7 @@ impl TokenDetails {
     }
 }
 
-async fn setup<P>(provider: Box<P>) -> eyre::Result<HashMap<String, TokenDetails>>
+async fn setup<P>(provider: Arc<P>) -> eyre::Result<HashMap<String, TokenDetails>>
 where
     P: Provider + Clone,
 {
@@ -464,7 +535,7 @@ enum AaveEvents {
     IChainlinkAggregatorEvents(IChainlinkAggregatorEvents),
 }
 
-async fn listen_events<P>(provider: Box<P>, tx: SyncSender<AaveEvents>) -> eyre::Result<()>
+async fn listen_events<P>(provider: Arc<P>, tx: SyncSender<AaveEvents>) -> eyre::Result<()>
 where
     P: Provider + Clone,
 {
@@ -487,23 +558,22 @@ where
 }
 
 async fn listen_price_update<P>(
-    provider: Box<P>,
-    tokens: &HashMap<String, TokenDetails>,
+    provider: Arc<P>,
+    tokens: Arc<HashMap<String, TokenDetails>>,
     tx: SyncSender<AaveEvents>,
 ) -> eyre::Result<()>
 where
     P: Provider + Clone,
 {
-    for (_, TokenDetails { price_source, .. }) in tokens {
+    for (_, TokenDetails { price_source, .. }) in tokens.iter() {
         let filter = Filter::new().address(price_source.clone());
         let mut stream = provider.clone().subscribe_logs(&filter).await?;
 
-        let tx = tx.clone();
+        let t = tx.clone();
         task::spawn(async move {
             while let Ok(log) = stream.recv().await {
                 if let Ok(Log { data, .. }) = IChainlinkAggregatorEvents::decode_log(log.as_ref()) {
-                    if tx
-                        .send(AaveEvents::IChainlinkAggregatorEvents(data))
+                    if t.send(AaveEvents::IChainlinkAggregatorEvents(data))
                         .is_err()
                     {
                         info!(
@@ -539,7 +609,7 @@ impl Cache {
         &mut self,
         user: &Address,
         tokens: &HashMap<String, TokenDetails>,
-        provider: P,
+        provider: Arc<P>,
     ) -> eyre::Result<bool>
     where
         P: Provider + Clone,
@@ -598,7 +668,7 @@ impl Cache {
         Ok(false)
     }
 
-    async fn init_lt(&self, tokens: &HashMap<String, TokenDetails>) {
+    async fn init_lt(&self, tokens: Arc<HashMap<String, TokenDetails>>) {
         let mut data = vec![0.0; tokens.len()];
         tokens.iter().for_each(
             |(
@@ -615,24 +685,36 @@ impl Cache {
         *self.liquidation_threshold.lock().await = Array1::from(data);
     }
 
-    async fn subscribe<T, F>(
-        &self,
+    async fn subscribe<P, T, F, Fut>(
+        cache: Arc<Mutex<Cache>>,
         workers: usize,
         bound: usize,
+        provider: Arc<P>,
+        tokens: Arc<HashMap<String, TokenDetails>>,
         callback: F,
     ) -> eyre::Result<Vec<SyncSender<T>>>
     where
+        P: Provider + Clone + 'static,
         T: Send + 'static,
-        F: Fn(Arc<Mutex<Array2<f64>>>, Arc<Mutex<Array2<f64>>>, T) -> eyre::Result<()> + Send + Sync + 'static,
+        F: Fn(Arc<Mutex<Cache>>, Arc<P>, Arc<HashMap<String, TokenDetails>>, T) -> Fut
+            + Send
+            + Sync
+            + 'static,
+        Fut: Future<Output = eyre::Result<()>> + Send + 'static,
     {
         let callback = Arc::new(callback);
         let mut senders = vec![];
         for _ in 0..workers {
             let (tx, rc) = mpsc::sync_channel::<T>(bound);
-            let cb = callback.clone();
-            thread::spawn(move || {
+            let (cb, c, p, t) = (
+                callback.clone(),
+                cache.clone(),
+                provider.clone(),
+                tokens.clone(),
+            );
+            thread::spawn(async move || {
                 while let Ok(msg) = rc.recv() {
-                    if let Err(e) = cb(msg) {
+                    if let Err(e) = cb(c.clone(), p.clone(), t.clone(), msg).await {
                         error!("Error while calling event listener: {:?}", e);
                     }
                 }
@@ -645,42 +727,149 @@ impl Cache {
     }
 }
 
-fn supply(event: IL2Pool::Supply) -> eyre::Result<()> {
+async fn supply<P>(
+    cache: Arc<Mutex<Cache>>,
+    provider: Arc<P>,
+    tokens: Arc<HashMap<String, TokenDetails>>,
+    event: Supply,
+) -> eyre::Result<()>
+where
+    P: Provider + Clone + 'static,
+{
+    let mut cache = cache.lock().await;
+    cache
+        .init_user(&event.user, &tokens, provider.clone())
+        .await?;
+
     Ok(())
 }
 
-fn withdraw(event: IL2Pool::Withdraw) -> eyre::Result<()> {
+async fn withdraw<P>(
+    cache: Arc<Mutex<Cache>>,
+    provider: Arc<P>,
+    tokens: Arc<HashMap<String, TokenDetails>>,
+    event: Withdraw,
+) -> eyre::Result<()>
+where
+    P: Provider + Clone + 'static,
+{
+    let mut cache = cache.lock().await;
+    cache
+        .init_user(&event.user, &tokens, provider.clone())
+        .await?;
+
     Ok(())
 }
 
-fn borrow(event: IL2Pool::Borrow) -> eyre::Result<()> {
+async fn borrow<P>(
+    cache: Arc<Mutex<Cache>>,
+    provider: Arc<P>,
+    tokens: Arc<HashMap<String, TokenDetails>>,
+    event: Borrow,
+) -> eyre::Result<()>
+where
+    P: Provider + Clone + 'static,
+{
+    let mut cache = cache.lock().await;
+    cache
+        .init_user(&event.user, &tokens, provider.clone())
+        .await?;
+
     Ok(())
 }
 
-fn repay(event: IL2Pool::Repay) -> eyre::Result<()> {
+async fn repay<P>(
+    cache: Arc<Mutex<Cache>>,
+    provider: Arc<P>,
+    tokens: Arc<HashMap<String, TokenDetails>>,
+    event: Repay,
+) -> eyre::Result<()>
+where
+    P: Provider + Clone + 'static,
+{
+    let mut cache = cache.lock().await;
+    cache
+        .init_user(&event.user, &tokens, provider.clone())
+        .await?;
+
     Ok(())
 }
 
-fn reserve_used_as_collateral_enabled(
-    event: IL2Pool::ReserveUsedAsCollateralEnabled,
-) -> eyre::Result<()> {
+async fn reserve_used_as_collateral_enabled<P>(
+    cache: Arc<Mutex<Cache>>,
+    provider: Arc<P>,
+    tokens: Arc<HashMap<String, TokenDetails>>,
+    event: ReserveUsedAsCollateralEnabled,
+) -> eyre::Result<()>
+where
+    P: Provider + Clone + 'static,
+{
+    let mut cache = cache.lock().await;
+    cache
+        .init_user(&event.user, &tokens, provider.clone())
+        .await?;
+
     Ok(())
 }
 
-fn reserve_used_as_collateral_disabled(
-    event: IL2Pool::ReserveUsedAsCollateralDisabled,
-) -> eyre::Result<()> {
+async fn reserve_used_as_collateral_disabled<P>(
+    cache: Arc<Mutex<Cache>>,
+    provider: Arc<P>,
+    tokens: Arc<HashMap<String, TokenDetails>>,
+    event: ReserveUsedAsCollateralDisabled,
+) -> eyre::Result<()>
+where
+    P: Provider + Clone + 'static,
+{
+    let mut cache = cache.lock().await;
+    cache
+        .init_user(&event.user, &tokens, provider.clone())
+        .await?;
+
     Ok(())
 }
 
-fn liquidation_call(event: IL2Pool::LiquidationCall) -> eyre::Result<()> {
+async fn liquidation_call<P>(
+    cache: Arc<Mutex<Cache>>,
+    provider: Arc<P>,
+    tokens: Arc<HashMap<String, TokenDetails>>,
+    event: LiquidationCall,
+) -> eyre::Result<()>
+where
+    P: Provider + Clone + 'static,
+{
+    let mut cache = cache.lock().await;
+    cache
+        .init_user(&event.user, &tokens, provider.clone())
+        .await?;
+
     Ok(())
 }
 
-fn reserve_data_updated(event: IL2Pool::ReserveDataUpdated) -> eyre::Result<()> {
+async fn reserve_data_updated<P>(
+    cache: Arc<Mutex<Cache>>,
+    provider: Arc<P>,
+    tokens: Arc<HashMap<String, TokenDetails>>,
+    event: ReserveDataUpdated,
+) -> eyre::Result<()>
+where
+    P: Provider + Clone + 'static,
+{
+    let mut cache = cache.lock().await;
+
     Ok(())
 }
 
-fn answer_updated(event: IChainlinkAggregator::AnswerUpdated) -> eyre::Result<()> {
+async fn answer_updated<P>(
+    cache: Arc<Mutex<Cache>>,
+    provider: Arc<P>,
+    tokens: Arc<HashMap<String, TokenDetails>>,
+    event: AnswerUpdated,
+) -> eyre::Result<()>
+where
+    P: Provider + Clone + 'static,
+{
+    let mut cache = cache.lock().await;
+
     Ok(())
 }

@@ -1,5 +1,6 @@
 mod arbitrum;
 
+use std::sync::Arc;
 use crate::arbitrum::arbitrum::{get_block, get_block_number, get_borrows, get_headers, get_logs, start, test_me};
 use alloy::providers::{ProviderBuilder, WsConnect};
 use alloy::transports::http::reqwest::Url;
@@ -47,7 +48,7 @@ async fn main() -> eyre::Result<()> {
             // get_logs(&provider).await?;
             // get_headers(&provider).await?;
             // get_borrows(Box::new(provider)).await?;
-            start(Box::new(provider)).await?;
+            start(Arc::new(provider)).await?;
         }
         Commands::Stop => {
             info!("Stopping Liquidation bot");
