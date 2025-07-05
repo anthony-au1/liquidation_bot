@@ -9,7 +9,7 @@ use alloy::sol_types::SolEventInterface;
 use ndarray::{Array1, Array2, ArrayView, array};
 use std::collections::HashMap;
 use std::default::Default;
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 use std::sync::mpsc::SyncSender;
 use std::thread;
 use std::time::Duration;
@@ -308,6 +308,9 @@ where
     let reserve_used_as_collateral_disabled_txs = cache
         .subscribe(w_num, bound, reserve_used_as_collateral_disabled)
         .await?;
+    let liquidation_call_txs = cache.subscribe(w_num, bound, liquidation_call).await?;
+    let reserve_data_updated_txs = cache.subscribe(w_num, bound, reserve_data_updated).await?;
+    let answer_updated_txs = cache.subscribe(w_num, bound, answer_updated).await?;
 
     #[derive(Default)]
     struct EventCounter {
@@ -317,6 +320,9 @@ where
         repay: usize,
         reserve_used_as_collateral_enabled: usize,
         reserve_used_as_collateral_disabled: usize,
+        liquidation_call: usize,
+        reserve_data_updated: usize,
+        answer_updated: usize,
     }
 
     let mut counters = EventCounter::default();
@@ -354,14 +360,19 @@ where
                         counters.reserve_used_as_collateral_disabled.wrapping_add(1);
                 }
                 IL2PoolEvents::LiquidationCall(ev) => {
-                    // cache.init(&ev.user, &tx);
+                    liquidation_call_txs[counters.liquidation_call % w_num].send(ev)?;
+                    counters.liquidation_call = counters.liquidation_call.wrapping_add(1);
                 }
                 IL2PoolEvents::ReserveDataUpdated(ev) => {
-                    // println!("{}", ev.reserve);
+                    reserve_data_updated_txs[counters.reserve_data_updated % w_num].send(ev)?;
+                    counters.reserve_data_updated = counters.reserve_data_updated.wrapping_add(1);
                 }
             },
             AaveEvents::IChainlinkAggregatorEvents(event) => match event {
-                IChainlinkAggregatorEvents::AnswerUpdated(ev) => {}
+                IChainlinkAggregatorEvents::AnswerUpdated(ev) => {
+                    answer_updated_txs[counters.answer_updated % w_num].send(ev)?;
+                    counters.answer_updated = counters.answer_updated.wrapping_add(1);
+                }
             },
         }
     }
@@ -612,9 +623,9 @@ impl Cache {
     ) -> eyre::Result<Vec<SyncSender<T>>>
     where
         T: Send + 'static,
-        F: Fn(T) -> eyre::Result<()> + Send + Sync + 'static,
+        F: Fn(Arc<Mutex<Array2<f64>>>, Arc<Mutex<Array2<f64>>>, T) -> eyre::Result<()> + Send + Sync + 'static,
     {
-        let callback = std::sync::Arc::new(callback);
+        let callback = Arc::new(callback);
         let mut senders = vec![];
         for _ in 0..workers {
             let (tx, rc) = mpsc::sync_channel::<T>(bound);
@@ -659,5 +670,17 @@ fn reserve_used_as_collateral_enabled(
 fn reserve_used_as_collateral_disabled(
     event: IL2Pool::ReserveUsedAsCollateralDisabled,
 ) -> eyre::Result<()> {
+    Ok(())
+}
+
+fn liquidation_call(event: IL2Pool::LiquidationCall) -> eyre::Result<()> {
+    Ok(())
+}
+
+fn reserve_data_updated(event: IL2Pool::ReserveDataUpdated) -> eyre::Result<()> {
+    Ok(())
+}
+
+fn answer_updated(event: IChainlinkAggregator::AnswerUpdated) -> eyre::Result<()> {
     Ok(())
 }
