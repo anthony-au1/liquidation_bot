@@ -1,4 +1,3 @@
-use std::any::Any;
 use crate::arbitrum::arbitrum::IChainlinkAggregator::IChainlinkAggregatorEvents;
 use crate::arbitrum::arbitrum::IL2Pool::{Borrow, IL2PoolEvents};
 use alloy::eips::{BlockId, BlockNumberOrTag};
@@ -7,15 +6,16 @@ use alloy::providers::Provider;
 use alloy::rpc::types::{Filter, Header};
 use alloy::sol;
 use alloy::sol_types::SolEventInterface;
-use ndarray::{Array1, Array2, array};
+use ndarray::{Array1, Array2, ArrayView, array};
 use std::collections::HashMap;
 use std::default::Default;
 use std::sync::mpsc;
-use std::sync::mpsc::{Receiver, SyncSender};
+use std::sync::mpsc::SyncSender;
 use std::thread;
 use std::time::Duration;
+use tokio::sync::Mutex;
 use tokio::{task, time};
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
 pub const WS_URL: &str = "wss://arb-mainnet.g.alchemy.com/v2/9DDcCoPPxnq-aSjQ8k79vxfLvrhBAXjQ";
 const L2_POOL_ADDRESS: &str = "0x794a61358D6845594F94dc1DB02A252b5b4814aD";
@@ -109,6 +109,31 @@ sol! {
             address tokenAddress;
         }
         function getAllReservesTokens() external view returns (TokenData[] memory);
+
+        function getUserReserveData(address asset, address user) external view returns (
+            uint256 currentATokenBalance,
+            uint256 currentStableDebt,
+            uint256 currentVariableDebt,
+            uint256 principalStableDebt,
+            uint256 scaledVariableDebt,
+            uint256 stableBorrowRate,
+            uint256 liquidityRate,
+            uint40 stableRateLastUpdated,
+            bool usageAsCollateralEnabled
+        );
+
+        function getReserveConfigurationData(address asset) external view returns (
+            uint256 decimals,
+            uint256 ltv,
+            uint256 liquidationThreshold,
+            uint256 liquidationBonus,
+            uint256 reserveFactor,
+            bool usageAsCollateralEnabled,
+            bool borrowingEnabled,
+            bool stableBorrowRateEnabled,
+            bool isActive,
+            bool isFrozen
+        );
     }
 
     #[sol(rpc)]
@@ -265,6 +290,7 @@ where
 {
     let tokens = setup(provider.clone()).await?;
     let cache = Cache::default();
+    cache.init_lt(&tokens).await;
 
     let (tx_events, rc_events) = mpsc::sync_channel::<AaveEvents>(1000_000);
     listen_events(provider.clone(), tx_events.clone()).await?;
@@ -272,19 +298,27 @@ where
 
     let w_num = 4;
     let bound = 1000;
-    let supply_txs = cache.subscribe(w_num, bound, |supply| {
-        
-    }).await?;
-    let withdraw_txs = cache.subscribe(w_num, bound, |withdraw| {
-
-    }).await?;
+    let supply_txs = cache.subscribe(w_num, bound, supply).await?;
+    let withdraw_txs = cache.subscribe(w_num, bound, withdraw).await?;
+    let borrow_txs = cache.subscribe(w_num, bound, borrow).await?;
+    let repay_txs = cache.subscribe(w_num, bound, repay).await?;
+    let reserve_used_as_collateral_enabled_txs = cache
+        .subscribe(w_num, bound, reserve_used_as_collateral_enabled)
+        .await?;
+    let reserve_used_as_collateral_disabled_txs = cache
+        .subscribe(w_num, bound, reserve_used_as_collateral_disabled)
+        .await?;
 
     #[derive(Default)]
     struct EventCounter {
         supply: usize,
         withdraw: usize,
+        borrow: usize,
+        repay: usize,
+        reserve_used_as_collateral_enabled: usize,
+        reserve_used_as_collateral_disabled: usize,
     }
-     
+
     let mut counters = EventCounter::default();
     while let Ok(event) = rc_events.recv() {
         match event {
@@ -298,16 +332,26 @@ where
                     counters.withdraw = counters.withdraw.wrapping_add(1);
                 }
                 IL2PoolEvents::Borrow(ev) => {
-                    // cache.init(&ev.user, &tx);
+                    borrow_txs[counters.borrow % w_num].send(ev)?;
+                    counters.borrow = counters.borrow.wrapping_add(1);
                 }
                 IL2PoolEvents::Repay(ev) => {
-                    // cache.init(&ev.user, &tx);
+                    repay_txs[counters.repay % w_num].send(ev)?;
+                    counters.repay = counters.repay.wrapping_add(1);
                 }
                 IL2PoolEvents::ReserveUsedAsCollateralEnabled(ev) => {
-                    // cache.init(&ev.user, &tx);
+                    reserve_used_as_collateral_enabled_txs
+                        [counters.reserve_used_as_collateral_enabled % w_num]
+                        .send(ev)?;
+                    counters.reserve_used_as_collateral_enabled =
+                        counters.reserve_used_as_collateral_enabled.wrapping_add(1);
                 }
                 IL2PoolEvents::ReserveUsedAsCollateralDisabled(ev) => {
-                    // cache.init(&ev.user, &tx);
+                    reserve_used_as_collateral_disabled_txs
+                        [counters.reserve_used_as_collateral_disabled % w_num]
+                        .send(ev)?;
+                    counters.reserve_used_as_collateral_disabled =
+                        counters.reserve_used_as_collateral_disabled.wrapping_add(1);
                 }
                 IL2PoolEvents::LiquidationCall(ev) => {
                     // cache.init(&ev.user, &tx);
@@ -325,21 +369,30 @@ where
     Ok(())
 }
 
-struct TokenAddress {
+struct TokenDetails {
     token: Address,
     price_source: Address,
+    order: usize,
+    liquidation_threshold: f64,
 }
 
-impl TokenAddress {
-    pub fn new(token: Address, price_source: Address) -> Self {
+impl TokenDetails {
+    pub fn new(
+        token: Address,
+        price_source: Address,
+        order: usize,
+        liquidation_threshold: f64,
+    ) -> Self {
         Self {
             token,
             price_source,
+            order,
+            liquidation_threshold,
         }
     }
 }
 
-async fn setup<P>(provider: Box<P>) -> eyre::Result<HashMap<String, TokenAddress>>
+async fn setup<P>(provider: Box<P>) -> eyre::Result<HashMap<String, TokenDetails>>
 where
     P: Provider + Clone,
 {
@@ -356,6 +409,7 @@ where
         .await?;
 
     let mut tokens = HashMap::new();
+    let mut order = 0;
     for token in token_data {
         debug!("token: {:?}", token
             "Token: symbol = {}, address = {}",
@@ -369,10 +423,26 @@ where
 
         debug!("Token: asset_address = {}", asset_source);
 
+        let reserve_configuration_data = aave_protocol_data_provider
+            .getReserveConfigurationData(token.tokenAddress)
+            .call()
+            .await?;
+
+        debug!(
+            "Token: liquidation_threshold = {}",
+            reserve_configuration_data.liquidationThreshold
+        );
+
         tokens.insert(
             token.symbol,
-            TokenAddress::new(token.tokenAddress, asset_source),
+            TokenDetails::new(
+                token.tokenAddress,
+                asset_source,
+                order,
+                f64::from(reserve_configuration_data.liquidationThreshold),
+            ),
         );
+        order += 1;
     }
 
     Ok(tokens)
@@ -407,13 +477,13 @@ where
 
 async fn listen_price_update<P>(
     provider: Box<P>,
-    tokens: &HashMap<String, TokenAddress>,
+    tokens: &HashMap<String, TokenDetails>,
     tx: SyncSender<AaveEvents>,
 ) -> eyre::Result<()>
 where
     P: Provider + Clone,
 {
-    for (_, TokenAddress { price_source, .. }) in tokens {
+    for (_, TokenDetails { price_source, .. }) in tokens {
         let filter = Filter::new().address(price_source.clone());
         let mut stream = provider.clone().subscribe_logs(&filter).await?;
 
@@ -440,31 +510,100 @@ where
 
 #[derive(Default)]
 struct Cache {
-    users: Vec<Address>,
-    reserve: Array2<f64>,
-    collateral: Array2<f64>,
-    borrowed: Array2<f64>,
-    liquidation_threshold: Array1<f64>,
-    prices: Array1<f64>,
+    tokens: Mutex<Vec<String>>,
+    users: Mutex<Vec<Address>>,
+    reserve: Mutex<Array2<f64>>,
+    collateral: Mutex<Array2<f64>>,
+    borrowed: Mutex<Array2<f64>>,
+    liquidation_threshold: Mutex<Array1<f64>>,
+    prices: Mutex<Array1<f64>>,
 }
 
 impl Cache {
-    fn contains(&self, addr: &Address) -> bool {
-        self.users.contains(addr)
+    async fn contains(&self, addr: &Address) -> bool {
+        self.users.lock().await.contains(addr)
     }
 
-    fn init(&mut self, addr: &Address, tx: &SyncSender<Address>) -> eyre::Result<bool> {
-        if self.contains(addr) {
+    async fn init_user<P>(
+        &mut self,
+        user: &Address,
+        tokens: &HashMap<String, TokenDetails>,
+        provider: P,
+    ) -> eyre::Result<bool>
+    where
+        P: Provider + Clone,
+    {
+        if self.contains(user).await {
             return Ok(true);
         }
 
-        tx.send(addr.clone())?;
+        let aave_protocol_data_provider = IAaveProtocolDataProvider::new(
+            AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS.parse()?,
+            provider.clone(),
+        );
+        let tasks = tokens
+            .iter()
+            .map(|(token_name, TokenDetails { token, .. })| {
+                let provider = aave_protocol_data_provider.clone();
+                let user = user.clone();
+                async move {
+                    (
+                        provider
+                            .getUserReserveData(token.clone(), user)
+                            .call()
+                            .await
+                            .unwrap(),
+                        token_name.clone(),
+                    )
+                }
+            });
+
+        let (mut collateral, mut reserve, mut borrowed) = (
+            vec![0.0; tokens.len()],
+            vec![0.0; tokens.len()],
+            vec![0.0; tokens.len()],
+        );
+        for (urd, token_name) in futures::future::join_all(tasks).await {
+            let idx = tokens.get(&token_name).unwrap().order;
+            if urd.usageAsCollateralEnabled {
+                collateral[idx] = f64::from(urd.currentATokenBalance);
+            } else {
+                reserve[idx] = f64::from(urd.currentATokenBalance);
+            }
+            borrowed[idx] = f64::from(urd.currentVariableDebt);
+        }
+
+        let mut locked = self.collateral.lock().await;
+        locked.push_row(ArrayView::from(&collateral))?;
+
+        let mut locked = self.reserve.lock().await;
+        locked.push_row(ArrayView::from(&reserve))?;
+
+        let mut locked = self.borrowed.lock().await;
+        locked.push_row(ArrayView::from(&borrowed))?;
+
+        self.users.lock().await.push(user.clone());
 
         Ok(false)
     }
-}
 
-impl Cache {
+    async fn init_lt(&self, tokens: &HashMap<String, TokenDetails>) {
+        let mut data = vec![0.0; tokens.len()];
+        tokens.iter().for_each(
+            |(
+                _,
+                TokenDetails {
+                    order,
+                    liquidation_threshold,
+                    ..
+                },
+            )| {
+                data[order.clone()] = liquidation_threshold.clone();
+            },
+        );
+        *self.liquidation_threshold.lock().await = Array1::from(data);
+    }
+
     async fn subscribe<T, F>(
         &self,
         workers: usize,
@@ -473,7 +612,7 @@ impl Cache {
     ) -> eyre::Result<Vec<SyncSender<T>>>
     where
         T: Send + 'static,
-        F: Fn(T) + Send + Sync + 'static,
+        F: Fn(T) -> eyre::Result<()> + Send + Sync + 'static,
     {
         let callback = std::sync::Arc::new(callback);
         let mut senders = vec![];
@@ -482,7 +621,9 @@ impl Cache {
             let cb = callback.clone();
             thread::spawn(move || {
                 while let Ok(msg) = rc.recv() {
-                    cb(msg);
+                    if let Err(e) = cb(msg) {
+                        error!("Error while calling event listener: {:?}", e);
+                    }
                 }
             });
 
@@ -491,4 +632,32 @@ impl Cache {
 
         Ok(senders)
     }
+}
+
+fn supply(event: IL2Pool::Supply) -> eyre::Result<()> {
+    Ok(())
+}
+
+fn withdraw(event: IL2Pool::Withdraw) -> eyre::Result<()> {
+    Ok(())
+}
+
+fn borrow(event: IL2Pool::Borrow) -> eyre::Result<()> {
+    Ok(())
+}
+
+fn repay(event: IL2Pool::Repay) -> eyre::Result<()> {
+    Ok(())
+}
+
+fn reserve_used_as_collateral_enabled(
+    event: IL2Pool::ReserveUsedAsCollateralEnabled,
+) -> eyre::Result<()> {
+    Ok(())
+}
+
+fn reserve_used_as_collateral_disabled(
+    event: IL2Pool::ReserveUsedAsCollateralDisabled,
+) -> eyre::Result<()> {
+    Ok(())
 }

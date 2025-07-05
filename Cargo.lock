@@ -2221,6 +2221,7 @@ dependencies = [
  "alloy",
  "clap",
  "eyre",
+ "futures",
  "ndarray",
  "start",
  "tokio",
