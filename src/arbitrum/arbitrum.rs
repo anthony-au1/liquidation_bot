@@ -291,17 +291,18 @@ pub async fn start<P>(provider: Arc<P>) -> eyre::Result<()>
 where
     P: Provider + Clone + 'static,
 {
-    let tokens = Arc::new(setup(provider.clone()).await?);
+    let tokens = setup(provider.clone()).await?;
     let cache = Cache::default();
-    cache.init_lt(tokens.clone()).await;
+    cache.init_lt(&tokens).await;
 
     let (tx_events, rc_events) = mpsc::sync_channel::<AaveEvents>(1000_000);
     listen_events(provider.clone(), tx_events.clone()).await?;
-    listen_price_update(provider.clone(), tokens.clone(), tx_events.clone()).await?;
+    listen_price_update(provider.clone(), &tokens, tx_events.clone()).await?;
 
     let w_num = 4;
     let bound = 1000;
     let cache = Arc::new(Mutex::new(cache));
+    let tokens = Arc::new(tokens);
     let supply_txs = Cache::subscribe(
         cache.clone(),
         w_num,
@@ -559,13 +560,13 @@ where
 
 async fn listen_price_update<P>(
     provider: Arc<P>,
-    tokens: Arc<HashMap<String, TokenDetails>>,
+    tokens: &HashMap<String, TokenDetails>,
     tx: SyncSender<AaveEvents>,
 ) -> eyre::Result<()>
 where
     P: Provider + Clone,
 {
-    for (_, TokenDetails { price_source, .. }) in tokens.iter() {
+    for (_, TokenDetails { price_source, .. }) in tokens {
         let filter = Filter::new().address(price_source.clone());
         let mut stream = provider.clone().subscribe_logs(&filter).await?;
 
@@ -668,7 +669,7 @@ impl Cache {
         Ok(false)
     }
 
-    async fn init_lt(&self, tokens: Arc<HashMap<String, TokenDetails>>) {
+    async fn init_lt(&self, tokens: &HashMap<String, TokenDetails>) {
         let mut data = vec![0.0; tokens.len()];
         tokens.iter().for_each(
             |(
@@ -737,9 +738,14 @@ where
     P: Provider + Clone + 'static,
 {
     let mut cache = cache.lock().await;
-    cache
+    if cache
         .init_user(&event.user, &tokens, provider.clone())
-        .await?;
+        .await?
+    {
+        return Ok(());
+    }
+
+
 
     Ok(())
 }

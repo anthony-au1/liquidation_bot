@@ -1,9 +1,8 @@
 mod arbitrum;
 
 use std::sync::Arc;
-use crate::arbitrum::arbitrum::{get_block, get_block_number, get_borrows, get_headers, get_logs, start, test_me};
+use crate::arbitrum::arbitrum::{start};
 use alloy::providers::{ProviderBuilder, WsConnect};
-use alloy::transports::http::reqwest::Url;
 use clap::{Parser, Subcommand};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
