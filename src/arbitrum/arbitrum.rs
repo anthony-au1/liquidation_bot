@@ -12,6 +12,7 @@ use alloy::sol_types::SolEventInterface;
 use ndarray::{Array1, Array2, ArrayView, array};
 use std::collections::HashMap;
 use std::default::Default;
+use std::ops::Index;
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, mpsc};
 use std::thread;
@@ -452,8 +453,9 @@ where
     Ok(())
 }
 
+type Tokens = HashMap<Address, TokenDetails>;
 struct TokenDetails {
-    token: Address,
+    name: String,
     price_source: Address,
     order: usize,
     liquidation_threshold: f64,
@@ -461,13 +463,13 @@ struct TokenDetails {
 
 impl TokenDetails {
     pub fn new(
-        token: Address,
+        name: String,
         price_source: Address,
         order: usize,
         liquidation_threshold: f64,
     ) -> Self {
         Self {
-            token,
+            name,
             price_source,
             order,
             liquidation_threshold,
@@ -475,7 +477,7 @@ impl TokenDetails {
     }
 }
 
-async fn setup<P>(provider: Arc<P>) -> eyre::Result<HashMap<String, TokenDetails>>
+async fn setup<P>(provider: Arc<P>) -> eyre::Result<Tokens>
 where
     P: Provider + Clone,
 {
@@ -517,9 +519,9 @@ where
         );
 
         tokens.insert(
-            token.symbol,
+            token.tokenAddress,
             TokenDetails::new(
-                token.tokenAddress,
+                token.symbol,
                 asset_source,
                 order,
                 f64::from(reserve_configuration_data.liquidationThreshold),
@@ -560,7 +562,7 @@ where
 
 async fn listen_price_update<P>(
     provider: Arc<P>,
-    tokens: &HashMap<String, TokenDetails>,
+    tokens: &Tokens,
     tx: SyncSender<AaveEvents>,
 ) -> eyre::Result<()>
 where
@@ -592,7 +594,6 @@ where
 
 #[derive(Default)]
 struct Cache {
-    tokens: Mutex<Vec<String>>,
     users: Mutex<Vec<Address>>,
     reserve: Mutex<Array2<f64>>,
     collateral: Mutex<Array2<f64>>,
@@ -609,7 +610,7 @@ impl Cache {
     async fn init_user<P>(
         &mut self,
         user: &Address,
-        tokens: &HashMap<String, TokenDetails>,
+        tokens: &Tokens,
         provider: Arc<P>,
     ) -> eyre::Result<bool>
     where
@@ -623,30 +624,28 @@ impl Cache {
             AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS.parse()?,
             provider.clone(),
         );
-        let tasks = tokens
-            .iter()
-            .map(|(token_name, TokenDetails { token, .. })| {
-                let provider = aave_protocol_data_provider.clone();
-                let user = user.clone();
-                async move {
-                    (
-                        provider
-                            .getUserReserveData(token.clone(), user)
-                            .call()
-                            .await
-                            .unwrap(),
-                        token_name.clone(),
-                    )
-                }
-            });
+        let tasks = tokens.iter().map(|(token_address, _)| {
+            let provider = aave_protocol_data_provider.clone();
+            let user = user.clone();
+            async move {
+                (
+                    provider
+                        .getUserReserveData(token_address.clone(), user)
+                        .call()
+                        .await
+                        .unwrap(),
+                    token_address.clone(),
+                )
+            }
+        });
 
         let (mut collateral, mut reserve, mut borrowed) = (
             vec![0.0; tokens.len()],
             vec![0.0; tokens.len()],
             vec![0.0; tokens.len()],
         );
-        for (urd, token_name) in futures::future::join_all(tasks).await {
-            let idx = tokens.get(&token_name).unwrap().order;
+        for (urd, token_address) in futures::future::join_all(tasks).await {
+            let idx = tokens.get(&token_address).unwrap().order;
             if urd.usageAsCollateralEnabled {
                 collateral[idx] = f64::from(urd.currentATokenBalance);
             } else {
@@ -669,7 +668,7 @@ impl Cache {
         Ok(false)
     }
 
-    async fn init_lt(&self, tokens: &HashMap<String, TokenDetails>) {
+    async fn init_lt(&self, tokens: &Tokens) {
         let mut data = vec![0.0; tokens.len()];
         tokens.iter().for_each(
             |(
@@ -691,16 +690,13 @@ impl Cache {
         workers: usize,
         bound: usize,
         provider: Arc<P>,
-        tokens: Arc<HashMap<String, TokenDetails>>,
+        tokens: Arc<Tokens>,
         callback: F,
     ) -> eyre::Result<Vec<SyncSender<T>>>
     where
         P: Provider + Clone + 'static,
         T: Send + 'static,
-        F: Fn(Arc<Mutex<Cache>>, Arc<P>, Arc<HashMap<String, TokenDetails>>, T) -> Fut
-            + Send
-            + Sync
-            + 'static,
+        F: Fn(Arc<Mutex<Cache>>, Arc<P>, Arc<Tokens>, T) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = eyre::Result<()>> + Send + 'static,
     {
         let callback = Arc::new(callback);
@@ -731,7 +727,7 @@ impl Cache {
 async fn supply<P>(
     cache: Arc<Mutex<Cache>>,
     provider: Arc<P>,
-    tokens: Arc<HashMap<String, TokenDetails>>,
+    tokens: Arc<Tokens>,
     event: Supply,
 ) -> eyre::Result<()>
 where
@@ -739,21 +735,41 @@ where
 {
     let mut cache = cache.lock().await;
     if cache
-        .init_user(&event.user, &tokens, provider.clone())
+        .init_user(&event.onBehalfOf, &tokens, provider.clone())
         .await?
     {
         return Ok(());
     }
 
-
+    // let locked = cache.users.lock().await;
+    // let row = locked.
+    //
+    // let mut locked = cache.collateral.lock().await;
+    // locked[[0, 1]] = 1.0;
 
     Ok(())
 }
 
+/**
+* @dev Emitted on supply()
+* @param reserve The address of the underlying asset of the reserve
+* @param user The address initiating the supply
+* @param onBehalfOf The beneficiary of the supply, receiving the aTokens
+* @param amount The amount supplied
+* @param referralCode The referral code used
+*/
+// event Supply(
+// address indexed reserve,
+// address user,
+// address indexed onBehalfOf,
+// uint256 amount,
+// uint16 indexed referralCode
+// );
+
 async fn withdraw<P>(
     cache: Arc<Mutex<Cache>>,
     provider: Arc<P>,
-    tokens: Arc<HashMap<String, TokenDetails>>,
+    tokens: Arc<Tokens>,
     event: Withdraw,
 ) -> eyre::Result<()>
 where
@@ -770,7 +786,7 @@ where
 async fn borrow<P>(
     cache: Arc<Mutex<Cache>>,
     provider: Arc<P>,
-    tokens: Arc<HashMap<String, TokenDetails>>,
+    tokens: Arc<Tokens>,
     event: Borrow,
 ) -> eyre::Result<()>
 where
@@ -787,7 +803,7 @@ where
 async fn repay<P>(
     cache: Arc<Mutex<Cache>>,
     provider: Arc<P>,
-    tokens: Arc<HashMap<String, TokenDetails>>,
+    tokens: Arc<Tokens>,
     event: Repay,
 ) -> eyre::Result<()>
 where
@@ -804,7 +820,7 @@ where
 async fn reserve_used_as_collateral_enabled<P>(
     cache: Arc<Mutex<Cache>>,
     provider: Arc<P>,
-    tokens: Arc<HashMap<String, TokenDetails>>,
+    tokens: Arc<Tokens>,
     event: ReserveUsedAsCollateralEnabled,
 ) -> eyre::Result<()>
 where
@@ -821,7 +837,7 @@ where
 async fn reserve_used_as_collateral_disabled<P>(
     cache: Arc<Mutex<Cache>>,
     provider: Arc<P>,
-    tokens: Arc<HashMap<String, TokenDetails>>,
+    tokens: Arc<Tokens>,
     event: ReserveUsedAsCollateralDisabled,
 ) -> eyre::Result<()>
 where
@@ -838,7 +854,7 @@ where
 async fn liquidation_call<P>(
     cache: Arc<Mutex<Cache>>,
     provider: Arc<P>,
-    tokens: Arc<HashMap<String, TokenDetails>>,
+    tokens: Arc<Tokens>,
     event: LiquidationCall,
 ) -> eyre::Result<()>
 where
@@ -855,7 +871,7 @@ where
 async fn reserve_data_updated<P>(
     cache: Arc<Mutex<Cache>>,
     provider: Arc<P>,
-    tokens: Arc<HashMap<String, TokenDetails>>,
+    tokens: Arc<Tokens>,
     event: ReserveDataUpdated,
 ) -> eyre::Result<()>
 where
@@ -869,7 +885,7 @@ where
 async fn answer_updated<P>(
     cache: Arc<Mutex<Cache>>,
     provider: Arc<P>,
-    tokens: Arc<HashMap<String, TokenDetails>>,
+    tokens: Arc<Tokens>,
     event: AnswerUpdated,
 ) -> eyre::Result<()>
 where
