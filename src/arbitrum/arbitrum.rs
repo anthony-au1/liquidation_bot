@@ -9,17 +9,18 @@ use alloy::providers::Provider;
 use alloy::rpc::types::{Filter, Header};
 use alloy::sol;
 use alloy::sol_types::SolEventInterface;
-use ndarray::{Array1, Array2, ArrayView, array};
+use bitvec::prelude::*;
+use dashmap::DashMap;
+use ndarray::{Array1, array};
 use std::collections::HashMap;
 use std::default::Default;
-use std::ops::Index;
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 use tokio::{task, time};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 pub const WS_URL: &str = "wss://arb-mainnet.g.alchemy.com/v2/9DDcCoPPxnq-aSjQ8k79vxfLvrhBAXjQ";
 const L2_POOL_ADDRESS: &str = "0x794a61358D6845594F94dc1DB02A252b5b4814aD";
@@ -302,7 +303,7 @@ where
 
     let w_num = 4;
     let bound = 1000;
-    let cache = Arc::new(Mutex::new(cache));
+    let cache = Arc::new(cache);
     let tokens = Arc::new(tokens);
     let supply_txs = Cache::subscribe(
         cache.clone(),
@@ -592,23 +593,43 @@ where
     Ok(())
 }
 
+type UserDetails = DashMap<Address, UserSettings>;
+type Array = Array1<f64>;
+type Matrix = RwLock<Vec<RwLock<Array>>>;
+
+#[derive(Default)]
+struct UserSettings {
+    row_num: usize,
+    use_as_collateral: BitVec<usize, Lsb0>,
+}
+
+impl UserSettings {
+    fn new(row_num: usize, use_as_collateral: BitVec<usize, Lsb0>) -> Self {
+        Self {
+            row_num,
+            use_as_collateral,
+        }
+    }
+}
+
 #[derive(Default)]
 struct Cache {
-    users: Mutex<Vec<Address>>,
-    reserve: Mutex<Array2<f64>>,
-    collateral: Mutex<Array2<f64>>,
-    borrowed: Mutex<Array2<f64>>,
-    liquidation_threshold: Mutex<Array1<f64>>,
-    prices: Mutex<Array1<f64>>,
+    users: UserDetails,
+    users_num: RwLock<usize>,
+    reserve: Matrix,
+    collateral: Matrix,
+    borrowed: Matrix,
+    liquidation_threshold: RwLock<Array>,
+    prices: RwLock<Array>,
 }
 
 impl Cache {
-    async fn contains(&self, addr: &Address) -> bool {
-        self.users.lock().await.contains(addr)
+    fn contains(&self, addr: &Address) -> bool {
+        self.users.contains_key(addr)
     }
 
     async fn init_user<P>(
-        &mut self,
+        &self,
         user: &Address,
         tokens: &Tokens,
         provider: Arc<P>,
@@ -616,8 +637,23 @@ impl Cache {
     where
         P: Provider + Clone,
     {
-        if self.contains(user).await {
+        if self.contains(user) {
             return Ok(true);
+        }
+
+        {
+            let mut lock = self.users_num.write().await;
+
+            // if we have more than one thread in this fn
+            if self.contains(user) {
+                return Ok(true);
+            }
+
+            self.users.insert(
+                user.clone(),
+                UserSettings::new(*lock, bitvec![usize, Lsb0; 0; tokens.len()]),
+            );
+            *lock += 1;
         }
 
         let aave_protocol_data_provider = IAaveProtocolDataProvider::new(
@@ -639,33 +675,43 @@ impl Cache {
             }
         });
 
-        let (mut collateral, mut reserve, mut borrowed) = (
+        let (mut collateral, mut reserve, use_as_collateral, mut borrowed) = (
             vec![0.0; tokens.len()],
             vec![0.0; tokens.len()],
+            &mut self.users.get_mut(user).unwrap().use_as_collateral,
             vec![0.0; tokens.len()],
         );
         for (urd, token_address) in futures::future::join_all(tasks).await {
             let idx = tokens.get(&token_address).unwrap().order;
             if urd.usageAsCollateralEnabled {
                 collateral[idx] = f64::from(urd.currentATokenBalance);
+                use_as_collateral.set(idx, true);
             } else {
                 reserve[idx] = f64::from(urd.currentATokenBalance);
             }
             borrowed[idx] = f64::from(urd.currentVariableDebt);
         }
 
-        let mut locked = self.collateral.lock().await;
-        locked.push_row(ArrayView::from(&collateral))?;
+        {
+            let mut locked = self.collateral.write().await;
+            locked.push(RwLock::new(Array1::from(collateral)));
+        }
 
-        let mut locked = self.reserve.lock().await;
-        locked.push_row(ArrayView::from(&reserve))?;
+        {
+            let mut locked = self.reserve.write().await;
+            locked.push(RwLock::new(Array1::from(reserve)));
+        }
 
-        let mut locked = self.borrowed.lock().await;
-        locked.push_row(ArrayView::from(&borrowed))?;
-
-        self.users.lock().await.push(user.clone());
+        {
+            let mut locked = self.borrowed.write().await;
+            locked.push(RwLock::new(Array1::from(borrowed)));
+        }
 
         Ok(false)
+    }
+
+    fn remove_user(&self, addr: &Address) {
+        self.users.remove(addr);
     }
 
     async fn init_lt(&self, tokens: &Tokens) {
@@ -682,11 +728,11 @@ impl Cache {
                 data[order.clone()] = liquidation_threshold.clone();
             },
         );
-        *self.liquidation_threshold.lock().await = Array1::from(data);
+        *self.liquidation_threshold.write().await = Array1::from(data);
     }
 
     async fn subscribe<P, T, F, Fut>(
-        cache: Arc<Mutex<Cache>>,
+        cache: Arc<Cache>,
         workers: usize,
         bound: usize,
         provider: Arc<P>,
@@ -696,7 +742,7 @@ impl Cache {
     where
         P: Provider + Clone + 'static,
         T: Send + 'static,
-        F: Fn(Arc<Mutex<Cache>>, Arc<P>, Arc<Tokens>, T) -> Fut + Send + Sync + 'static,
+        F: Fn(Arc<Cache>, Arc<P>, Arc<Tokens>, T) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = eyre::Result<()>> + Send + 'static,
     {
         let callback = Arc::new(callback);
@@ -725,7 +771,7 @@ impl Cache {
 }
 
 async fn supply<P>(
-    cache: Arc<Mutex<Cache>>,
+    cache: Arc<Cache>,
     provider: Arc<P>,
     tokens: Arc<Tokens>,
     event: Supply,
@@ -733,13 +779,53 @@ async fn supply<P>(
 where
     P: Provider + Clone + 'static,
 {
-    let mut cache = cache.lock().await;
-    if cache
+    match cache
         .init_user(&event.onBehalfOf, &tokens, provider.clone())
-        .await?
+        .await
     {
-        return Ok(());
+        Ok(exist) => {
+            if !exist {
+                return Ok(());
+            }
+        }
+        Err(e) => {
+            warn!("supply failed while initializing user: {:?}", e);
+            cache.remove_user(&event.onBehalfOf);
+            return Ok(());
+        }
     }
+
+    let user_settings = cache.users.get(&event.onBehalfOf).unwrap();
+    let row_num = user_settings.row_num;
+    let idx = tokens.get(&event.reserve).unwrap().order;
+
+    if user_settings.use_as_collateral.get(idx) {
+
+    }
+
+    // if cache
+    //     .init_user(&event.onBehalfOf, &tokens, provider.clone())
+    //     .await?
+    // {
+    //     return Ok(());
+    // }
+    //
+    // let row_num = cache.users.get(&event.onBehalfOf).unwrap().row_num;
+    // let idx = tokens.get(&event.reserve).unwrap().order;
+
+    // {
+    //     let matrix_lock = cache.collateral.read().await;
+    //     let row = matrix_lock.get(row_num).unwrap();
+    //     if row.read().await[idx] > 0.0 {
+    //         let mut row_lock = row.write().await;
+    //         row_lock[idx] += f64::from(event.amount);
+    //     } else {
+    //         let matrix_lock = cache.reserve.read().await;
+    //         let row = matrix_lock.get(row_num).unwrap();
+    //         let mut row_lock = row.write().await;
+    //         row_lock[idx] += f64::from(event.amount);
+    //     }
+    // }
 
     // let locked = cache.users.lock().await;
     // let row = locked.
@@ -767,7 +853,7 @@ where
 // );
 
 async fn withdraw<P>(
-    cache: Arc<Mutex<Cache>>,
+    cache: Arc<Cache>,
     provider: Arc<P>,
     tokens: Arc<Tokens>,
     event: Withdraw,
@@ -775,7 +861,6 @@ async fn withdraw<P>(
 where
     P: Provider + Clone + 'static,
 {
-    let mut cache = cache.lock().await;
     cache
         .init_user(&event.user, &tokens, provider.clone())
         .await?;
@@ -784,7 +869,7 @@ where
 }
 
 async fn borrow<P>(
-    cache: Arc<Mutex<Cache>>,
+    cache: Arc<Cache>,
     provider: Arc<P>,
     tokens: Arc<Tokens>,
     event: Borrow,
@@ -792,7 +877,6 @@ async fn borrow<P>(
 where
     P: Provider + Clone + 'static,
 {
-    let mut cache = cache.lock().await;
     cache
         .init_user(&event.user, &tokens, provider.clone())
         .await?;
@@ -801,7 +885,7 @@ where
 }
 
 async fn repay<P>(
-    cache: Arc<Mutex<Cache>>,
+    cache: Arc<Cache>,
     provider: Arc<P>,
     tokens: Arc<Tokens>,
     event: Repay,
@@ -809,7 +893,6 @@ async fn repay<P>(
 where
     P: Provider + Clone + 'static,
 {
-    let mut cache = cache.lock().await;
     cache
         .init_user(&event.user, &tokens, provider.clone())
         .await?;
@@ -818,7 +901,7 @@ where
 }
 
 async fn reserve_used_as_collateral_enabled<P>(
-    cache: Arc<Mutex<Cache>>,
+    cache: Arc<Cache>,
     provider: Arc<P>,
     tokens: Arc<Tokens>,
     event: ReserveUsedAsCollateralEnabled,
@@ -826,7 +909,6 @@ async fn reserve_used_as_collateral_enabled<P>(
 where
     P: Provider + Clone + 'static,
 {
-    let mut cache = cache.lock().await;
     cache
         .init_user(&event.user, &tokens, provider.clone())
         .await?;
@@ -835,7 +917,7 @@ where
 }
 
 async fn reserve_used_as_collateral_disabled<P>(
-    cache: Arc<Mutex<Cache>>,
+    cache: Arc<Cache>,
     provider: Arc<P>,
     tokens: Arc<Tokens>,
     event: ReserveUsedAsCollateralDisabled,
@@ -843,7 +925,6 @@ async fn reserve_used_as_collateral_disabled<P>(
 where
     P: Provider + Clone + 'static,
 {
-    let mut cache = cache.lock().await;
     cache
         .init_user(&event.user, &tokens, provider.clone())
         .await?;
@@ -852,7 +933,7 @@ where
 }
 
 async fn liquidation_call<P>(
-    cache: Arc<Mutex<Cache>>,
+    cache: Arc<Cache>,
     provider: Arc<P>,
     tokens: Arc<Tokens>,
     event: LiquidationCall,
@@ -860,7 +941,6 @@ async fn liquidation_call<P>(
 where
     P: Provider + Clone + 'static,
 {
-    let mut cache = cache.lock().await;
     cache
         .init_user(&event.user, &tokens, provider.clone())
         .await?;
@@ -869,7 +949,7 @@ where
 }
 
 async fn reserve_data_updated<P>(
-    cache: Arc<Mutex<Cache>>,
+    cache: Arc<Cache>,
     provider: Arc<P>,
     tokens: Arc<Tokens>,
     event: ReserveDataUpdated,
@@ -877,13 +957,11 @@ async fn reserve_data_updated<P>(
 where
     P: Provider + Clone + 'static,
 {
-    let mut cache = cache.lock().await;
-
     Ok(())
 }
 
 async fn answer_updated<P>(
-    cache: Arc<Mutex<Cache>>,
+    cache: Arc<Cache>,
     provider: Arc<P>,
     tokens: Arc<Tokens>,
     event: AnswerUpdated,
@@ -891,7 +969,5 @@ async fn answer_updated<P>(
 where
     P: Provider + Clone + 'static,
 {
-    let mut cache = cache.lock().await;
-
     Ok(())
 }
