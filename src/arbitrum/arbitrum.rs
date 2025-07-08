@@ -21,6 +21,7 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::{task, time};
 use tracing::{debug, error, info, warn};
+use tracing_subscriber::util::SubscriberInitExt;
 
 pub const WS_URL: &str = "wss://arb-mainnet.g.alchemy.com/v2/9DDcCoPPxnq-aSjQ8k79vxfLvrhBAXjQ";
 const L2_POOL_ADDRESS: &str = "0x794a61358D6845594F94dc1DB02A252b5b4814aD";
@@ -295,7 +296,13 @@ where
 {
     let tokens = setup(provider.clone()).await?;
     let cache = Cache::default();
-    cache.init_lt(&tokens).await;
+    cache.init_lt(&tokens).await?;
+
+    {
+        let el_num = cache.liquidation_threshold.read().await.len();
+        *cache.prices.write().await = Array1::from_vec(vec![0.0; el_num]);
+        *cache.health_factors.write().await = Array1::from_vec(vec![0.0; el_num]);
+    }
 
     let (tx_events, rc_events) = mpsc::sync_channel::<AaveEvents>(1000_000);
     listen_events(provider.clone(), tx_events.clone()).await?;
@@ -442,9 +449,9 @@ where
                     counters.reserve_data_updated = counters.reserve_data_updated.wrapping_add(1);
                 }
             },
-            AaveEvents::IChainlinkAggregatorEvents(event) => match event {
+            AaveEvents::IChainlinkAggregatorEvents(event, token) => match event {
                 IChainlinkAggregatorEvents::AnswerUpdated(ev) => {
-                    answer_updated_txs[counters.answer_updated % w_num].send(ev)?;
+                    answer_updated_txs[counters.answer_updated % w_num].send((ev, token))?;
                     counters.answer_updated = counters.answer_updated.wrapping_add(1);
                 }
             },
@@ -497,7 +504,7 @@ where
     let mut tokens = HashMap::new();
     let mut order = 0;
     for token in token_data {
-        debug!("token: {:?}", token
+        debug!(
             "Token: symbol = {}, address = {}",
             token.symbol, token.tokenAddress
         );
@@ -536,7 +543,7 @@ where
 
 enum AaveEvents {
     IL2PoolEvents(IL2PoolEvents),
-    IChainlinkAggregatorEvents(IChainlinkAggregatorEvents),
+    IChainlinkAggregatorEvents(IChainlinkAggregatorEvents, Address),
 }
 
 async fn listen_events<P>(provider: Arc<P>, tx: SyncSender<AaveEvents>) -> eyre::Result<()>
@@ -569,15 +576,15 @@ async fn listen_price_update<P>(
 where
     P: Provider + Clone,
 {
-    for (_, TokenDetails { price_source, .. }) in tokens {
+    for (token_name, TokenDetails { price_source, .. }) in tokens {
         let filter = Filter::new().address(price_source.clone());
         let mut stream = provider.clone().subscribe_logs(&filter).await?;
 
-        let t = tx.clone();
+        let (t, name) = (tx.clone(), token_name.clone());
         task::spawn(async move {
             while let Ok(log) = stream.recv().await {
                 if let Ok(Log { data, .. }) = IChainlinkAggregatorEvents::decode_log(log.as_ref()) {
-                    if t.send(AaveEvents::IChainlinkAggregatorEvents(data))
+                    if t.send(AaveEvents::IChainlinkAggregatorEvents(data, name))
                         .is_err()
                     {
                         info!(
@@ -621,6 +628,7 @@ struct Cache {
     borrowed: Matrix,
     liquidation_threshold: RwLock<Array>,
     prices: RwLock<Array>,
+    health_factors: RwLock<Array>,
 }
 
 impl Cache {
@@ -714,7 +722,7 @@ impl Cache {
         self.users.remove(addr);
     }
 
-    async fn init_lt(&self, tokens: &Tokens) {
+    async fn init_lt(&self, tokens: &Tokens) -> eyre::Result<()> {
         let mut data = vec![0.0; tokens.len()];
         tokens.iter().for_each(
             |(
@@ -729,6 +737,8 @@ impl Cache {
             },
         );
         *self.liquidation_threshold.write().await = Array1::from(data);
+
+        Ok(())
     }
 
     async fn subscribe<P, T, F, Fut>(
@@ -767,6 +777,52 @@ impl Cache {
         }
 
         Ok(senders)
+    }
+
+    async fn calc_hf(&self, user: Option<&Address>) -> eyre::Result<()> {
+        let lt_lock = self.liquidation_threshold.read().await;
+        let price_lock = self.prices.read().await;
+        let ltp = &*lt_lock * &*price_lock;
+
+        if let Some(user) = user {
+            let row_num = self.users.get(user).unwrap().row_num;
+
+            let collateral_lock = self.collateral.read().await;
+            let col_row_lock = collateral_lock.get(row_num).unwrap().read().await;
+
+            let col_eff = col_row_lock.dot(&ltp);
+
+            let borrowed_lock = self.borrowed.read().await;
+            let bor_row_lock = borrowed_lock.get(row_num).unwrap().read().await;
+
+            let bor_eff = bor_row_lock.dot(&*price_lock);
+
+            let mut hf_lock = self.health_factors.write().await;
+            hf_lock[row_num] = col_eff / bor_eff;
+
+            return Ok(());
+        }
+
+        // TODO update all users
+
+        // let coll = array![[0.1, 0.5, 5_f64], [0.3, 1_f64, 100_f64]];
+        // let bor = array![[0.5, 0.1, 10_f64], [0.8, 0_f64, 0_f64]];
+        // let lt = array![0.8, 0.73, 0.85];
+        // let prices = array![110_000_f64, 3500_f64, 200_f64];
+        //
+        // let ltp = &lt * &prices;
+        // info!("ltp: {:?}", ltp);
+        //
+        // let coll_eff = coll.dot(&ltp);
+        // info!("coll_eff: {:?}", coll_eff);
+        //
+        // let bor_eff = bor.dot(&prices);
+        // info!("bor_eff: {:?}", bor_eff);
+        //
+        // let hf = &coll_eff / &bor_eff;
+        // info!("hf: {:?}", hf);
+
+        Ok(())
     }
 }
 
@@ -924,7 +980,7 @@ async fn answer_updated<P>(
     cache: Arc<Cache>,
     provider: Arc<P>,
     tokens: Arc<Tokens>,
-    event: AnswerUpdated,
+    event: (AnswerUpdated, Address),
 ) -> eyre::Result<()>
 where
     P: Provider + Clone + 'static,
