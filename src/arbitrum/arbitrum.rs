@@ -799,58 +799,18 @@ where
     let row_num = user_settings.row_num;
     let idx = tokens.get(&event.reserve).unwrap().order;
 
-    if user_settings.use_as_collateral.get(idx) {
-
+    if user_settings.use_as_collateral[idx] {
+        let collateral_lock = cache.collateral.write().await;
+        let mut row_lock = collateral_lock[row_num].write().await;
+        row_lock[idx] += f64::from(event.amount);
+    } else {
+        let reserve_lock = cache.reserve.write().await;
+        let mut row_lock = reserve_lock[row_num].write().await;
+        row_lock[idx] += f64::from(event.amount);
     }
-
-    // if cache
-    //     .init_user(&event.onBehalfOf, &tokens, provider.clone())
-    //     .await?
-    // {
-    //     return Ok(());
-    // }
-    //
-    // let row_num = cache.users.get(&event.onBehalfOf).unwrap().row_num;
-    // let idx = tokens.get(&event.reserve).unwrap().order;
-
-    // {
-    //     let matrix_lock = cache.collateral.read().await;
-    //     let row = matrix_lock.get(row_num).unwrap();
-    //     if row.read().await[idx] > 0.0 {
-    //         let mut row_lock = row.write().await;
-    //         row_lock[idx] += f64::from(event.amount);
-    //     } else {
-    //         let matrix_lock = cache.reserve.read().await;
-    //         let row = matrix_lock.get(row_num).unwrap();
-    //         let mut row_lock = row.write().await;
-    //         row_lock[idx] += f64::from(event.amount);
-    //     }
-    // }
-
-    // let locked = cache.users.lock().await;
-    // let row = locked.
-    //
-    // let mut locked = cache.collateral.lock().await;
-    // locked[[0, 1]] = 1.0;
 
     Ok(())
 }
-
-/**
-* @dev Emitted on supply()
-* @param reserve The address of the underlying asset of the reserve
-* @param user The address initiating the supply
-* @param onBehalfOf The beneficiary of the supply, receiving the aTokens
-* @param amount The amount supplied
-* @param referralCode The referral code used
-*/
-// event Supply(
-// address indexed reserve,
-// address user,
-// address indexed onBehalfOf,
-// uint256 amount,
-// uint16 indexed referralCode
-// );
 
 async fn withdraw<P>(
     cache: Arc<Cache>,
