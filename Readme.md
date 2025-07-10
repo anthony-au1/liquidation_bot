@@ -1,3 +1,3 @@
 //TODO
 - well we have a problem when we can't guarantee even message order...
-- working on sync for hf calc
+- test based just on supply
