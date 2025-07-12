@@ -10,8 +10,9 @@ use alloy::rpc::types::{Filter, Header};
 use alloy::sol;
 use alloy::sol_types::SolEventInterface;
 use bitvec::prelude::*;
+use chrono::Utc;
 use dashmap::DashMap;
-use ndarray::{Array1, Array2, ArrayView, array};
+use ndarray::{Array1, Array2, array};
 use std::collections::HashMap;
 use std::default::Default;
 use std::sync::mpsc::SyncSender;
@@ -298,9 +299,10 @@ where
     cache.init_lt(&tokens).await?;
 
     {
-        let el_num = cache.liquidation_threshold.read().await.len();
-        *cache.prices.write().await = Array1::from_vec(vec![0.0; el_num]);
-        *cache.health_factors.write().await = Array1::from_vec(vec![0.0; el_num]);
+        let el_num = cache.liquidation_threshold.read().await.0.len();
+        let now = Utc::now().timestamp_millis();
+        *cache.prices.write().await = (Array1::from_vec(vec![0.0; el_num]), now);
+        *cache.health_factors.write().await = (Array1::from_vec(vec![0.0; el_num]), now);
     }
 
     let (tx_events, rc_events) = mpsc::sync_channel::<AaveEvents>(1000_000);
@@ -412,35 +414,47 @@ where
     let mut counters = EventCounter::default();
     while let Ok(event) = rc_events.recv() {
         match event {
-            AaveEvents::IL2PoolEvents(event) => match event {
+            AaveEvents::IL2PoolEvents(event, timestamp) => match event {
                 IL2PoolEvents::Supply(ev) => {
-                    supply_txs[counters.supply % w_num]
-                        .send((ev, sync_senders[sync_counter % w_num].clone()))?;
+                    supply_txs[counters.supply % w_num].send((
+                        ev,
+                        sync_senders[sync_counter % w_num].clone(),
+                        timestamp,
+                    ))?;
                     counters.supply = counters.supply.wrapping_add(1);
                     sync_counter = sync_counter.wrapping_add(1);
                 }
                 IL2PoolEvents::Withdraw(ev) => {
-                    withdraw_txs[counters.withdraw % w_num]
-                        .send((ev, sync_senders[sync_counter % w_num].clone()))?;
+                    withdraw_txs[counters.withdraw % w_num].send((
+                        ev,
+                        sync_senders[sync_counter % w_num].clone(),
+                        timestamp,
+                    ))?;
                     counters.withdraw = counters.withdraw.wrapping_add(1);
                     sync_counter = sync_counter.wrapping_add(1);
                 }
                 IL2PoolEvents::Borrow(ev) => {
-                    borrow_txs[counters.borrow % w_num]
-                        .send((ev, sync_senders[sync_counter % w_num].clone()))?;
+                    borrow_txs[counters.borrow % w_num].send((
+                        ev,
+                        sync_senders[sync_counter % w_num].clone(),
+                        timestamp,
+                    ))?;
                     counters.borrow = counters.borrow.wrapping_add(1);
                     sync_counter = sync_counter.wrapping_add(1);
                 }
                 IL2PoolEvents::Repay(ev) => {
-                    repay_txs[counters.repay % w_num]
-                        .send((ev, sync_senders[sync_counter % w_num].clone()))?;
+                    repay_txs[counters.repay % w_num].send((
+                        ev,
+                        sync_senders[sync_counter % w_num].clone(),
+                        timestamp,
+                    ))?;
                     counters.repay = counters.repay.wrapping_add(1);
                     sync_counter = sync_counter.wrapping_add(1);
                 }
                 IL2PoolEvents::ReserveUsedAsCollateralEnabled(ev) => {
                     reserve_used_as_collateral_enabled_txs
                         [counters.reserve_used_as_collateral_enabled % w_num]
-                        .send((ev, sync_senders[sync_counter % w_num].clone()))?;
+                        .send((ev, sync_senders[sync_counter % w_num].clone(), timestamp))?;
                     counters.reserve_used_as_collateral_enabled =
                         counters.reserve_used_as_collateral_enabled.wrapping_add(1);
                     sync_counter = sync_counter.wrapping_add(1);
@@ -448,30 +462,37 @@ where
                 IL2PoolEvents::ReserveUsedAsCollateralDisabled(ev) => {
                     reserve_used_as_collateral_disabled_txs
                         [counters.reserve_used_as_collateral_disabled % w_num]
-                        .send((ev, sync_senders[sync_counter % w_num].clone()))?;
+                        .send((ev, sync_senders[sync_counter % w_num].clone(), timestamp))?;
                     counters.reserve_used_as_collateral_disabled =
                         counters.reserve_used_as_collateral_disabled.wrapping_add(1);
                     sync_counter = sync_counter.wrapping_add(1);
                 }
                 IL2PoolEvents::LiquidationCall(ev) => {
-                    liquidation_call_txs[counters.liquidation_call % w_num]
-                        .send((ev, sync_senders[sync_counter % w_num].clone()))?;
+                    liquidation_call_txs[counters.liquidation_call % w_num].send((
+                        ev,
+                        sync_senders[sync_counter % w_num].clone(),
+                        timestamp,
+                    ))?;
                     counters.liquidation_call = counters.liquidation_call.wrapping_add(1);
                     sync_counter = sync_counter.wrapping_add(1);
                 }
                 IL2PoolEvents::ReserveDataUpdated(ev) => {
-                    reserve_data_updated_txs[counters.reserve_data_updated % w_num]
-                        .send((ev, hf_senders[hf_counter % w_num].clone()))?;
+                    reserve_data_updated_txs[counters.reserve_data_updated % w_num].send((
+                        ev,
+                        hf_senders[hf_counter % w_num].clone(),
+                        timestamp,
+                    ))?;
                     counters.reserve_data_updated = counters.reserve_data_updated.wrapping_add(1);
                     hf_counter = hf_counter.wrapping_add(1);
                 }
             },
-            AaveEvents::IChainlinkAggregatorEvents(event, token) => match event {
+            AaveEvents::IChainlinkAggregatorEvents(event, token, timestamp) => match event {
                 IChainlinkAggregatorEvents::AnswerUpdated(ev) => {
                     answer_updated_txs[counters.answer_updated % w_num].send((
                         ev,
                         token,
                         hf_senders[hf_counter % w_num].clone(),
+                        timestamp,
                     ))?;
                     counters.answer_updated = counters.answer_updated.wrapping_add(1);
                     hf_counter = hf_counter.wrapping_add(1);
@@ -564,8 +585,8 @@ where
 }
 
 enum AaveEvents {
-    IL2PoolEvents(IL2PoolEvents),
-    IChainlinkAggregatorEvents(IChainlinkAggregatorEvents, Address),
+    IL2PoolEvents(IL2PoolEvents, i64),
+    IChainlinkAggregatorEvents(IChainlinkAggregatorEvents, Address, i64),
 }
 
 async fn listen_events<P>(provider: Arc<P>, tx: SyncSender<AaveEvents>) -> eyre::Result<()>
@@ -579,7 +600,13 @@ where
     task::spawn(async move {
         while let Ok(log) = stream.recv().await {
             if let Ok(Log { data, .. }) = IL2PoolEvents::decode_log(log.as_ref()) {
-                if tx.send(AaveEvents::IL2PoolEvents(data)).is_err() {
+                if tx
+                    .send(AaveEvents::IL2PoolEvents(
+                        data,
+                        Utc::now().timestamp_millis(),
+                    ))
+                    .is_err()
+                {
                     info!("Main thread dropped receiver for pool events, exiting background task.");
                     break;
                 }
@@ -606,8 +633,12 @@ where
         task::spawn(async move {
             while let Ok(log) = stream.recv().await {
                 if let Ok(Log { data, .. }) = IChainlinkAggregatorEvents::decode_log(log.as_ref()) {
-                    if t.send(AaveEvents::IChainlinkAggregatorEvents(data, name))
-                        .is_err()
+                    if t.send(AaveEvents::IChainlinkAggregatorEvents(
+                        data,
+                        name,
+                        Utc::now().timestamp_millis(),
+                    ))
+                    .is_err()
                     {
                         info!(
                             "Main thread dropped receiver for chainlink events, exiting background task."
@@ -679,8 +710,8 @@ async fn listen_hf_calc(
 }
 
 type UserDetails = DashMap<Address, UserSettings>;
-type Array = Array1<f64>;
-type Arrays = RwLock<Vec<RwLock<Array>>>;
+type Array = RwLock<(Array1<f64>, i64)>;
+type Arrays = RwLock<(Vec<RwLock<Array1<f64>>>, i64, i64)>;
 type Matrix = RwLock<Array2<f64>>;
 
 #[derive(Default)]
@@ -707,9 +738,9 @@ struct Cache {
     collateral_matrix: Matrix,
     borrowed: Arrays,
     borrowed_matrix: Matrix,
-    liquidation_threshold: RwLock<Array>,
-    prices: RwLock<Array>,
-    health_factors: RwLock<Array>,
+    liquidation_threshold: Array,
+    prices: Array,
+    health_factors: Array,
 }
 
 impl Cache {
@@ -781,19 +812,23 @@ impl Cache {
             borrowed[idx] = f64::from(urd.currentVariableDebt);
         }
 
+        let now = Utc::now().timestamp();
         {
             let mut locked = self.collateral.write().await;
-            locked.push(RwLock::new(Array1::from(collateral)));
+            locked.0.push(RwLock::new(Array1::from(collateral)));
+            (locked.1, locked.2) = (now, now);
         }
 
         {
             let mut locked = self.reserve.write().await;
-            locked.push(RwLock::new(Array1::from(reserve)));
+            locked.0.push(RwLock::new(Array1::from(reserve)));
+            (locked.1, locked.2) = (now, now);
         }
 
         {
             let mut locked = self.borrowed.write().await;
-            locked.push(RwLock::new(Array1::from(borrowed)));
+            locked.0.push(RwLock::new(Array1::from(borrowed)));
+            (locked.1, locked.2) = (now, now);
         }
 
         Ok(false)
@@ -817,7 +852,8 @@ impl Cache {
                 data[order.clone()] = liquidation_threshold.clone();
             },
         );
-        *self.liquidation_threshold.write().await = Array1::from(data);
+        *self.liquidation_threshold.write().await =
+            (Array1::from(data), Utc::now().timestamp_millis());
 
         Ok(())
     }
@@ -864,8 +900,8 @@ impl Cache {
         let col_lock = self.collateral.read().await;
         let mut col_matrix_lock = self.collateral_matrix.write().await;
         let low_bound = col_matrix_lock.len() - 1;
-        while col_matrix_lock.len() < col_lock.len() {
-            let row_lock = col_lock.get(col_matrix_lock.len()).unwrap().read().await;
+        while col_matrix_lock.len() < col_lock.0.len() {
+            let row_lock = col_lock.0.get(col_matrix_lock.len()).unwrap().read().await;
             col_matrix_lock.push_row(row_lock.view())?;
         }
 
@@ -873,7 +909,7 @@ impl Cache {
             return Ok(());
         }
 
-        let row = col_lock.get(row_num).unwrap().read().await;
+        let row = col_lock.0.get(row_num).unwrap().read().await;
         col_matrix_lock.row_mut(row_num).assign(&row);
 
         Ok(())
@@ -883,8 +919,8 @@ impl Cache {
         let bor_lock = self.borrowed.read().await;
         let mut bor_matrix_lock = self.borrowed_matrix.write().await;
         let low_bound = bor_matrix_lock.len() - 1;
-        while bor_matrix_lock.len() < bor_lock.len() {
-            let row_lock = bor_lock.get(bor_matrix_lock.len()).unwrap().read().await;
+        while bor_matrix_lock.len() < bor_lock.0.len() {
+            let row_lock = bor_lock.0.get(bor_matrix_lock.len()).unwrap().read().await;
             bor_matrix_lock.push_row(row_lock.view())?;
         }
 
@@ -892,7 +928,7 @@ impl Cache {
             return Ok(());
         }
 
-        let row = bor_lock.get(row_num).unwrap().read().await;
+        let row = bor_lock.0.get(row_num).unwrap().read().await;
         bor_matrix_lock.row_mut(row_num).assign(&row);
 
         Ok(())
@@ -908,23 +944,23 @@ impl Cache {
     async fn calc_hf(&self, user: Option<&Address>) -> eyre::Result<()> {
         let lt_lock = self.liquidation_threshold.read().await;
         let price_lock = self.prices.read().await;
-        let ltp = &*lt_lock * &*price_lock;
+        let ltp = &(&*lt_lock).0 * &(&*price_lock).0;
 
         if let Some(user) = user {
             let row_num = self.users.get(user).unwrap().row_num;
 
             let collateral_lock = self.collateral.read().await;
-            let col_row_lock = collateral_lock.get(row_num).unwrap().read().await;
+            let col_row_lock = collateral_lock.0.get(row_num).unwrap().read().await;
 
             let col_eff = col_row_lock.dot(&ltp);
 
             let borrowed_lock = self.borrowed.read().await;
-            let bor_row_lock = borrowed_lock.get(row_num).unwrap().read().await;
+            let bor_row_lock = borrowed_lock.0.get(row_num).unwrap().read().await;
 
-            let bor_eff = bor_row_lock.dot(&*price_lock);
+            let bor_eff = bor_row_lock.dot(&(&*price_lock).0);
 
             let mut hf_lock = self.health_factors.write().await;
-            hf_lock[row_num] = col_eff / bor_eff;
+            (hf_lock.0[row_num], hf_lock.1) = (col_eff / bor_eff, Utc::now().timestamp_millis());
 
             return Ok(());
         }
@@ -933,10 +969,10 @@ impl Cache {
         let col_eff = collateral_lock.dot(&ltp);
 
         let borrowed_lock = self.borrowed_matrix.read().await;
-        let bor_eff = borrowed_lock.dot(&*price_lock);
+        let bor_eff = borrowed_lock.dot(&(&*price_lock).0);
 
         let mut hf_lock = self.health_factors.write().await;
-        *hf_lock = col_eff / bor_eff;
+        (hf_lock.0, hf_lock.1) = (col_eff / bor_eff, Utc::now().timestamp_millis());
 
         Ok(())
     }
@@ -946,12 +982,12 @@ async fn supply<P>(
     cache: Arc<Cache>,
     provider: Arc<P>,
     tokens: Arc<Tokens>,
-    event: (Supply, SyncSender<SyncRequest>),
+    event: (Supply, SyncSender<SyncRequest>, i64),
 ) -> eyre::Result<()>
 where
     P: Provider + Clone + 'static,
 {
-    let (event, tx) = event;
+    let (event, tx, timestamp) = event;
     match cache
         .init_user(&event.onBehalfOf, &tokens, provider.clone())
         .await
@@ -977,15 +1013,58 @@ where
     let row_num = user_settings.row_num;
     let idx = tokens.get(&event.reserve).unwrap().order;
 
+    let now = Utc::now().timestamp_millis();
     if user_settings.use_as_collateral[idx] {
-        let collateral_lock = cache.collateral.write().await;
-        let mut row_lock = collateral_lock[row_num].write().await;
-        row_lock[idx] += f64::from(event.amount);
+        let mut collateral_lock = cache.collateral.write().await;
 
-        tx.send(SyncRequest::Collateral(row_num))?;
+        match timestamp {
+            t if t > (*collateral_lock).2 => {
+                // new event
+                (collateral_lock.1, collateral_lock.2) = (now, now);
+                let mut row_lock = collateral_lock.0[row_num].write().await;
+                row_lock[idx] += f64::from(event.amount);
+
+                tx.send(SyncRequest::Collateral(row_num))?;
+            }
+            t if t <= (*collateral_lock).1 => {
+                // skip event
+                debug!(
+                    "event dated before sync:\
+                     event = supply, user = {}, timestamp = {}, collateral sync = {}, collateral timestamp = {}",
+                    event.onBehalfOf,
+                    timestamp,
+                    (*collateral_lock).1,
+                    (*collateral_lock).2
+                );
+            }
+            t if t > (*collateral_lock).1 && t <= (*collateral_lock).2 => {
+                // remove user and add
+                cache.remove_user(&event.onBehalfOf);
+                cache
+                    .init_user(&event.onBehalfOf, &tokens, provider.clone())
+                    .await?;
+                tx.send(SyncRequest::Both(
+                    cache.users.get(&event.onBehalfOf).unwrap().row_num,
+                ))?;
+                cache.calc_hf(Some(&event.onBehalfOf)).await?;
+            }
+            _ => {
+                info!(
+                    "detected unknown case:\
+                     event = supply, user = {}, timestamp = {}, collateral sync = {}, collateral timestamp = {}",
+                    event.onBehalfOf,
+                    timestamp,
+                    (*collateral_lock).1,
+                    (*collateral_lock).2
+                );
+            }
+        }
     } else {
-        let reserve_lock = cache.reserve.write().await;
-        let mut row_lock = reserve_lock[row_num].write().await;
+        // todo check timestamp
+
+        let mut reserve_lock = cache.reserve.write().await;
+        (reserve_lock.1, reserve_lock.2) = (now, now);
+        let mut row_lock = reserve_lock.0[row_num].write().await;
         row_lock[idx] += f64::from(event.amount);
     }
 
@@ -998,12 +1077,12 @@ async fn withdraw<P>(
     cache: Arc<Cache>,
     provider: Arc<P>,
     tokens: Arc<Tokens>,
-    event: (Withdraw, SyncSender<SyncRequest>),
+    event: (Withdraw, SyncSender<SyncRequest>, i64),
 ) -> eyre::Result<()>
 where
     P: Provider + Clone + 'static,
 {
-    let (event, tx) = event;
+    let (event, tx, timestamp) = event;
     cache
         .init_user(&event.user, &tokens, provider.clone())
         .await?;
@@ -1015,12 +1094,12 @@ async fn borrow<P>(
     cache: Arc<Cache>,
     provider: Arc<P>,
     tokens: Arc<Tokens>,
-    event: (Borrow, SyncSender<SyncRequest>),
+    event: (Borrow, SyncSender<SyncRequest>, i64),
 ) -> eyre::Result<()>
 where
     P: Provider + Clone + 'static,
 {
-    let (event, tx) = event;
+    let (event, tx, timestamp) = event;
     cache
         .init_user(&event.user, &tokens, provider.clone())
         .await?;
@@ -1032,12 +1111,12 @@ async fn repay<P>(
     cache: Arc<Cache>,
     provider: Arc<P>,
     tokens: Arc<Tokens>,
-    event: (Repay, SyncSender<SyncRequest>),
+    event: (Repay, SyncSender<SyncRequest>, i64),
 ) -> eyre::Result<()>
 where
     P: Provider + Clone + 'static,
 {
-    let (event, tx) = event;
+    let (event, tx, timestamp) = event;
     cache
         .init_user(&event.user, &tokens, provider.clone())
         .await?;
@@ -1049,12 +1128,12 @@ async fn reserve_used_as_collateral_enabled<P>(
     cache: Arc<Cache>,
     provider: Arc<P>,
     tokens: Arc<Tokens>,
-    event: (ReserveUsedAsCollateralEnabled, SyncSender<SyncRequest>),
+    event: (ReserveUsedAsCollateralEnabled, SyncSender<SyncRequest>, i64),
 ) -> eyre::Result<()>
 where
     P: Provider + Clone + 'static,
 {
-    let (event, tx) = event;
+    let (event, tx, timestamp) = event;
     cache
         .init_user(&event.user, &tokens, provider.clone())
         .await?;
@@ -1066,12 +1145,16 @@ async fn reserve_used_as_collateral_disabled<P>(
     cache: Arc<Cache>,
     provider: Arc<P>,
     tokens: Arc<Tokens>,
-    event: (ReserveUsedAsCollateralDisabled, SyncSender<SyncRequest>),
+    event: (
+        ReserveUsedAsCollateralDisabled,
+        SyncSender<SyncRequest>,
+        i64,
+    ),
 ) -> eyre::Result<()>
 where
     P: Provider + Clone + 'static,
 {
-    let (event, tx) = event;
+    let (event, tx, timestamp) = event;
     cache
         .init_user(&event.user, &tokens, provider.clone())
         .await?;
@@ -1083,12 +1166,12 @@ async fn liquidation_call<P>(
     cache: Arc<Cache>,
     provider: Arc<P>,
     tokens: Arc<Tokens>,
-    event: (LiquidationCall, SyncSender<SyncRequest>),
+    event: (LiquidationCall, SyncSender<SyncRequest>, i64),
 ) -> eyre::Result<()>
 where
     P: Provider + Clone + 'static,
 {
-    let (event, tx) = event;
+    let (event, tx, timestamp) = event;
     cache
         .init_user(&event.user, &tokens, provider.clone())
         .await?;
@@ -1100,12 +1183,12 @@ async fn reserve_data_updated<P>(
     cache: Arc<Cache>,
     provider: Arc<P>,
     tokens: Arc<Tokens>,
-    event: (ReserveDataUpdated, SyncSender<()>),
+    event: (ReserveDataUpdated, SyncSender<()>, i64),
 ) -> eyre::Result<()>
 where
     P: Provider + Clone + 'static,
 {
-    let (event, tx) = event;
+    let (event, tx, timestamp) = event;
     Ok(())
 }
 
@@ -1113,11 +1196,11 @@ async fn answer_updated<P>(
     cache: Arc<Cache>,
     provider: Arc<P>,
     tokens: Arc<Tokens>,
-    event: (AnswerUpdated, Address, SyncSender<()>),
+    event: (AnswerUpdated, Address, SyncSender<()>, i64),
 ) -> eyre::Result<()>
 where
     P: Provider + Clone + 'static,
 {
-    let (event, token, tx) = event;
+    let (event, token, tx, timestamp) = event;
     Ok(())
 }
