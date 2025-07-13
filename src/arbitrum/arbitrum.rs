@@ -12,11 +12,11 @@ use alloy::sol_types::SolEventInterface;
 use bitvec::prelude::*;
 use chrono::Utc;
 use dashmap::DashMap;
-use ndarray::{Array1, Array2, array};
+use ndarray::{array, Array1, Array2};
 use std::collections::HashMap;
 use std::default::Default;
 use std::sync::mpsc::SyncSender;
-use std::sync::{Arc, mpsc};
+use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -978,6 +978,74 @@ impl Cache {
     }
 }
 
+async fn create_user<P>(
+    cache: &Cache,
+    provider: Arc<P>,
+    tokens: &Tokens,
+    user: &Address,
+    tx: &SyncSender<SyncRequest>,
+) -> eyre::Result<bool>
+where
+    P: Provider + Clone,
+{
+    match cache.init_user(user, tokens, provider.clone()).await {
+        Ok(exist) => {
+            if !exist {
+                tx.send(SyncRequest::Both(cache.users.get(user).unwrap().row_num))?;
+
+                cache.calc_hf(Some(user)).await?;
+                return Ok(true);
+            }
+        }
+        Err(e) => {
+            cache.remove_user(user);
+            return Err(e);
+        }
+    }
+
+    Ok(false)
+}
+
+async fn handle_event<F1, R1, F2, R2, F3, R3, F4, R4>(
+    event_timestamp: i64,
+    last_sync: i64,
+    last_modified: i64,
+    new_event: F1,
+    skip_event: F2,
+    sync_user: F3,
+    unknown: F4,
+) -> eyre::Result<()>
+where
+    F1: FnOnce() -> R1,
+    R1: Future<Output = ()> + Send,
+    F2: FnOnce() -> R2,
+    R2: Future<Output = ()> + Send,
+    F3: FnOnce() -> R3,
+    R3: Future<Output = ()> + Send,
+    F4: FnOnce() -> R4,
+    R4: Future<Output = ()> + Send,
+{
+    match event_timestamp {
+        t if t > last_modified => {
+            // new event
+            new_event().await;
+        }
+        t if t <= last_sync => {
+            // skip event
+            skip_event().await;
+        }
+        t if t > last_sync && t <= last_modified => {
+            // remove user and add
+            sync_user().await;
+        }
+        _ => {
+            unknown().await;
+        }
+    }
+
+    Ok(())
+}
+
 async fn supply<P>(
     cache: Arc<Cache>,
     provider: Arc<P>,
@@ -988,84 +1056,96 @@ where
     P: Provider + Clone + 'static,
 {
     let (event, tx, timestamp) = event;
-    match cache
-        .init_user(&event.onBehalfOf, &tokens, provider.clone())
-        .await
-    {
-        Ok(exist) => {
-            if !exist {
-                tx.send(SyncRequest::Both(
-                    cache.users.get(&event.onBehalfOf).unwrap().row_num,
-                ))?;
-
-                cache.calc_hf(Some(&event.onBehalfOf)).await?;
-                return Ok(());
-            }
-        }
-        Err(e) => {
-            warn!("supply failed while initializing user: {:?}", e);
-            cache.remove_user(&event.onBehalfOf);
-            return Ok(());
-        }
-    }
+    create_user(&cache, provider.clone(), &tokens, &event.onBehalfOf, &tx).await?;
 
     let user_settings = cache.users.get(&event.onBehalfOf).unwrap();
     let row_num = user_settings.row_num;
     let idx = tokens.get(&event.reserve).unwrap().order;
-
     let now = Utc::now().timestamp_millis();
+
+    let (c, t) = (cache.clone(), tx.clone());
+    let sync_user = async move || {
+        c.remove_user(&event.onBehalfOf);
+        c.init_user(&event.onBehalfOf, &tokens, provider.clone())
+            .await
+            .unwrap();
+        t.send(SyncRequest::Both(
+            c.users.get(&event.onBehalfOf).unwrap().row_num,
+        ))
+        .unwrap();
+        c.calc_hf(Some(&event.onBehalfOf)).await.unwrap();
+    };
+
+    let (last_sync, last_modified);
     if user_settings.use_as_collateral[idx] {
         let mut collateral_lock = cache.collateral.write().await;
+        (last_sync, last_modified) = (collateral_lock.1, collateral_lock.2);
 
-        match timestamp {
-            t if t > (*collateral_lock).2 => {
-                // new event
-                (collateral_lock.1, collateral_lock.2) = (now, now);
-                let mut row_lock = collateral_lock.0[row_num].write().await;
-                row_lock[idx] += f64::from(event.amount);
+        let new_event = async move || {
+            (collateral_lock.1, collateral_lock.2) = (now, now);
+            let mut row_lock = collateral_lock.0[row_num].write().await;
+            row_lock[idx] += f64::from(event.amount);
+            tx.send(SyncRequest::Collateral(row_num)).unwrap();
+        };
+        let skip_event = async move || {
+            debug!(
+                "event dated before sync:\
+                     event = supply, user = {}, timestamp = {}, collateral sync = {}, collateral timestamp = {}",
+                event.onBehalfOf, timestamp, last_sync, last_modified,
+            );
+        };
+        let unknown = async move || {
+            info!(
+                "detected unknown case:\
+                     event = supply, user = {}, timestamp = {}, collateral sync = {}, collateral timestamp = {}",
+                event.onBehalfOf, timestamp, last_sync, last_modified
+            );
+        };
 
-                tx.send(SyncRequest::Collateral(row_num))?;
-            }
-            t if t <= (*collateral_lock).1 => {
-                // skip event
-                debug!(
-                    "event dated before sync:\
-                     event = supply, user = {}, timestamp = {}, collateral sync = {}, collateral timestamp = {}",
-                    event.onBehalfOf,
-                    timestamp,
-                    (*collateral_lock).1,
-                    (*collateral_lock).2
-                );
-            }
-            t if t > (*collateral_lock).1 && t <= (*collateral_lock).2 => {
-                // remove user and add
-                cache.remove_user(&event.onBehalfOf);
-                cache
-                    .init_user(&event.onBehalfOf, &tokens, provider.clone())
-                    .await?;
-                tx.send(SyncRequest::Both(
-                    cache.users.get(&event.onBehalfOf).unwrap().row_num,
-                ))?;
-                cache.calc_hf(Some(&event.onBehalfOf)).await?;
-            }
-            _ => {
-                info!(
-                    "detected unknown case:\
-                     event = supply, user = {}, timestamp = {}, collateral sync = {}, collateral timestamp = {}",
-                    event.onBehalfOf,
-                    timestamp,
-                    (*collateral_lock).1,
-                    (*collateral_lock).2
-                );
-            }
-        }
+        handle_event(
+            timestamp,
+            last_sync,
+            last_modified,
+            new_event,
+            skip_event,
+            sync_user,
+            unknown,
+        )
+        .await?;
     } else {
-        // todo check timestamp
-
         let mut reserve_lock = cache.reserve.write().await;
-        (reserve_lock.1, reserve_lock.2) = (now, now);
-        let mut row_lock = reserve_lock.0[row_num].write().await;
-        row_lock[idx] += f64::from(event.amount);
+        (last_sync, last_modified) = (reserve_lock.1, reserve_lock.2);
+
+        let new_event = async move || {
+            (reserve_lock.1, reserve_lock.2) = (now, now);
+            let mut row_lock = reserve_lock.0[row_num].write().await;
+            row_lock[idx] += f64::from(event.amount);
+        };
+        let skip_event = async move || {
+            debug!(
+                "event dated before sync:\
+                     event = supply, user = {}, timestamp = {}, reserve sync = {}, reserve timestamp = {}",
+                event.onBehalfOf, timestamp, last_sync, last_modified,
+            );
+        };
+        let unknown = async move || {
+            info!(
+                "detected unknown case:\
+                     event = supply, user = {}, timestamp = {}, reserve sync = {}, reserve timestamp = {}",
+                event.onBehalfOf, timestamp, last_sync, last_modified
+            );
+        };
+
+        handle_event(
+            timestamp,
+            last_sync,
+            last_modified,
+            new_event,
+            skip_event,
+            sync_user,
+            unknown,
+        )
+        .await?;
     }
 
     cache.calc_hf(Some(&event.onBehalfOf)).await?;
