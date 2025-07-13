@@ -12,11 +12,11 @@ use alloy::sol_types::SolEventInterface;
 use bitvec::prelude::*;
 use chrono::Utc;
 use dashmap::DashMap;
-use ndarray::{array, Array1, Array2};
+use ndarray::{Array1, Array2, array};
 use std::collections::HashMap;
 use std::default::Default;
 use std::sync::mpsc::SyncSender;
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -294,15 +294,14 @@ pub async fn start<P>(provider: Arc<P>) -> eyre::Result<()>
 where
     P: Provider + Clone + 'static,
 {
-    let tokens = setup(provider.clone()).await?;
-    let cache = Cache::default();
-    cache.init_lt(&tokens).await?;
+    let tokens = Arc::new(setup(provider.clone()).await?);
+    let cache = Arc::new(Cache::default());
+    liquidation_threshold_update(cache.clone(), tokens.clone(), provider.clone()).await?;
 
     {
-        let el_num = cache.liquidation_threshold.read().await.0.len();
         let now = Utc::now().timestamp_millis();
-        *cache.prices.write().await = (Array1::from_vec(vec![0.0; el_num]), now);
-        *cache.health_factors.write().await = (Array1::from_vec(vec![0.0; el_num]), now);
+        *cache.prices.write().await = (Array1::from_vec(vec![0.0; tokens.len()]), now);
+        *cache.health_factors.write().await = (Array1::from_vec(vec![0.0; tokens.len()]), now);
     }
 
     let (tx_events, rc_events) = mpsc::sync_channel::<AaveEvents>(1000_000);
@@ -311,9 +310,6 @@ where
 
     let w_num = 4;
     let bound = 1000;
-    let cache = Arc::new(cache);
-    let tokens = Arc::new(tokens);
-
     let (mut sync_counter, sync_senders) = (0, listen_sync(cache.clone(), w_num, bound).await?);
     let (mut hf_counter, hf_senders) = (0, listen_hf_calc(cache.clone(), w_num, bound).await?);
 
@@ -509,21 +505,14 @@ struct TokenDetails {
     name: String,
     price_source: Address,
     order: usize,
-    liquidation_threshold: f64,
 }
 
 impl TokenDetails {
-    pub fn new(
-        name: String,
-        price_source: Address,
-        order: usize,
-        liquidation_threshold: f64,
-    ) -> Self {
+    pub fn new(name: String, price_source: Address, order: usize) -> Self {
         Self {
             name,
             price_source,
             order,
-            liquidation_threshold,
         }
     }
 }
@@ -559,24 +548,9 @@ where
 
         debug!("Token: asset_address = {}", asset_source);
 
-        let reserve_configuration_data = aave_protocol_data_provider
-            .getReserveConfigurationData(token.tokenAddress)
-            .call()
-            .await?;
-
-        debug!(
-            "Token: liquidation_threshold = {}",
-            reserve_configuration_data.liquidationThreshold
-        );
-
         tokens.insert(
             token.tokenAddress,
-            TokenDetails::new(
-                token.symbol,
-                asset_source,
-                order,
-                f64::from(reserve_configuration_data.liquidationThreshold),
-            ),
+            TokenDetails::new(token.symbol, asset_source, order),
         );
         order += 1;
     }
@@ -649,6 +623,47 @@ where
             }
         });
     }
+
+    Ok(())
+}
+
+async fn liquidation_threshold_update<P>(
+    cache: Arc<Cache>,
+    tokens: Arc<Tokens>,
+    provider: Arc<P>,
+) -> eyre::Result<()>
+where
+    P: Provider + Clone + 'static,
+{
+    let aave_protocol_data_provider = IAaveProtocolDataProvider::new(
+        AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS.parse()?,
+        provider.clone(),
+    );
+    task::spawn(async move {
+        let mut interval = time::interval(Duration::from_secs(600));
+        loop {
+            let mut data = vec![0.0; tokens.len()];
+            for (token_address, TokenDetails { order, .. }) in tokens.iter() {
+                let reserve_configuration_data = aave_protocol_data_provider
+                    .getReserveConfigurationData(token_address.clone())
+                    .call()
+                    .await
+                    .unwrap();
+
+                debug!(
+                    "Token: liquidation_threshold = {}",
+                    reserve_configuration_data.liquidationThreshold
+                );
+
+                data[order.clone()] = f64::from(reserve_configuration_data.liquidationThreshold);
+            }
+
+            *cache.liquidation_threshold.write().await =
+                (Array1::from(data), Utc::now().timestamp_millis());
+
+            interval.tick().await;
+        }
+    });
 
     Ok(())
 }
@@ -836,26 +851,6 @@ impl Cache {
 
     fn remove_user(&self, addr: &Address) {
         self.users.remove(addr);
-    }
-
-    async fn init_lt(&self, tokens: &Tokens) -> eyre::Result<()> {
-        let mut data = vec![0.0; tokens.len()];
-        tokens.iter().for_each(
-            |(
-                _,
-                TokenDetails {
-                    order,
-                    liquidation_threshold,
-                    ..
-                },
-            )| {
-                data[order.clone()] = liquidation_threshold.clone();
-            },
-        );
-        *self.liquidation_threshold.write().await =
-            (Array1::from(data), Utc::now().timestamp_millis());
-
-        Ok(())
     }
 
     async fn subscribe<P, T, F, Fut>(
