@@ -12,16 +12,16 @@ use alloy::sol_types::SolEventInterface;
 use bitvec::prelude::*;
 use chrono::Utc;
 use dashmap::DashMap;
-use ndarray::{array, Array1, Array2};
+use ndarray::{Array1, Array2, array};
 use std::collections::HashMap;
 use std::default::Default;
 use std::sync::mpsc::SyncSender;
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::{task, time};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 pub const WS_URL: &str = "wss://arb-mainnet.g.alchemy.com/v2/9DDcCoPPxnq-aSjQ8k79vxfLvrhBAXjQ";
 const L2_POOL_ADDRESS: &str = "0x794a61358D6845594F94dc1DB02A252b5b4814aD";
@@ -666,6 +666,9 @@ where
     task::spawn(async move {
         let mut interval = time::interval(Duration::from_secs(600));
         loop {
+
+            // todo we need to calc liquidation threshold in parallel
+
             let mut data = vec![0.0; tokens.len()];
             for (token_address, TokenDetails { order, .. }) in tokens.iter() {
                 let reserve_configuration_data = aave_protocol_data_provider
@@ -813,7 +816,7 @@ impl Cache {
         }
 
         {
-            let mut lock = self.users_num.write().await;
+            let mut user_num_lock = self.users_num.write().await;
 
             // if we have more than one thread in this fn
             if self.contains(user) {
@@ -822,9 +825,9 @@ impl Cache {
 
             self.users.insert(
                 user.clone(),
-                UserSettings::new(*lock, bitvec![usize, Lsb0; 0; tokens.len()]),
+                UserSettings::new(*user_num_lock, bitvec![usize, Lsb0; 0; tokens.len()]),
             );
-            *lock += 1;
+            *user_num_lock += 1;
         }
 
         let aave_protocol_data_provider = IAaveProtocolDataProvider::new(
@@ -833,11 +836,11 @@ impl Cache {
         );
         let tasks = tokens.iter().map(|(token_address, _)| {
             let provider = aave_protocol_data_provider.clone();
-            let user = user.clone();
+            let u = user.clone();
             async move {
                 (
                     provider
-                        .getUserReserveData(token_address.clone(), user)
+                        .getUserReserveData(token_address.clone(), u)
                         .call()
                         .await
                         .unwrap(),
@@ -1024,6 +1027,7 @@ where
             if !exist {
                 tx.send(SyncRequest::Both(cache.users.get(user).unwrap().row_num))?;
 
+                // todo we have to calc hf in a separate channel
                 cache.calc_hf(Some(user)).await?;
                 return Ok(true);
             }
@@ -1112,7 +1116,6 @@ where
                 c.users.get(&event.onBehalfOf).unwrap().row_num,
             ))
             .unwrap();
-
         hf_t.send(HFRequest::User(event.onBehalfOf)).unwrap();
     };
 
@@ -1126,6 +1129,7 @@ where
             let mut row_lock = collateral_lock.0[row_num].write().await;
             row_lock[idx] += f64::from(event.amount);
             sync_tx.send(SyncRequest::Collateral(row_num)).unwrap();
+            hf_tx.send(HFRequest::User(event.onBehalfOf)).unwrap();
         };
         let skip_event = async move || {
             debug!(
@@ -1187,8 +1191,6 @@ where
         )
         .await?;
     }
-
-    hf_tx.send(HFRequest::User(event.onBehalfOf))?;
     Ok(())
 }
 
