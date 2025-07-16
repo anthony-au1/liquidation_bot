@@ -666,23 +666,31 @@ where
     task::spawn(async move {
         let mut interval = time::interval(Duration::from_secs(600));
         loop {
-
-            // todo we need to calc liquidation threshold in parallel
-
             let mut data = vec![0.0; tokens.len()];
-            for (token_address, TokenDetails { order, .. }) in tokens.iter() {
-                let reserve_configuration_data = aave_protocol_data_provider
-                    .getReserveConfigurationData(token_address.clone())
-                    .call()
-                    .await
-                    .unwrap();
+            let tasks = tokens
+                .iter()
+                .map(|(token_address, TokenDetails { order, .. })| {
+                    let provider = aave_protocol_data_provider.clone();
+                    async move {
+                        (
+                            provider
+                                .getReserveConfigurationData(token_address.clone())
+                                .call()
+                                .await
+                                .unwrap(),
+                            token_address.clone(),
+                            order,
+                        )
+                    }
+                });
 
+            for (rs, token_address, order) in futures::future::join_all(tasks).await {
                 debug!(
-                    "Token: liquidation_threshold = {}",
-                    reserve_configuration_data.liquidationThreshold
+                    "Token: token_address = {}, liquidation_threshold = {}",
+                    token_address, rs.liquidationThreshold
                 );
 
-                data[order.clone()] = f64::from(reserve_configuration_data.liquidationThreshold);
+                data[order.clone()] = f64::from(rs.liquidationThreshold);
             }
 
             let (lt, _) = &*cache.liquidation_threshold.read().await;
@@ -1017,7 +1025,8 @@ async fn create_user<P>(
     provider: Arc<P>,
     tokens: &Tokens,
     user: &Address,
-    tx: &SyncSender<SyncRequest>,
+    sync_tx: &SyncSender<SyncRequest>,
+    hf_tx: &SyncSender<HFRequest>,
 ) -> eyre::Result<bool>
 where
     P: Provider + Clone,
@@ -1025,10 +1034,8 @@ where
     match cache.init_user(user, tokens, provider.clone()).await {
         Ok(exist) => {
             if !exist {
-                tx.send(SyncRequest::Both(cache.users.get(user).unwrap().row_num))?;
-
-                // todo we have to calc hf in a separate channel
-                cache.calc_hf(Some(user)).await?;
+                sync_tx.send(SyncRequest::Both(cache.users.get(user).unwrap().row_num))?;
+                hf_tx.send(HFRequest::User(user.clone()))?;
                 return Ok(true);
             }
         }
@@ -1097,6 +1104,7 @@ where
         &tokens,
         &event.onBehalfOf,
         &sync_tx,
+        &hf_tx,
     )
     .await?;
 
