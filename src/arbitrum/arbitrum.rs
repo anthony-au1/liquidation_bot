@@ -12,13 +12,16 @@ use alloy::sol_types::SolEventInterface;
 use bitvec::prelude::*;
 use chrono::Utc;
 use dashmap::DashMap;
+use futures::FutureExt;
+use futures::future::join_all;
 use ndarray::{Array1, Array2, array};
+use std::any::Any;
 use std::collections::HashMap;
 use std::default::Default;
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, mpsc};
-use std::thread;
 use std::time::Duration;
+use std::{panic, thread};
 use tokio::sync::RwLock;
 use tokio::{task, time};
 use tracing::{debug, error, info};
@@ -295,12 +298,17 @@ where
     P: Provider + Clone + 'static,
 {
     let tokens = Arc::new(setup(provider.clone()).await?);
+
+    debug!("start: tokens = {:?}", tokens);
+
     let cache = Arc::new(Cache::default());
 
     {
         let now = Utc::now().timestamp_millis();
         *cache.prices.write().await =
             (Array1::from_vec(vec![f64::MIN_POSITIVE; tokens.len()]), now);
+        *cache.liquidation_threshold.write().await =
+            (Array1::from_vec(vec![0.0; tokens.len()]), now);
         *cache.health_factors.write().await = (Array1::from_vec(vec![0.0; tokens.len()]), now);
     }
 
@@ -417,113 +425,118 @@ where
         answer_updated: usize,
     }
     let mut counters = EventCounter::default();
-    while let Ok(event) = rc_events.recv() {
-        match event {
-            AaveEvents::IL2PoolEvents(event, timestamp) => match event {
-                IL2PoolEvents::Supply(ev) => {
-                    supply_txs[counters.supply % w_num].send((
-                        ev,
-                        sync_senders[sync_counter % w_num].clone(),
-                        hf_senders[hf_counter % w_num].clone(),
-                        timestamp,
-                    ))?;
-                    counters.supply = counters.supply.wrapping_add(1);
-                    sync_counter = sync_counter.wrapping_add(1);
-                }
-                IL2PoolEvents::Withdraw(ev) => {
-                    withdraw_txs[counters.withdraw % w_num].send((
-                        ev,
-                        sync_senders[sync_counter % w_num].clone(),
-                        hf_senders[hf_counter % w_num].clone(),
-                        timestamp,
-                    ))?;
-                    counters.withdraw = counters.withdraw.wrapping_add(1);
-                    sync_counter = sync_counter.wrapping_add(1);
-                }
-                IL2PoolEvents::Borrow(ev) => {
-                    borrow_txs[counters.borrow % w_num].send((
-                        ev,
-                        sync_senders[sync_counter % w_num].clone(),
-                        hf_senders[hf_counter % w_num].clone(),
-                        timestamp,
-                    ))?;
-                    counters.borrow = counters.borrow.wrapping_add(1);
-                    sync_counter = sync_counter.wrapping_add(1);
-                }
-                IL2PoolEvents::Repay(ev) => {
-                    repay_txs[counters.repay % w_num].send((
-                        ev,
-                        sync_senders[sync_counter % w_num].clone(),
-                        hf_senders[hf_counter % w_num].clone(),
-                        timestamp,
-                    ))?;
-                    counters.repay = counters.repay.wrapping_add(1);
-                    sync_counter = sync_counter.wrapping_add(1);
-                }
-                IL2PoolEvents::ReserveUsedAsCollateralEnabled(ev) => {
-                    reserve_used_as_collateral_enabled_txs
-                        [counters.reserve_used_as_collateral_enabled % w_num]
-                        .send((
-                            ev,
-                            sync_senders[sync_counter % w_num].clone(),
-                            hf_senders[hf_counter % w_num].clone(),
-                            timestamp,
-                        ))?;
-                    counters.reserve_used_as_collateral_enabled =
-                        counters.reserve_used_as_collateral_enabled.wrapping_add(1);
-                    sync_counter = sync_counter.wrapping_add(1);
-                }
-                IL2PoolEvents::ReserveUsedAsCollateralDisabled(ev) => {
-                    reserve_used_as_collateral_disabled_txs
-                        [counters.reserve_used_as_collateral_disabled % w_num]
-                        .send((
-                            ev,
-                            sync_senders[sync_counter % w_num].clone(),
-                            hf_senders[hf_counter % w_num].clone(),
-                            timestamp,
-                        ))?;
-                    counters.reserve_used_as_collateral_disabled =
-                        counters.reserve_used_as_collateral_disabled.wrapping_add(1);
-                    sync_counter = sync_counter.wrapping_add(1);
-                }
-                IL2PoolEvents::LiquidationCall(ev) => {
-                    liquidation_call_txs[counters.liquidation_call % w_num].send((
-                        ev,
-                        sync_senders[sync_counter % w_num].clone(),
-                        hf_senders[hf_counter % w_num].clone(),
-                        timestamp,
-                    ))?;
-                    counters.liquidation_call = counters.liquidation_call.wrapping_add(1);
-                    sync_counter = sync_counter.wrapping_add(1);
-                }
-                IL2PoolEvents::ReserveDataUpdated(ev) => {
-                    reserve_data_updated_txs[counters.reserve_data_updated % w_num].send((
-                        ev,
-                        hf_senders[hf_counter % w_num].clone(),
-                        timestamp,
-                    ))?;
-                    counters.reserve_data_updated = counters.reserve_data_updated.wrapping_add(1);
-                }
-            },
-            AaveEvents::IChainlinkAggregatorEvents(event, token, timestamp) => match event {
-                IChainlinkAggregatorEvents::AnswerUpdated(ev) => {
-                    answer_updated_txs[counters.answer_updated % w_num].send((
-                        ev,
-                        token,
-                        hf_senders[hf_counter % w_num].clone(),
-                        timestamp,
-                    ))?;
-                    counters.answer_updated = counters.answer_updated.wrapping_add(1);
-                }
-            },
-        }
-        hf_counter = hf_counter.wrapping_add(1);
-    }
+    // while let Ok(event) = rc_events.recv() {
+    //     match event {
+    //         AaveEvents::IL2PoolEvents(event, timestamp) => match event {
+    //             IL2PoolEvents::Supply(ev) => {
+    //                 supply_txs[counters.supply % w_num].send((
+    //                     ev,
+    //                     sync_senders[sync_counter % w_num].clone(),
+    //                     hf_senders[hf_counter % w_num].clone(),
+    //                     timestamp,
+    //                 ))?;
+    //                 counters.supply = counters.supply.wrapping_add(1);
+    //                 sync_counter = sync_counter.wrapping_add(1);
+    //             }
+    //             IL2PoolEvents::Withdraw(ev) => {
+    //                 withdraw_txs[counters.withdraw % w_num].send((
+    //                     ev,
+    //                     sync_senders[sync_counter % w_num].clone(),
+    //                     hf_senders[hf_counter % w_num].clone(),
+    //                     timestamp,
+    //                 ))?;
+    //                 counters.withdraw = counters.withdraw.wrapping_add(1);
+    //                 sync_counter = sync_counter.wrapping_add(1);
+    //             }
+    //             IL2PoolEvents::Borrow(ev) => {
+    //                 borrow_txs[counters.borrow % w_num].send((
+    //                     ev,
+    //                     sync_senders[sync_counter % w_num].clone(),
+    //                     hf_senders[hf_counter % w_num].clone(),
+    //                     timestamp,
+    //                 ))?;
+    //                 counters.borrow = counters.borrow.wrapping_add(1);
+    //                 sync_counter = sync_counter.wrapping_add(1);
+    //             }
+    //             IL2PoolEvents::Repay(ev) => {
+    //                 repay_txs[counters.repay % w_num].send((
+    //                     ev,
+    //                     sync_senders[sync_counter % w_num].clone(),
+    //                     hf_senders[hf_counter % w_num].clone(),
+    //                     timestamp,
+    //                 ))?;
+    //                 counters.repay = counters.repay.wrapping_add(1);
+    //                 sync_counter = sync_counter.wrapping_add(1);
+    //             }
+    //             IL2PoolEvents::ReserveUsedAsCollateralEnabled(ev) => {
+    //                 reserve_used_as_collateral_enabled_txs
+    //                     [counters.reserve_used_as_collateral_enabled % w_num]
+    //                     .send((
+    //                         ev,
+    //                         sync_senders[sync_counter % w_num].clone(),
+    //                         hf_senders[hf_counter % w_num].clone(),
+    //                         timestamp,
+    //                     ))?;
+    //                 counters.reserve_used_as_collateral_enabled =
+    //                     counters.reserve_used_as_collateral_enabled.wrapping_add(1);
+    //                 sync_counter = sync_counter.wrapping_add(1);
+    //             }
+    //             IL2PoolEvents::ReserveUsedAsCollateralDisabled(ev) => {
+    //                 reserve_used_as_collateral_disabled_txs
+    //                     [counters.reserve_used_as_collateral_disabled % w_num]
+    //                     .send((
+    //                         ev,
+    //                         sync_senders[sync_counter % w_num].clone(),
+    //                         hf_senders[hf_counter % w_num].clone(),
+    //                         timestamp,
+    //                     ))?;
+    //                 counters.reserve_used_as_collateral_disabled =
+    //                     counters.reserve_used_as_collateral_disabled.wrapping_add(1);
+    //                 sync_counter = sync_counter.wrapping_add(1);
+    //             }
+    //             IL2PoolEvents::LiquidationCall(ev) => {
+    //                 liquidation_call_txs[counters.liquidation_call % w_num].send((
+    //                     ev,
+    //                     sync_senders[sync_counter % w_num].clone(),
+    //                     hf_senders[hf_counter % w_num].clone(),
+    //                     timestamp,
+    //                 ))?;
+    //                 counters.liquidation_call = counters.liquidation_call.wrapping_add(1);
+    //                 sync_counter = sync_counter.wrapping_add(1);
+    //             }
+    //             IL2PoolEvents::ReserveDataUpdated(ev) => {
+    //                 reserve_data_updated_txs[counters.reserve_data_updated % w_num].send((
+    //                     ev,
+    //                     hf_senders[hf_counter % w_num].clone(),
+    //                     timestamp,
+    //                 ))?;
+    //                 counters.reserve_data_updated = counters.reserve_data_updated.wrapping_add(1);
+    //             }
+    //         },
+    //         AaveEvents::IChainlinkAggregatorEvents(event, token, timestamp) => match event {
+    //             IChainlinkAggregatorEvents::AnswerUpdated(ev) => {
+    //                 answer_updated_txs[counters.answer_updated % w_num].send((
+    //                     ev,
+    //                     token,
+    //                     hf_senders[hf_counter % w_num].clone(),
+    //                     timestamp,
+    //                 ))?;
+    //                 counters.answer_updated = counters.answer_updated.wrapping_add(1);
+    //             }
+    //         },
+    //     }
+    //     hf_counter = hf_counter.wrapping_add(1);
+    // }
+
+
+    thread::sleep(Duration::from_secs(30));
 
     Ok(())
 }
 
 type Tokens = HashMap<Address, TokenDetails>;
+
+#[derive(Debug)]
 struct TokenDetails {
     name: String,
     price_source: Address,
@@ -560,7 +573,7 @@ where
     let mut order = 0;
     for token in token_data {
         debug!(
-            "Token: symbol = {}, address = {}",
+            "setup: token symbol = {}, token address = {}",
             token.symbol, token.tokenAddress
         );
 
@@ -569,7 +582,7 @@ where
             .call()
             .await?;
 
-        debug!("Token: asset_address = {}", asset_source);
+        debug!("setup: token asset_address = {}", asset_source);
 
         tokens.insert(
             token.tokenAddress,
@@ -579,6 +592,16 @@ where
     }
 
     Ok(tokens)
+}
+
+fn handle_panic(err: Option<Box<dyn Any + Send>>, msg: &str) {
+    if let Some(e) = err {
+        if let Some(s) = e.downcast_ref::<&str>() {
+            error!("{} error = {}", msg, s);
+        } else if let Some(s) = e.downcast_ref::<String>() {
+            error!("{} error = {}", msg, s);
+        }
+    }
 }
 
 enum AaveEvents {
@@ -595,20 +618,51 @@ where
     let mut stream = provider.subscribe_logs(&filter).await?;
 
     task::spawn(async move {
-        while let Ok(log) = stream.recv().await {
-            if let Ok(Log { data, .. }) = IL2PoolEvents::decode_log(log.as_ref()) {
-                if tx
-                    .send(AaveEvents::IL2PoolEvents(
-                        data,
-                        Utc::now().timestamp_millis(),
-                    ))
-                    .is_err()
-                {
-                    info!("Main thread dropped receiver for pool events, exiting background task.");
-                    break;
+        let panicked = panic::AssertUnwindSafe(async move {
+            while let Ok(log) = stream.recv().await {
+                if let Ok(Log { data, .. }) = IL2PoolEvents::decode_log(log.as_ref()) {
+
+                    match data {
+                        IL2PoolEvents::Supply(_) => debug!("listen_events: supply event"),
+                        IL2PoolEvents::Withdraw(_) => debug!("listen_events: withdraw event"),
+                        IL2PoolEvents::Borrow(_) => debug!("listen_events: borrow event"),
+                        IL2PoolEvents::Repay(_) => debug!("listen_events: repay event"),
+                        IL2PoolEvents::ReserveUsedAsCollateralEnabled(_) => debug!("listen_events: enable collateral event"),
+                        IL2PoolEvents::ReserveUsedAsCollateralDisabled(_) => debug!("listen_events: disable collateral event"),
+                        IL2PoolEvents::LiquidationCall(_) => debug!("listen_events: liquidation event"),
+                        IL2PoolEvents::ReserveDataUpdated(_) => debug!("listen_events: reserve data updated event"),
+                    }
+
+                    let r = tx
+                        .send(AaveEvents::IL2PoolEvents(
+                            data,
+                            Utc::now().timestamp_millis(),
+                        ));
+
+                    match r.err() {
+                        Some(_) => debug!("listen_events: error"),
+                        None => debug!("listen_events: OK")
+                    }
+
+                    // if tx
+                    //     .send(AaveEvents::IL2PoolEvents(
+                    //         data,
+                    //         Utc::now().timestamp_millis(),
+                    //     ))
+                    //     .is_err()
+                    // {
+                    //     info!(
+                    //         "Main thread dropped receiver for pool events, exiting background task."
+                    //     );
+                    //     break;
+                    // }
                 }
             }
-        }
+        })
+        .catch_unwind()
+        .await;
+
+        handle_panic(panicked.err(), "listen_events:");
     });
 
     Ok(())
@@ -628,22 +682,26 @@ where
 
         let (t, name) = (tx.clone(), token_name.clone());
         task::spawn(async move {
-            while let Ok(log) = stream.recv().await {
-                if let Ok(Log { data, .. }) = IChainlinkAggregatorEvents::decode_log(log.as_ref()) {
-                    if t.send(AaveEvents::IChainlinkAggregatorEvents(
-                        data,
-                        name,
-                        Utc::now().timestamp_millis(),
-                    ))
-                    .is_err()
-                    {
-                        info!(
+            let panicked = panic::AssertUnwindSafe(async move {
+                while let Ok(log) = stream.recv().await {
+                    if let Ok(Log { data, .. }) = IChainlinkAggregatorEvents::decode_log(log.as_ref()) {
+                        if t.send(AaveEvents::IChainlinkAggregatorEvents(
+                            data,
+                            name,
+                            Utc::now().timestamp_millis(),
+                        ))
+                            .is_err()
+                        {
+                            info!(
                             "Main thread dropped receiver for chainlink events, exiting background task."
                         );
-                        break;
+                            break;
+                        }
                     }
                 }
-            }
+            }).catch_unwind().await;
+
+            handle_panic(panicked.err(), "listen_price_update:");
         });
     }
 
@@ -654,7 +712,7 @@ async fn liquidation_threshold_update<P>(
     cache: Arc<Cache>,
     tokens: Arc<Tokens>,
     provider: Arc<P>,
-    tx: SyncSender<HFRequest>,
+    hf_tx: SyncSender<HFRequest>,
 ) -> eyre::Result<()>
 where
     P: Provider + Clone + 'static,
@@ -666,10 +724,12 @@ where
     task::spawn(async move {
         let mut interval = time::interval(Duration::from_secs(600));
         loop {
+            interval.tick().await;
+
             let mut data = vec![0.0; tokens.len()];
             let tasks = tokens
                 .iter()
-                .map(|(token_address, TokenDetails { order, .. })| {
+                .map(|(token_address, TokenDetails { name, order, .. })| {
                     let provider = aave_protocol_data_provider.clone();
                     async move {
                         (
@@ -678,29 +738,31 @@ where
                                 .call()
                                 .await
                                 .unwrap(),
-                            token_address.clone(),
+                            name.clone(),
                             order,
                         )
                     }
                 });
 
-            for (rs, token_address, order) in futures::future::join_all(tasks).await {
+            for (rs, name, order) in join_all(tasks).await {
                 debug!(
-                    "Token: token_address = {}, liquidation_threshold = {}",
-                    token_address, rs.liquidationThreshold
+                    "liquidation_threshold_update: name = {}, liquidation_threshold = {}",
+                    name, rs.liquidationThreshold
                 );
 
                 data[order.clone()] = f64::from(rs.liquidationThreshold);
             }
 
-            let (lt, _) = &*cache.liquidation_threshold.read().await;
             let d = Array1::from_vec(data);
-            if !d.iter().zip(lt).all(|(a, b)| (a - b).abs() < 1e-8) {
-                *cache.liquidation_threshold.write().await = (d, Utc::now().timestamp_millis());
-                tx.send(HFRequest::Full).unwrap();
-            }
+            let lt_modified = {
+                let (lt, _) = &*cache.liquidation_threshold.read().await;
+                !d.iter().zip(lt).all(|(a, b)| (a - b).abs() < 1e-8)
+            };
 
-            interval.tick().await;
+            if lt_modified {
+                *cache.liquidation_threshold.write().await = (d, Utc::now().timestamp_millis());
+                hf_tx.send(HFRequest::Full).unwrap();
+            }
         }
     });
 
@@ -723,19 +785,25 @@ async fn listen_sync(
         let (tx, rc) = mpsc::sync_channel::<SyncRequest>(bound);
         let c = cache.clone();
         task::spawn(async move {
-            while let Ok(sync_rq) = rc.recv() {
-                match sync_rq {
-                    SyncRequest::Collateral(row_num) => {
-                        let _ = c.sync_collateral(row_num).await;
-                    }
-                    SyncRequest::Borrowed(row_num) => {
-                        let _ = c.sync_borrowed(row_num).await;
-                    }
-                    SyncRequest::Both(row_num) => {
-                        let _ = c.sync_data(row_num).await;
+            let panicked = panic::AssertUnwindSafe(async move {
+                while let Ok(sync_rq) = rc.recv() {
+                    match sync_rq {
+                        SyncRequest::Collateral(row_num) => {
+                            let _ = c.sync_collateral(row_num).await;
+                        }
+                        SyncRequest::Borrowed(row_num) => {
+                            let _ = c.sync_borrowed(row_num).await;
+                        }
+                        SyncRequest::Both(row_num) => {
+                            let _ = c.sync_data(row_num).await;
+                        }
                     }
                 }
-            }
+            })
+            .catch_unwind()
+            .await;
+
+            handle_panic(panicked.err(), "listen_sync:");
         });
         senders.push(tx);
     }
@@ -758,12 +826,30 @@ async fn listen_hf_calc(
         let (tx, rc) = mpsc::sync_channel::<HFRequest>(bound);
         let c = cache.clone();
         task::spawn(async move {
-            while let Ok(hf_rq) = rc.recv() {
-                match hf_rq {
-                    HFRequest::User(user) => c.calc_hf(Some(&user)).await.unwrap(),
-                    HFRequest::Full => c.calc_hf(None).await.unwrap(),
+            let panicked = panic::AssertUnwindSafe(async move {
+                while let Ok(hf_rq) = rc.recv() {
+                    match hf_rq {
+                        HFRequest::User(user) => match c.calc_hf(Some(&user)).await {
+                            Ok(_) => {
+                                let (hf, _) = &*c.health_factors.read().await;
+                                debug!("listen_hf_calc: user = {}, hf = {}", user, hf);
+                            }
+                            Err(e) => error!("listen_hf_calc: user = {}, error = {:?}", user, e),
+                        },
+                        HFRequest::Full => match c.calc_hf(None).await {
+                            Ok(_) => {
+                                let (hf, _) = &*c.health_factors.read().await;
+                                debug!("listen_hf_calc: hf = {}", hf);
+                            }
+                            Err(e) => error!("listen_hf_calc: error = {:?}", e),
+                        },
+                    }
                 }
-            }
+            })
+            .catch_unwind()
+            .await;
+
+            handle_panic(panicked.err(), "listen_hf_calc:");
         });
         senders.push(tx);
     }
@@ -776,7 +862,7 @@ type Array = RwLock<(Array1<f64>, i64)>;
 type Arrays = RwLock<(Vec<RwLock<Array1<f64>>>, i64, i64)>;
 type Matrix = RwLock<Array2<f64>>;
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct UserSettings {
     row_num: usize,
     use_as_collateral: BitVec<usize, Lsb0>,
@@ -791,7 +877,7 @@ impl UserSettings {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct Cache {
     users: UserDetails,
     users_num: RwLock<usize>,
@@ -1097,108 +1183,110 @@ async fn supply<P>(
 where
     P: Provider + Clone + 'static,
 {
-    let (event, sync_tx, hf_tx, timestamp) = event;
-    create_user(
-        &cache,
-        provider.clone(),
-        &tokens,
-        &event.onBehalfOf,
-        &sync_tx,
-        &hf_tx,
-    )
-    .await?;
+    debug!("supply: called");
 
-    let user_settings = cache.users.get(&event.onBehalfOf).unwrap();
-    let row_num = user_settings.row_num;
-    let idx = tokens.get(&event.reserve).unwrap().order;
-    let now = Utc::now().timestamp_millis();
-
-    let (c, sync_t, hf_t) = (cache.clone(), sync_tx.clone(), hf_tx.clone());
-    let sync_user = async move || {
-        c.remove_user(&event.onBehalfOf);
-        c.init_user(&event.onBehalfOf, &tokens, provider.clone())
-            .await
-            .unwrap();
-        sync_t
-            .send(SyncRequest::Both(
-                c.users.get(&event.onBehalfOf).unwrap().row_num,
-            ))
-            .unwrap();
-        hf_t.send(HFRequest::User(event.onBehalfOf)).unwrap();
-    };
-
-    let (last_sync, last_modified);
-    if user_settings.use_as_collateral[idx] {
-        let mut collateral_lock = cache.collateral.write().await;
-        (last_sync, last_modified) = (collateral_lock.1, collateral_lock.2);
-
-        let new_event = async move || {
-            (collateral_lock.1, collateral_lock.2) = (now, now);
-            let mut row_lock = collateral_lock.0[row_num].write().await;
-            row_lock[idx] += f64::from(event.amount);
-            sync_tx.send(SyncRequest::Collateral(row_num)).unwrap();
-            hf_tx.send(HFRequest::User(event.onBehalfOf)).unwrap();
-        };
-        let skip_event = async move || {
-            debug!(
-                "event dated before sync:\
-                     event = supply, user = {}, timestamp = {}, collateral sync = {}, collateral timestamp = {}",
-                event.onBehalfOf, timestamp, last_sync, last_modified,
-            );
-        };
-        let unknown = async move || {
-            info!(
-                "detected unknown case:\
-                     event = supply, user = {}, timestamp = {}, collateral sync = {}, collateral timestamp = {}",
-                event.onBehalfOf, timestamp, last_sync, last_modified
-            );
-        };
-
-        handle_event(
-            timestamp,
-            last_sync,
-            last_modified,
-            new_event,
-            skip_event,
-            sync_user,
-            unknown,
-        )
-        .await?;
-    } else {
-        let mut reserve_lock = cache.reserve.write().await;
-        (last_sync, last_modified) = (reserve_lock.1, reserve_lock.2);
-
-        let new_event = async move || {
-            (reserve_lock.1, reserve_lock.2) = (now, now);
-            let mut row_lock = reserve_lock.0[row_num].write().await;
-            row_lock[idx] += f64::from(event.amount);
-        };
-        let skip_event = async move || {
-            debug!(
-                "event dated before sync:\
-                     event = supply, user = {}, timestamp = {}, reserve sync = {}, reserve timestamp = {}",
-                event.onBehalfOf, timestamp, last_sync, last_modified,
-            );
-        };
-        let unknown = async move || {
-            info!(
-                "detected unknown case:\
-                     event = supply, user = {}, timestamp = {}, reserve sync = {}, reserve timestamp = {}",
-                event.onBehalfOf, timestamp, last_sync, last_modified
-            );
-        };
-
-        handle_event(
-            timestamp,
-            last_sync,
-            last_modified,
-            new_event,
-            skip_event,
-            sync_user,
-            unknown,
-        )
-        .await?;
-    }
+    // let (event, sync_tx, hf_tx, timestamp) = event;
+    // create_user(
+    //     &cache,
+    //     provider.clone(),
+    //     &tokens,
+    //     &event.onBehalfOf,
+    //     &sync_tx,
+    //     &hf_tx,
+    // )
+    // .await?;
+    //
+    // let user_settings = cache.users.get(&event.onBehalfOf).unwrap();
+    // let row_num = user_settings.row_num;
+    // let idx = tokens.get(&event.reserve).unwrap().order;
+    // let now = Utc::now().timestamp_millis();
+    //
+    // let (c, sync_t, hf_t) = (cache.clone(), sync_tx.clone(), hf_tx.clone());
+    // let sync_user = async move || {
+    //     c.remove_user(&event.onBehalfOf);
+    //     c.init_user(&event.onBehalfOf, &tokens, provider.clone())
+    //         .await
+    //         .unwrap();
+    //     sync_t
+    //         .send(SyncRequest::Both(
+    //             c.users.get(&event.onBehalfOf).unwrap().row_num,
+    //         ))
+    //         .unwrap();
+    //     hf_t.send(HFRequest::User(event.onBehalfOf)).unwrap();
+    // };
+    //
+    // let (last_sync, last_modified);
+    // if user_settings.use_as_collateral[idx] {
+    //     let mut collateral_lock = cache.collateral.write().await;
+    //     (last_sync, last_modified) = (collateral_lock.1, collateral_lock.2);
+    //
+    //     let new_event = async move || {
+    //         (collateral_lock.1, collateral_lock.2) = (now, now);
+    //         let mut row_lock = collateral_lock.0[row_num].write().await;
+    //         row_lock[idx] += f64::from(event.amount);
+    //         sync_tx.send(SyncRequest::Collateral(row_num)).unwrap();
+    //         hf_tx.send(HFRequest::User(event.onBehalfOf)).unwrap();
+    //     };
+    //     let skip_event = async move || {
+    //         debug!(
+    //             "event dated before sync:\
+    //                  event = supply, user = {}, timestamp = {}, collateral sync = {}, collateral timestamp = {}",
+    //             event.onBehalfOf, timestamp, last_sync, last_modified,
+    //         );
+    //     };
+    //     let unknown = async move || {
+    //         info!(
+    //             "detected unknown case:\
+    //                  event = supply, user = {}, timestamp = {}, collateral sync = {}, collateral timestamp = {}",
+    //             event.onBehalfOf, timestamp, last_sync, last_modified
+    //         );
+    //     };
+    //
+    //     handle_event(
+    //         timestamp,
+    //         last_sync,
+    //         last_modified,
+    //         new_event,
+    //         skip_event,
+    //         sync_user,
+    //         unknown,
+    //     )
+    //     .await?;
+    // } else {
+    //     let mut reserve_lock = cache.reserve.write().await;
+    //     (last_sync, last_modified) = (reserve_lock.1, reserve_lock.2);
+    //
+    //     let new_event = async move || {
+    //         (reserve_lock.1, reserve_lock.2) = (now, now);
+    //         let mut row_lock = reserve_lock.0[row_num].write().await;
+    //         row_lock[idx] += f64::from(event.amount);
+    //     };
+    //     let skip_event = async move || {
+    //         debug!(
+    //             "event dated before sync:\
+    //                  event = supply, user = {}, timestamp = {}, reserve sync = {}, reserve timestamp = {}",
+    //             event.onBehalfOf, timestamp, last_sync, last_modified,
+    //         );
+    //     };
+    //     let unknown = async move || {
+    //         info!(
+    //             "detected unknown case:\
+    //                  event = supply, user = {}, timestamp = {}, reserve sync = {}, reserve timestamp = {}",
+    //             event.onBehalfOf, timestamp, last_sync, last_modified
+    //         );
+    //     };
+    //
+    //     handle_event(
+    //         timestamp,
+    //         last_sync,
+    //         last_modified,
+    //         new_event,
+    //         skip_event,
+    //         sync_user,
+    //         unknown,
+    //     )
+    //     .await?;
+    // }
     Ok(())
 }
 

@@ -1,7 +1,7 @@
 mod arbitrum;
 
 use std::sync::Arc;
-use crate::arbitrum::arbitrum::{start, test_me};
+use crate::arbitrum::arbitrum::{start};
 use alloy::providers::{ProviderBuilder, WsConnect};
 use clap::{Parser, Subcommand};
 use tracing::info;
@@ -32,12 +32,12 @@ async fn main() -> eyre::Result<()> {
         .with_env_filter(EnvFilter::from_default_env())
         .init();
 
-    info!("App is starting ...");
+    info!("app is starting ...");
 
     let args = Cli::parse();
     match args.commands {
         Commands::Start => {
-            info!("Starting Liquidation bot");
+            info!("starting liquidation bot");
 
             let provider = ProviderBuilder::new()
                 .connect_ws(WsConnect::new(arbitrum::arbitrum::WS_URL))
@@ -51,7 +51,7 @@ async fn main() -> eyre::Result<()> {
             // test_me().await?;
         }
         Commands::Stop => {
-            info!("Stopping Liquidation bot");
+            info!("stopping liquidation bot");
         }
     }
 
