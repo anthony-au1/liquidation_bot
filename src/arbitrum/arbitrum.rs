@@ -14,12 +14,11 @@ use chrono::Utc;
 use dashmap::DashMap;
 use futures::FutureExt;
 use futures::future::join_all;
-use ndarray::{Array1, Array2, array};
+use ndarray::{Array1, Array2, Axis, array, concatenate};
 use std::any::Any;
 use std::collections::HashMap;
 use std::default::Default;
 use std::panic;
-use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -305,12 +304,13 @@ where
     let cache = Arc::new(Cache::default());
 
     {
+        *cache.collateral_matrix.write().await = Array2::from_elem((1, tokens.len()), 0.);
+        *cache.borrowed_matrix.write().await = Array2::from_elem((1, tokens.len()), 0.);
+
         let now = Utc::now().timestamp_millis();
-        *cache.prices.write().await =
-            (Array1::from_vec(vec![f64::MIN_POSITIVE; tokens.len()]), now);
-        *cache.liquidation_threshold.write().await =
-            (Array1::from_vec(vec![0.0; tokens.len()]), now);
-        *cache.health_factors.write().await = (Array1::from_vec(vec![0.0; tokens.len()]), now);
+        *cache.prices.write().await = (Array1::from_elem(tokens.len(), 0.), now);
+        *cache.liquidation_threshold.write().await = (Array1::from_elem(tokens.len(), 0.), now);
+        *cache.health_factors.write().await = (Array1::from_elem(1, 0.), now);
     }
 
     let (tx_events, mut rc_events) = channel::<AaveEvents>(1000_000);
@@ -920,6 +920,7 @@ impl Cache {
         P: Provider + Clone,
     {
         if self.contains(user) {
+            debug!("init_user: existing user = {}", user);
             return Ok(true);
         }
 
@@ -928,8 +929,11 @@ impl Cache {
 
             // if we have more than one thread in this fn
             if self.contains(user) {
+                debug!("init_user: existing user = {} second attempt", user);
                 return Ok(true);
             }
+
+            debug!("init_user: new user = {}", user);
 
             self.users.insert(
                 user.clone(),
@@ -979,18 +983,24 @@ impl Cache {
             let mut locked = self.collateral.write().await;
             locked.0.push(RwLock::new(Array1::from(collateral)));
             (locked.1, locked.2) = (now, now);
+
+            debug!("init_user: new collateral = {:?}", locked.1);
         }
 
         {
             let mut locked = self.reserve.write().await;
             locked.0.push(RwLock::new(Array1::from(reserve)));
             (locked.1, locked.2) = (now, now);
+
+            debug!("init_user: new reserve = {:?}", locked.1);
         }
 
         {
             let mut locked = self.borrowed.write().await;
             locked.0.push(RwLock::new(Array1::from(borrowed)));
             (locked.1, locked.2) = (now, now);
+
+            debug!("init_user: new borrowed = {:?}", locked.1);
         }
 
         Ok(false)
@@ -1042,18 +1052,40 @@ impl Cache {
     async fn sync_collateral(&self, row_num: usize) -> eyre::Result<()> {
         let col_lock = self.collateral.read().await;
         let mut col_matrix_lock = self.collateral_matrix.write().await;
-        let low_bound = col_matrix_lock.len() - 1;
-        while col_matrix_lock.len() < col_lock.0.len() {
-            let row_lock = col_lock.0.get(col_matrix_lock.len()).unwrap().read().await;
+
+        debug!(
+            "sync_collateral: row_num = {}, col_lock = {:?}",
+            row_num, col_lock
+        );
+
+        let low_bound = col_matrix_lock.nrows() - 1;
+        while col_matrix_lock.nrows() < col_lock.0.len() {
+            let row_lock = col_lock
+                .0
+                .get(col_matrix_lock.nrows())
+                .unwrap()
+                .read()
+                .await;
             col_matrix_lock.push_row(row_lock.view())?;
         }
 
+        debug!(
+            "sync_collateral: after row check col_matrix_lock = {:?}",
+            col_matrix_lock
+        );
+
         if row_num > low_bound {
+            debug!("sync_collateral: we sync collateral");
             return Ok(());
         }
 
         let row = col_lock.0.get(row_num).unwrap().read().await;
         col_matrix_lock.row_mut(row_num).assign(&row);
+
+        debug!(
+            "sync_collateral: after row insert col_matrix_lock = {:?}",
+            col_matrix_lock
+        );
 
         Ok(())
     }
@@ -1061,18 +1093,40 @@ impl Cache {
     async fn sync_borrowed(&self, row_num: usize) -> eyre::Result<()> {
         let bor_lock = self.borrowed.read().await;
         let mut bor_matrix_lock = self.borrowed_matrix.write().await;
-        let low_bound = bor_matrix_lock.len() - 1;
-        while bor_matrix_lock.len() < bor_lock.0.len() {
-            let row_lock = bor_lock.0.get(bor_matrix_lock.len()).unwrap().read().await;
+
+        debug!(
+            "sync_borrowed: row_num = {}, bor_lock = {:?}",
+            row_num, bor_lock
+        );
+
+        let low_bound = bor_matrix_lock.nrows() - 1;
+        while bor_matrix_lock.nrows() < bor_lock.0.len() {
+            let row_lock = bor_lock
+                .0
+                .get(bor_matrix_lock.nrows())
+                .unwrap()
+                .read()
+                .await;
             bor_matrix_lock.push_row(row_lock.view())?;
         }
 
+        debug!(
+            "sync_borrowed: after row check bor_matrix_lock = {:?}",
+            bor_matrix_lock
+        );
+
         if row_num > low_bound {
+            debug!("sync_borrowed: we sync borrowed");
             return Ok(());
         }
 
         let row = bor_lock.0.get(row_num).unwrap().read().await;
         bor_matrix_lock.row_mut(row_num).assign(&row);
+
+        debug!(
+            "sync_borrowed: after row insert bor_matrix_lock = {:?}",
+            bor_matrix_lock
+        );
 
         Ok(())
     }
@@ -1094,28 +1148,37 @@ impl Cache {
 
             let collateral_lock = self.collateral.read().await;
             let col_row_lock = collateral_lock.0.get(row_num).unwrap().read().await;
-
             let col_eff = col_row_lock.dot(&ltp);
 
             let borrowed_lock = self.borrowed.read().await;
             let bor_row_lock = borrowed_lock.0.get(row_num).unwrap().read().await;
-
             let bor_eff = bor_row_lock.dot(&(&*price_lock).0);
 
             let mut hf_lock = self.health_factors.write().await;
+            if row_num > hf_lock.0.len() - 1 {
+                hf_lock.0 = concatenate(
+                    Axis(0),
+                    &[
+                        hf_lock.0.view(),
+                        Array1::from_elem(row_num + 1 - hf_lock.0.len(), 0.0).view(),
+                    ],
+                )?;
+            }
             (hf_lock.0[row_num], hf_lock.1) = (col_eff / bor_eff, Utc::now().timestamp_millis());
+
+            debug!("calc_hf: user = {:?}, hf = {:?}", user, hf_lock);
 
             return Ok(());
         }
 
         let collateral_lock = self.collateral_matrix.read().await;
         let col_eff = collateral_lock.dot(&ltp);
-
         let borrowed_lock = self.borrowed_matrix.read().await;
-        let bor_eff = borrowed_lock.dot(&(&*price_lock).0);
-
+        let bor_eff = borrowed_lock.dot(&price_lock.0);
         let mut hf_lock = self.health_factors.write().await;
         (hf_lock.0, hf_lock.1) = (col_eff / bor_eff, Utc::now().timestamp_millis());
+
+        debug!("calc_hf: hf = {:?}", hf_lock.0);
 
         Ok(())
     }
@@ -1144,6 +1207,7 @@ where
             }
         }
         Err(e) => {
+            debug!("create_user: error = {:?}", e);
             cache.remove_user(user);
             return Err(e);
         }
@@ -1204,7 +1268,7 @@ where
     debug!("supply: called");
 
     let (event, sync_tx, hf_tx, timestamp) = event;
-    create_user(
+    if create_user(
         &cache,
         provider.clone(),
         &tokens,
@@ -1212,105 +1276,120 @@ where
         &sync_tx,
         &hf_tx,
     )
-    .await?;
+    .await?
+    {
+        debug!(
+            "supplied: new user created = {}, cache = {:?}",
+            event.onBehalfOf, cache
+        );
+
+        return Ok(());
+    }
+
+    let user_settings = cache.users.get(&event.onBehalfOf).unwrap();
+    let row_num = user_settings.row_num;
+    let idx = tokens.get(&event.reserve).unwrap().order;
+    let now = Utc::now().timestamp_millis();
+
+    let (c, sync_t, hf_t) = (cache.clone(), sync_tx.clone(), hf_tx.clone());
+    let sync_user = async move || {
+        debug!("supply: sync_user user = {}", event.onBehalfOf);
+
+        c.remove_user(&event.onBehalfOf);
+        c.init_user(&event.onBehalfOf, &tokens, provider.clone())
+            .await
+            .unwrap();
+        sync_t
+            .send(SyncRequest::Both(
+                c.users.get(&event.onBehalfOf).unwrap().row_num,
+            ))
+            .await
+            .unwrap();
+        hf_t.send(HFRequest::User(event.onBehalfOf)).await.unwrap();
+    };
+
+    let (last_sync, last_modified);
+    if user_settings.use_as_collateral[idx] {
+        let mut collateral_lock = cache.collateral.write().await;
+        (last_sync, last_modified) = (collateral_lock.1, collateral_lock.2);
+
+        let new_event = async move || {
+            debug!("supply: collateral new event user = {}", event.onBehalfOf);
+
+            (collateral_lock.1, collateral_lock.2) = (now, now);
+            let mut row_lock = collateral_lock.0[row_num].write().await;
+            row_lock[idx] += f64::from(event.amount);
+            sync_tx
+                .send(SyncRequest::Collateral(row_num))
+                .await
+                .unwrap();
+            hf_tx.send(HFRequest::User(event.onBehalfOf)).await.unwrap();
+        };
+        let skip_event = async move || {
+            debug!(
+                "event dated before sync:\
+                     event = supply, user = {}, timestamp = {}, collateral sync = {}, collateral timestamp = {}",
+                event.onBehalfOf, timestamp, last_sync, last_modified,
+            );
+        };
+        let unknown = async move || {
+            info!(
+                "detected unknown case:\
+                     event = supply, user = {}, timestamp = {}, collateral sync = {}, collateral timestamp = {}",
+                event.onBehalfOf, timestamp, last_sync, last_modified
+            );
+        };
+
+        handle_event(
+            timestamp,
+            last_sync,
+            last_modified,
+            new_event,
+            skip_event,
+            sync_user,
+            unknown,
+        )
+        .await?;
+    } else {
+        let mut reserve_lock = cache.reserve.write().await;
+        (last_sync, last_modified) = (reserve_lock.1, reserve_lock.2);
+
+        let new_event = async move || {
+            debug!("supply: borrowed new event user = {}", event.onBehalfOf);
+
+            (reserve_lock.1, reserve_lock.2) = (now, now);
+            let mut row_lock = reserve_lock.0[row_num].write().await;
+            row_lock[idx] += f64::from(event.amount);
+        };
+        let skip_event = async move || {
+            debug!(
+                "event dated before sync:\
+                     event = supply, user = {}, timestamp = {}, reserve sync = {}, reserve timestamp = {}",
+                event.onBehalfOf, timestamp, last_sync, last_modified,
+            );
+        };
+        let unknown = async move || {
+            info!(
+                "detected unknown case:\
+                     event = supply, user = {}, timestamp = {}, reserve sync = {}, reserve timestamp = {}",
+                event.onBehalfOf, timestamp, last_sync, last_modified
+            );
+        };
+
+        handle_event(
+            timestamp,
+            last_sync,
+            last_modified,
+            new_event,
+            skip_event,
+            sync_user,
+            unknown,
+        )
+        .await?;
+    }
 
     debug!("supplied: cache = {:?}", cache);
 
-    // let user_settings = cache.users.get(&event.onBehalfOf).unwrap();
-    // let row_num = user_settings.row_num;
-    // let idx = tokens.get(&event.reserve).unwrap().order;
-    // let now = Utc::now().timestamp_millis();
-    //
-    // let (c, sync_t, hf_t) = (cache.clone(), sync_tx.clone(), hf_tx.clone());
-    // let sync_user = async move || {
-    //     c.remove_user(&event.onBehalfOf);
-    //     c.init_user(&event.onBehalfOf, &tokens, provider.clone())
-    //         .await
-    //         .unwrap();
-    //     sync_t
-    //         .send(SyncRequest::Both(
-    //             c.users.get(&event.onBehalfOf).unwrap().row_num,
-    //         ))
-    //         .await
-    //         .unwrap();
-    //     hf_t.send(HFRequest::User(event.onBehalfOf)).await.unwrap();
-    // };
-    //
-    // let (last_sync, last_modified);
-    // if user_settings.use_as_collateral[idx] {
-    //     let mut collateral_lock = cache.collateral.write().await;
-    //     (last_sync, last_modified) = (collateral_lock.1, collateral_lock.2);
-    //
-    //     let new_event = async move || {
-    //         (collateral_lock.1, collateral_lock.2) = (now, now);
-    //         let mut row_lock = collateral_lock.0[row_num].write().await;
-    //         row_lock[idx] += f64::from(event.amount);
-    //         sync_tx
-    //             .send(SyncRequest::Collateral(row_num))
-    //             .await
-    //             .unwrap();
-    //         hf_tx.send(HFRequest::User(event.onBehalfOf)).await.unwrap();
-    //     };
-    //     let skip_event = async move || {
-    //         debug!(
-    //             "event dated before sync:\
-    //                  event = supply, user = {}, timestamp = {}, collateral sync = {}, collateral timestamp = {}",
-    //             event.onBehalfOf, timestamp, last_sync, last_modified,
-    //         );
-    //     };
-    //     let unknown = async move || {
-    //         info!(
-    //             "detected unknown case:\
-    //                  event = supply, user = {}, timestamp = {}, collateral sync = {}, collateral timestamp = {}",
-    //             event.onBehalfOf, timestamp, last_sync, last_modified
-    //         );
-    //     };
-    //
-    //     handle_event(
-    //         timestamp,
-    //         last_sync,
-    //         last_modified,
-    //         new_event,
-    //         skip_event,
-    //         sync_user,
-    //         unknown,
-    //     )
-    //     .await?;
-    // } else {
-    //     let mut reserve_lock = cache.reserve.write().await;
-    //     (last_sync, last_modified) = (reserve_lock.1, reserve_lock.2);
-    //
-    //     let new_event = async move || {
-    //         (reserve_lock.1, reserve_lock.2) = (now, now);
-    //         let mut row_lock = reserve_lock.0[row_num].write().await;
-    //         row_lock[idx] += f64::from(event.amount);
-    //     };
-    //     let skip_event = async move || {
-    //         debug!(
-    //             "event dated before sync:\
-    //                  event = supply, user = {}, timestamp = {}, reserve sync = {}, reserve timestamp = {}",
-    //             event.onBehalfOf, timestamp, last_sync, last_modified,
-    //         );
-    //     };
-    //     let unknown = async move || {
-    //         info!(
-    //             "detected unknown case:\
-    //                  event = supply, user = {}, timestamp = {}, reserve sync = {}, reserve timestamp = {}",
-    //             event.onBehalfOf, timestamp, last_sync, last_modified
-    //         );
-    //     };
-    //
-    //     handle_event(
-    //         timestamp,
-    //         last_sync,
-    //         last_modified,
-    //         new_event,
-    //         skip_event,
-    //         sync_user,
-    //         unknown,
-    //     )
-    //     .await?;
-    // }
     Ok(())
 }
 
@@ -1458,4 +1537,149 @@ where
     debug!("answer_updated: called");
     // let (event, token, sync_tx, timestamp) = event;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_sync_collateral() -> eyre::Result<()> {
+        let cache = Cache::default();
+        let row = vec![1.0, 2.0, 3.0];
+        let row_len = row.len();
+        {
+            let now = Utc::now().timestamp_millis();
+            *cache.collateral.write().await =
+                (vec![RwLock::new(Array1::from_vec(row.clone()))], now, now);
+            *cache.collateral_matrix.write().await = Array2::from_elem((1, row_len), 0.);
+        }
+
+        cache.sync_collateral(0).await?;
+
+        let mut expected = Array2::from_shape_vec((1, row_len), row)?;
+        {
+            let collateral_matrix = &*cache.collateral_matrix.read().await;
+            assert_eq!(collateral_matrix, expected);
+        }
+
+        let row = vec![4.0, 5.0, 6.0];
+        {
+            let (collateral, _, _) = &mut *cache.collateral.write().await;
+            collateral.push(RwLock::new(Array1::from_vec(row.clone())));
+        }
+
+        cache.sync_collateral(1).await?;
+
+        expected.push_row(Array1::from(row).view())?;
+        {
+            let collateral_matrix = &*cache.collateral_matrix.read().await;
+            assert_eq!(collateral_matrix, expected);
+        }
+
+        let row = vec![7.0, 8.0, 9.0];
+        {
+            let (collateral, _, _) = &mut *cache.collateral.write().await;
+            collateral.push(RwLock::new(Array1::from_vec(row.clone())));
+        }
+
+        cache.sync_collateral(2).await?;
+
+        expected.push_row(Array1::from(row).view())?;
+        {
+            let collateral_matrix = &*cache.collateral_matrix.read().await;
+            assert_eq!(collateral_matrix, expected);
+        }
+
+        {
+            let (collateral, _, _) = &mut *cache.collateral.write().await;
+            let mut col_row = collateral.get(1).unwrap().write().await;
+            col_row[0] = 40.0;
+            col_row[1] = 50.0;
+            col_row[2] = 60.0;
+        }
+
+        cache.sync_collateral(1).await?;
+
+        expected[(1, 0)] = 40.0;
+        expected[(1, 1)] = 50.0;
+        expected[(1, 2)] = 60.0;
+
+        {
+            let collateral_matrix = &*cache.collateral_matrix.read().await;
+            assert_eq!(collateral_matrix, expected);
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_sync_borrowed() -> eyre::Result<()> {
+        let cache = Cache::default();
+        let row = vec![1.0, 2.0, 3.0];
+        let row_len = row.len();
+        {
+            let now = Utc::now().timestamp_millis();
+            *cache.borrowed.write().await =
+                (vec![RwLock::new(Array1::from_vec(row.clone()))], now, now);
+            *cache.borrowed_matrix.write().await = Array2::from_elem((1, row_len), 0.);
+        }
+
+        cache.sync_borrowed(0).await?;
+
+        let mut expected = Array2::from_shape_vec((1, row_len), row)?;
+        {
+            let borrowed_matrix = &*cache.borrowed_matrix.read().await;
+            assert_eq!(borrowed_matrix, expected);
+        }
+
+        let row = vec![4.0, 5.0, 6.0];
+        {
+            let (borrowed, _, _) = &mut *cache.borrowed.write().await;
+            borrowed.push(RwLock::new(Array1::from_vec(row.clone())));
+        }
+
+        cache.sync_borrowed(1).await?;
+
+        expected.push_row(Array1::from(row).view())?;
+        {
+            let borrowed_matrix = &*cache.borrowed_matrix.read().await;
+            assert_eq!(borrowed_matrix, expected);
+        }
+
+        let row = vec![7.0, 8.0, 9.0];
+        {
+            let (borrowed, _, _) = &mut *cache.borrowed.write().await;
+            borrowed.push(RwLock::new(Array1::from_vec(row.clone())));
+        }
+
+        cache.sync_borrowed(2).await?;
+
+        expected.push_row(Array1::from(row).view())?;
+        {
+            let borrowed_matrix = &*cache.borrowed_matrix.read().await;
+            assert_eq!(borrowed_matrix, expected);
+        }
+
+        {
+            let (borrowed, _, _) = &mut *cache.borrowed.write().await;
+            let mut bor_row = borrowed.get(1).unwrap().write().await;
+            bor_row[0] = 40.0;
+            bor_row[1] = 50.0;
+            bor_row[2] = 60.0;
+        }
+
+        cache.sync_borrowed(1).await?;
+
+        expected[(1, 0)] = 40.0;
+        expected[(1, 1)] = 50.0;
+        expected[(1, 2)] = 60.0;
+
+        {
+            let borrowed_matrix = &*cache.borrowed_matrix.read().await;
+            assert_eq!(borrowed_matrix, expected);
+        }
+
+        Ok(())
+    }
 }
