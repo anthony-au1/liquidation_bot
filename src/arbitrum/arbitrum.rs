@@ -307,7 +307,7 @@ where
         *cache.collateral_matrix.write().await = Array2::from_elem((1, tokens.len()), 0.);
         *cache.borrowed_matrix.write().await = Array2::from_elem((1, tokens.len()), 0.);
 
-        let now = Utc::now().timestamp_millis();
+        let now = Utc::now().timestamp_micros();
         *cache.prices.write().await = (Array1::from_elem(tokens.len(), 0.), now);
         *cache.liquidation_threshold.write().await = (Array1::from_elem(tokens.len(), 0.), now);
         *cache.health_factors.write().await = (Array1::from_elem(1, 0.), now);
@@ -428,7 +428,7 @@ where
     let mut counters = EventCounter::default();
     while let Some(event) = rc_events.recv().await {
         match event {
-            AaveEvents::IL2PoolEvents(event, timestamp) => match event {
+            AaveEvents::IL2PoolEvents(event, rq_date) => match event {
                 IL2PoolEvents::Supply(ev) => {
                     debug!("start: supply");
                     supply_txs[counters.supply % w_num]
@@ -436,7 +436,7 @@ where
                             ev,
                             sync_senders[sync_counter % w_num].clone(),
                             hf_senders[hf_counter % w_num].clone(),
-                            timestamp,
+                            rq_date,
                         ))
                         .await?;
                     counters.supply = counters.supply.wrapping_add(1);
@@ -449,7 +449,7 @@ where
                             ev,
                             sync_senders[sync_counter % w_num].clone(),
                             hf_senders[hf_counter % w_num].clone(),
-                            timestamp,
+                            rq_date,
                         ))
                         .await?;
                     counters.withdraw = counters.withdraw.wrapping_add(1);
@@ -462,7 +462,7 @@ where
                             ev,
                             sync_senders[sync_counter % w_num].clone(),
                             hf_senders[hf_counter % w_num].clone(),
-                            timestamp,
+                            rq_date,
                         ))
                         .await?;
                     counters.borrow = counters.borrow.wrapping_add(1);
@@ -475,7 +475,7 @@ where
                             ev,
                             sync_senders[sync_counter % w_num].clone(),
                             hf_senders[hf_counter % w_num].clone(),
-                            timestamp,
+                            rq_date,
                         ))
                         .await?;
                     counters.repay = counters.repay.wrapping_add(1);
@@ -489,7 +489,7 @@ where
                             ev,
                             sync_senders[sync_counter % w_num].clone(),
                             hf_senders[hf_counter % w_num].clone(),
-                            timestamp,
+                            rq_date,
                         ))
                         .await?;
                     counters.reserve_used_as_collateral_enabled =
@@ -504,7 +504,7 @@ where
                             ev,
                             sync_senders[sync_counter % w_num].clone(),
                             hf_senders[hf_counter % w_num].clone(),
-                            timestamp,
+                            rq_date,
                         ))
                         .await?;
                     counters.reserve_used_as_collateral_disabled =
@@ -518,7 +518,7 @@ where
                             ev,
                             sync_senders[sync_counter % w_num].clone(),
                             hf_senders[hf_counter % w_num].clone(),
-                            timestamp,
+                            rq_date,
                         ))
                         .await?;
                     counters.liquidation_call = counters.liquidation_call.wrapping_add(1);
@@ -527,16 +527,16 @@ where
                 IL2PoolEvents::ReserveDataUpdated(ev) => {
                     debug!("start: reserve data updated");
                     reserve_data_updated_txs[counters.reserve_data_updated % w_num]
-                        .send((ev, hf_senders[hf_counter % w_num].clone(), timestamp))
+                        .send((ev, hf_senders[hf_counter % w_num].clone(), rq_date))
                         .await?;
                     counters.reserve_data_updated = counters.reserve_data_updated.wrapping_add(1);
                 }
             },
-            AaveEvents::IChainlinkAggregatorEvents(event, token, timestamp) => match event {
+            AaveEvents::IChainlinkAggregatorEvents(event, token, rq_date) => match event {
                 IChainlinkAggregatorEvents::AnswerUpdated(ev) => {
                     debug!("start: answer updated");
                     answer_updated_txs[counters.answer_updated % w_num]
-                        .send((ev, token, hf_senders[hf_counter % w_num].clone(), timestamp))
+                        .send((ev, token, hf_senders[hf_counter % w_num].clone(), rq_date))
                         .await?;
                     counters.answer_updated = counters.answer_updated.wrapping_add(1);
                 }
@@ -618,9 +618,11 @@ fn handle_panic(err: Option<Box<dyn Any + Send>>, msg: &str) {
     }
 }
 
+type TimeStamp = i64;
+
 enum AaveEvents {
-    IL2PoolEvents(IL2PoolEvents, i64),
-    IChainlinkAggregatorEvents(IChainlinkAggregatorEvents, Address, i64),
+    IL2PoolEvents(IL2PoolEvents, TimeStamp),
+    IChainlinkAggregatorEvents(IChainlinkAggregatorEvents, Address, TimeStamp),
 }
 
 async fn listen_events<P>(provider: Arc<P>, tx: Sender<AaveEvents>) -> eyre::Result<()>
@@ -658,7 +660,7 @@ where
                     let r = tx
                         .send(AaveEvents::IL2PoolEvents(
                             data,
-                            Utc::now().timestamp_millis(),
+                            Utc::now().timestamp_micros(),
                         ))
                         .await;
 
@@ -699,7 +701,7 @@ where
                         if t.send(AaveEvents::IChainlinkAggregatorEvents(
                             data,
                             name,
-                            Utc::now().timestamp_millis(),
+                            Utc::now().timestamp_micros(),
                         )).await
                             .is_err()
                         {
@@ -772,8 +774,9 @@ where
             };
 
             if lt_modified {
-                *cache.liquidation_threshold.write().await = (d, Utc::now().timestamp_millis());
-                hf_tx.send(HFRequest::Full).await.unwrap();
+                let rq_date = Utc::now().timestamp_micros();
+                *cache.liquidation_threshold.write().await = (d, rq_date);
+                hf_tx.send(HFRequest::Full(rq_date)).await.unwrap();
             }
         }
     });
@@ -782,9 +785,9 @@ where
 }
 
 enum SyncRequest {
-    Collateral(usize),
-    Borrowed(usize),
-    Both(usize),
+    Collateral(usize, TimeStamp),
+    Borrowed(usize, TimeStamp),
+    Both(usize, TimeStamp),
 }
 
 async fn listen_sync(
@@ -801,14 +804,14 @@ async fn listen_sync(
             let panicked = panic::AssertUnwindSafe(async move {
                 while let Some(sync_rq) = rc.recv().await {
                     match sync_rq {
-                        SyncRequest::Collateral(row_num) => {
-                            let _ = c.sync_collateral(row_num).await;
+                        SyncRequest::Collateral(row_num, rq_date) => {
+                            let _ = c.sync_collateral(row_num, rq_date).await;
                         }
-                        SyncRequest::Borrowed(row_num) => {
-                            let _ = c.sync_borrowed(row_num).await;
+                        SyncRequest::Borrowed(row_num, rq_date) => {
+                            let _ = c.sync_borrowed(row_num, rq_date).await;
                         }
-                        SyncRequest::Both(row_num) => {
-                            let _ = c.sync_data(row_num).await;
+                        SyncRequest::Both(row_num, rq_date) => {
+                            let _ = c.sync_data(row_num, rq_date).await;
                         }
                     }
                 }
@@ -825,8 +828,8 @@ async fn listen_sync(
 }
 
 enum HFRequest {
-    User(Address),
-    Full,
+    User(Address, TimeStamp),
+    Full(TimeStamp),
 }
 
 async fn listen_hf_calc(
@@ -843,14 +846,14 @@ async fn listen_hf_calc(
             let panicked = panic::AssertUnwindSafe(async move {
                 while let Some(hf_rq) = rc.recv().await {
                     match hf_rq {
-                        HFRequest::User(user) => match c.calc_hf(Some(&user)).await {
+                        HFRequest::User(user, rq_date) => match c.calc_hf(Some(&user), rq_date).await {
                             Ok(_) => {
                                 let (hf, _) = &*c.health_factors.read().await;
                                 debug!("listen_hf_calc: user = {}, hf = {}", user, hf);
                             }
                             Err(e) => error!("listen_hf_calc: user = {}, error = {:?}", user, e),
                         },
-                        HFRequest::Full => match c.calc_hf(None).await {
+                        HFRequest::Full(rq_date) => match c.calc_hf(None, rq_date).await {
                             Ok(_) => {
                                 let (hf, _) = &*c.health_factors.read().await;
                                 debug!("listen_hf_calc: hf = {}", hf);
@@ -872,8 +875,8 @@ async fn listen_hf_calc(
 }
 
 type UserDetails = DashMap<Address, UserSettings>;
-type Array = RwLock<(Array1<f64>, i64)>;
-type Arrays = RwLock<(Vec<RwLock<Array1<f64>>>, i64, i64)>;
+type Array = RwLock<(Array1<f64>, TimeStamp)>;
+type Arrays = RwLock<(Vec<RwLock<Array1<f64>>>, TimeStamp, TimeStamp)>;
 type Matrix = RwLock<Array2<f64>>;
 
 #[derive(Default, Debug)]
@@ -978,7 +981,7 @@ impl Cache {
             borrowed[idx] = f64::from(urd.currentVariableDebt);
         }
 
-        let now = Utc::now().timestamp();
+        let now = Utc::now().timestamp_micros();
         {
             let mut locked = self.collateral.write().await;
             locked.0.push(RwLock::new(Array1::from(collateral)));
@@ -1049,7 +1052,7 @@ impl Cache {
         Ok(senders)
     }
 
-    async fn sync_collateral(&self, row_num: usize) -> eyre::Result<()> {
+    async fn sync_collateral(&self, row_num: usize, rq_date: TimeStamp) -> eyre::Result<()> {
         let col_lock = self.collateral.read().await;
         let mut col_matrix_lock = self.collateral_matrix.write().await;
 
@@ -1075,22 +1078,42 @@ impl Cache {
         );
 
         if row_num > low_bound {
-            debug!("sync_collateral: we sync collateral");
+            debug!("{}",
+                {
+                    let received = Utc::now().timestamp_micros();
+                    format!(
+                        "sync_collateral: we sync collateral, rq_date = {}, \
+                         received = {}, delta = {} μs",
+                        rq_date,
+                        received,
+                        received - rq_date
+                    )
+                }
+            );
             return Ok(());
         }
 
         let row = col_lock.0.get(row_num).unwrap().read().await;
         col_matrix_lock.row_mut(row_num).assign(&row);
 
-        debug!(
-            "sync_collateral: after row insert col_matrix_lock = {:?}",
-            col_matrix_lock
+        debug!("{}",
+            {
+                let received = Utc::now().timestamp_micros();
+                format!(
+                    "sync_collateral: after row insert col_matrix_lock = {:?}, rq_date = {}, \
+                     received = {}, delta = {} μs",
+                    col_matrix_lock,
+                    rq_date,
+                    received,
+                    received - rq_date
+                )
+            }
         );
 
         Ok(())
     }
 
-    async fn sync_borrowed(&self, row_num: usize) -> eyre::Result<()> {
+    async fn sync_borrowed(&self, row_num: usize, rq_date: TimeStamp) -> eyre::Result<()> {
         let bor_lock = self.borrowed.read().await;
         let mut bor_matrix_lock = self.borrowed_matrix.write().await;
 
@@ -1116,29 +1139,49 @@ impl Cache {
         );
 
         if row_num > low_bound {
-            debug!("sync_borrowed: we sync borrowed");
+            debug!("{}",
+                {
+                    let received = Utc::now().timestamp_micros();
+                    format!(
+                        "sync_borrowed: we sync borrowed, rq_date = {}, \
+                         received = {}, delta = {} μs",
+                        rq_date,
+                        received,
+                        received - rq_date
+                    )
+                }
+            );
             return Ok(());
         }
 
         let row = bor_lock.0.get(row_num).unwrap().read().await;
         bor_matrix_lock.row_mut(row_num).assign(&row);
 
-        debug!(
-            "sync_borrowed: after row insert bor_matrix_lock = {:?}",
-            bor_matrix_lock
+        debug!("{}",
+            {
+                let received = Utc::now().timestamp_micros();
+                format!(
+                    "sync_borrowed: after row insert bor_matrix_lock = {:?}, rq_date = {}, \
+                     received = {}, delta = {} μs",
+                    bor_matrix_lock,
+                    rq_date,
+                    received,
+                    received - rq_date
+                )
+            }
         );
 
         Ok(())
     }
 
-    async fn sync_data(&self, row_num: usize) -> eyre::Result<()> {
-        self.sync_collateral(row_num).await?;
-        self.sync_borrowed(row_num).await?;
+    async fn sync_data(&self, row_num: usize, rq_date: TimeStamp) -> eyre::Result<()> {
+        self.sync_collateral(row_num, rq_date).await?;
+        self.sync_borrowed(row_num, rq_date).await?;
 
         Ok(())
     }
 
-    async fn calc_hf(&self, user: Option<&Address>) -> eyre::Result<()> {
+    async fn calc_hf(&self, user: Option<&Address>, rq_date: TimeStamp) -> eyre::Result<()> {
         let lt_lock = self.liquidation_threshold.read().await;
         let price_lock = self.prices.read().await;
         let ltp = &(&*lt_lock).0 * &(&*price_lock).0;
@@ -1164,9 +1207,22 @@ impl Cache {
                     ],
                 )?;
             }
-            (hf_lock.0[row_num], hf_lock.1) = (col_eff / bor_eff, Utc::now().timestamp_millis());
+            (hf_lock.0[row_num], hf_lock.1) = (col_eff / bor_eff, Utc::now().timestamp_micros());
 
-            debug!("calc_hf: user = {:?}, hf = {:?}", user, hf_lock);
+            debug!("{}",
+            {
+                let received = Utc::now().timestamp_micros();
+                format!(
+                    "calc_hf: user = {:?}, hf = {:?}, rq_date = {}, \
+                     received = {}, delta = {} μs",
+                    user,
+                    hf_lock,
+                    rq_date,
+                    received,
+                    received - rq_date
+                )
+            }
+        );
 
             return Ok(());
         }
@@ -1176,15 +1232,28 @@ impl Cache {
         let borrowed_lock = self.borrowed_matrix.read().await;
         let bor_eff = borrowed_lock.dot(&price_lock.0);
         let mut hf_lock = self.health_factors.write().await;
-        (hf_lock.0, hf_lock.1) = (col_eff / bor_eff, Utc::now().timestamp_millis());
+        (hf_lock.0, hf_lock.1) = (col_eff / bor_eff, Utc::now().timestamp_micros());
 
-        debug!("calc_hf: hf = {:?}", hf_lock.0);
+        debug!("{}",
+            {
+                let received = Utc::now().timestamp_micros();
+                format!(
+                    "calc_hf: hf = {:?}, rq_date = {}, \
+                     received = {}, delta = {} μs",
+                    hf_lock,
+                    rq_date,
+                    received,
+                    received - rq_date
+                )
+            }
+        );
 
         Ok(())
     }
 }
 
 async fn create_user<P>(
+    rq_date: TimeStamp,
     cache: &Cache,
     provider: Arc<P>,
     tokens: &Tokens,
@@ -1198,11 +1267,24 @@ where
     match cache.init_user(user, tokens, provider.clone()).await {
         Ok(exist) => {
             if !exist {
-                debug!("create_user: cache = {:?}", cache);
+                debug!("{}",
+                    {
+                        let received = Utc::now().timestamp_micros();
+                        format!(
+                            "create_user: cache = {:?}, rq_date = {}, \
+                             received = {}, delta = {} μs",
+                            cache,
+                            rq_date,
+                            received,
+                            received - rq_date
+                        )
+                    }
+                );
+
                 sync_tx
-                    .send(SyncRequest::Both(cache.users.get(user).unwrap().row_num))
+                    .send(SyncRequest::Both(cache.users.get(user).unwrap().row_num, rq_date))
                     .await?;
-                hf_tx.send(HFRequest::User(user.clone())).await?;
+                hf_tx.send(HFRequest::User(user.clone(), rq_date)).await?;
                 return Ok(true);
             }
         }
@@ -1217,9 +1299,9 @@ where
 }
 
 async fn handle_event<F1, R1, F2, R2, F3, R3, F4, R4>(
-    event_timestamp: i64,
-    last_sync: i64,
-    last_modified: i64,
+    rq_date: TimeStamp,
+    last_sync: TimeStamp,
+    last_modified: TimeStamp,
     new_event: F1,
     skip_event: F2,
     sync_user: F3,
@@ -1235,7 +1317,7 @@ where
     F4: FnOnce() -> R4,
     R4: Future<Output = ()> + Send,
 {
-    match event_timestamp {
+    match rq_date {
         t if t > last_modified => {
             // new event
             new_event().await;
@@ -1260,15 +1342,27 @@ async fn supply<P>(
     cache: Arc<Cache>,
     provider: Arc<P>,
     tokens: Arc<Tokens>,
-    event: (Supply, Sender<SyncRequest>, Sender<HFRequest>, i64),
+    event: (Supply, Sender<SyncRequest>, Sender<HFRequest>, TimeStamp),
 ) -> eyre::Result<()>
 where
     P: Provider + Clone + 'static,
 {
-    debug!("supply: called");
+    let (event, sync_tx, hf_tx, rq_date) = event;
 
-    let (event, sync_tx, hf_tx, timestamp) = event;
+    debug!("{}",
+        {
+            let received = Utc::now().timestamp_micros();
+            format!(
+                "supply: rq_date = {}, received = {}, delta = {} μs",
+                rq_date,
+                received,
+                received - rq_date
+            )
+        }
+    );
+
     if create_user(
+        rq_date,
         &cache,
         provider.clone(),
         &tokens,
@@ -1289,7 +1383,7 @@ where
     let user_settings = cache.users.get(&event.onBehalfOf).unwrap();
     let row_num = user_settings.row_num;
     let idx = tokens.get(&event.reserve).unwrap().order;
-    let now = Utc::now().timestamp_millis();
+    let now = Utc::now().timestamp_micros();
 
     let (c, sync_t, hf_t) = (cache.clone(), sync_tx.clone(), hf_tx.clone());
     let sync_user = async move || {
@@ -1302,10 +1396,11 @@ where
         sync_t
             .send(SyncRequest::Both(
                 c.users.get(&event.onBehalfOf).unwrap().row_num,
+                rq_date
             ))
             .await
             .unwrap();
-        hf_t.send(HFRequest::User(event.onBehalfOf)).await.unwrap();
+        hf_t.send(HFRequest::User(event.onBehalfOf, rq_date)).await.unwrap();
     };
 
     let (last_sync, last_modified);
@@ -1320,28 +1415,28 @@ where
             let mut row_lock = collateral_lock.0[row_num].write().await;
             row_lock[idx] += f64::from(event.amount);
             sync_tx
-                .send(SyncRequest::Collateral(row_num))
+                .send(SyncRequest::Collateral(row_num, rq_date))
                 .await
                 .unwrap();
-            hf_tx.send(HFRequest::User(event.onBehalfOf)).await.unwrap();
+            hf_tx.send(HFRequest::User(event.onBehalfOf, rq_date)).await.unwrap();
         };
         let skip_event = async move || {
             debug!(
                 "event dated before sync:\
-                     event = supply, user = {}, timestamp = {}, collateral sync = {}, collateral timestamp = {}",
-                event.onBehalfOf, timestamp, last_sync, last_modified,
+                     event = supply, user = {}, rq_date = {}, collateral sync = {}, collateral rq_date = {}",
+                event.onBehalfOf, rq_date, last_sync, last_modified,
             );
         };
         let unknown = async move || {
             info!(
                 "detected unknown case:\
-                     event = supply, user = {}, timestamp = {}, collateral sync = {}, collateral timestamp = {}",
-                event.onBehalfOf, timestamp, last_sync, last_modified
+                     event = supply, user = {}, rq_date = {}, collateral sync = {}, collateral rq_date = {}",
+                event.onBehalfOf, rq_date, last_sync, last_modified
             );
         };
 
         handle_event(
-            timestamp,
+            rq_date,
             last_sync,
             last_modified,
             new_event,
@@ -1364,20 +1459,20 @@ where
         let skip_event = async move || {
             debug!(
                 "event dated before sync:\
-                     event = supply, user = {}, timestamp = {}, reserve sync = {}, reserve timestamp = {}",
-                event.onBehalfOf, timestamp, last_sync, last_modified,
+                     event = supply, user = {}, rq_date = {}, reserve sync = {}, reserve rq_date = {}",
+                event.onBehalfOf, rq_date, last_sync, last_modified,
             );
         };
         let unknown = async move || {
             info!(
                 "detected unknown case:\
-                     event = supply, user = {}, timestamp = {}, reserve sync = {}, reserve timestamp = {}",
-                event.onBehalfOf, timestamp, last_sync, last_modified
+                     event = supply, user = {}, rq_date = {}, reserve sync = {}, reserve rq_date = {}",
+                event.onBehalfOf, rq_date, last_sync, last_modified
             );
         };
 
         handle_event(
-            timestamp,
+            rq_date,
             last_sync,
             last_modified,
             new_event,
@@ -1388,7 +1483,19 @@ where
         .await?;
     }
 
-    debug!("supplied: cache = {:?}", cache);
+    debug!("{}",
+            {
+                let received = Utc::now().timestamp_micros();
+                format!(
+                    "supplied: cache = {:?}, rq_date = {}, \
+                     received = {}, delta = {} μs",
+                    cache,
+                    rq_date,
+                    received,
+                    received - rq_date
+                )
+            }
+        );
 
     Ok(())
 }
@@ -1397,13 +1504,13 @@ async fn withdraw<P>(
     cache: Arc<Cache>,
     provider: Arc<P>,
     tokens: Arc<Tokens>,
-    event: (Withdraw, Sender<SyncRequest>, Sender<HFRequest>, i64),
+    event: (Withdraw, Sender<SyncRequest>, Sender<HFRequest>, TimeStamp),
 ) -> eyre::Result<()>
 where
     P: Provider + Clone + 'static,
 {
     debug!("withdraw: called");
-    // let (event, sync_tx, hf_tx, timestamp) = event;
+    // let (event, sync_tx, hf_tx, rq_date) = event;
     // cache
     //     .init_user(&event.user, &tokens, provider.clone())
     //     .await?;
@@ -1415,13 +1522,13 @@ async fn borrow<P>(
     cache: Arc<Cache>,
     provider: Arc<P>,
     tokens: Arc<Tokens>,
-    event: (Borrow, Sender<SyncRequest>, Sender<HFRequest>, i64),
+    event: (Borrow, Sender<SyncRequest>, Sender<HFRequest>, TimeStamp),
 ) -> eyre::Result<()>
 where
     P: Provider + Clone + 'static,
 {
     debug!("borrow: called");
-    // let (event, sync_tx, hf_tx, timestamp) = event;
+    // let (event, sync_tx, hf_tx, rq_date) = event;
     // cache
     //     .init_user(&event.user, &tokens, provider.clone())
     //     .await?;
@@ -1433,13 +1540,13 @@ async fn repay<P>(
     cache: Arc<Cache>,
     provider: Arc<P>,
     tokens: Arc<Tokens>,
-    event: (Repay, Sender<SyncRequest>, Sender<HFRequest>, i64),
+    event: (Repay, Sender<SyncRequest>, Sender<HFRequest>, TimeStamp),
 ) -> eyre::Result<()>
 where
     P: Provider + Clone + 'static,
 {
     debug!("repay: called");
-    // let (event, sync_tx, hf_tx, timestamp) = event;
+    // let (event, sync_tx, hf_tx, rq_date) = event;
     // cache
     //     .init_user(&event.user, &tokens, provider.clone())
     //     .await?;
@@ -1455,14 +1562,14 @@ async fn reserve_used_as_collateral_enabled<P>(
         ReserveUsedAsCollateralEnabled,
         Sender<SyncRequest>,
         Sender<HFRequest>,
-        i64,
+        TimeStamp,
     ),
 ) -> eyre::Result<()>
 where
     P: Provider + Clone + 'static,
 {
     debug!("reserve_used_as_collateral_enabled: called");
-    // let (event, sync_tx, hf_tx, timestamp) = event;
+    // let (event, sync_tx, hf_tx, rq_date) = event;
     // cache
     //     .init_user(&event.user, &tokens, provider.clone())
     //     .await?;
@@ -1478,14 +1585,14 @@ async fn reserve_used_as_collateral_disabled<P>(
         ReserveUsedAsCollateralDisabled,
         Sender<SyncRequest>,
         Sender<HFRequest>,
-        i64,
+        TimeStamp,
     ),
 ) -> eyre::Result<()>
 where
     P: Provider + Clone + 'static,
 {
     debug!("reserve_used_as_collateral_disabled: called");
-    // let (event, sync_tx, hf_tx, timestamp) = event;
+    // let (event, sync_tx, hf_tx, rq_date) = event;
     // cache
     //     .init_user(&event.user, &tokens, provider.clone())
     //     .await?;
@@ -1497,13 +1604,13 @@ async fn liquidation_call<P>(
     cache: Arc<Cache>,
     provider: Arc<P>,
     tokens: Arc<Tokens>,
-    event: (LiquidationCall, Sender<SyncRequest>, Sender<HFRequest>, i64),
+    event: (LiquidationCall, Sender<SyncRequest>, Sender<HFRequest>, TimeStamp),
 ) -> eyre::Result<()>
 where
     P: Provider + Clone + 'static,
 {
     debug!("liquidation_call: called");
-    // let (event, sync_tx, hf_tx, timestamp) = event;
+    // let (event, sync_tx, hf_tx, rq_date) = event;
     // cache
     //     .init_user(&event.user, &tokens, provider.clone())
     //     .await?;
@@ -1515,13 +1622,13 @@ async fn reserve_data_updated<P>(
     cache: Arc<Cache>,
     provider: Arc<P>,
     tokens: Arc<Tokens>,
-    event: (ReserveDataUpdated, Sender<HFRequest>, i64),
+    event: (ReserveDataUpdated, Sender<HFRequest>, TimeStamp),
 ) -> eyre::Result<()>
 where
     P: Provider + Clone + 'static,
 {
     debug!("reserve_data_updated: called");
-    // let (event, hf_tx, timestamp) = event;
+    // let (event, hf_tx, rq_date) = event;
     Ok(())
 }
 
@@ -1529,33 +1636,36 @@ async fn answer_updated<P>(
     cache: Arc<Cache>,
     provider: Arc<P>,
     tokens: Arc<Tokens>,
-    event: (AnswerUpdated, Address, Sender<HFRequest>, i64),
+    event: (AnswerUpdated, Address, Sender<HFRequest>, TimeStamp),
 ) -> eyre::Result<()>
 where
     P: Provider + Clone + 'static,
 {
     debug!("answer_updated: called");
-    // let (event, token, sync_tx, timestamp) = event;
+    // let (event, token, sync_tx, rq_date) = event;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+    use mockall::mock;
     use super::*;
 
     #[tokio::test]
     async fn test_sync_collateral() -> eyre::Result<()> {
+        let rq_date = Utc::now().timestamp_micros();
         let cache = Cache::default();
         let row = vec![1.0, 2.0, 3.0];
         let row_len = row.len();
         {
-            let now = Utc::now().timestamp_millis();
+            let now = Utc::now().timestamp_micros();
             *cache.collateral.write().await =
                 (vec![RwLock::new(Array1::from_vec(row.clone()))], now, now);
             *cache.collateral_matrix.write().await = Array2::from_elem((1, row_len), 0.);
         }
 
-        cache.sync_collateral(0).await?;
+        cache.sync_collateral(0, rq_date).await?;
 
         let mut expected = Array2::from_shape_vec((1, row_len), row)?;
         {
@@ -1569,7 +1679,7 @@ mod tests {
             collateral.push(RwLock::new(Array1::from_vec(row.clone())));
         }
 
-        cache.sync_collateral(1).await?;
+        cache.sync_collateral(1, rq_date).await?;
 
         expected.push_row(Array1::from(row).view())?;
         {
@@ -1583,7 +1693,7 @@ mod tests {
             collateral.push(RwLock::new(Array1::from_vec(row.clone())));
         }
 
-        cache.sync_collateral(2).await?;
+        cache.sync_collateral(2, rq_date).await?;
 
         expected.push_row(Array1::from(row).view())?;
         {
@@ -1599,7 +1709,7 @@ mod tests {
             col_row[2] = 60.0;
         }
 
-        cache.sync_collateral(1).await?;
+        cache.sync_collateral(1, rq_date).await?;
 
         expected[(1, 0)] = 40.0;
         expected[(1, 1)] = 50.0;
@@ -1615,17 +1725,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_sync_borrowed() -> eyre::Result<()> {
+        let rq_date = Utc::now().timestamp_micros();
         let cache = Cache::default();
         let row = vec![1.0, 2.0, 3.0];
         let row_len = row.len();
         {
-            let now = Utc::now().timestamp_millis();
+            let now = Utc::now().timestamp_micros();
             *cache.borrowed.write().await =
                 (vec![RwLock::new(Array1::from_vec(row.clone()))], now, now);
             *cache.borrowed_matrix.write().await = Array2::from_elem((1, row_len), 0.);
         }
 
-        cache.sync_borrowed(0).await?;
+        cache.sync_borrowed(0, rq_date).await?;
 
         let mut expected = Array2::from_shape_vec((1, row_len), row)?;
         {
@@ -1639,7 +1750,7 @@ mod tests {
             borrowed.push(RwLock::new(Array1::from_vec(row.clone())));
         }
 
-        cache.sync_borrowed(1).await?;
+        cache.sync_borrowed(1, rq_date).await?;
 
         expected.push_row(Array1::from(row).view())?;
         {
@@ -1653,7 +1764,7 @@ mod tests {
             borrowed.push(RwLock::new(Array1::from_vec(row.clone())));
         }
 
-        cache.sync_borrowed(2).await?;
+        cache.sync_borrowed(2, rq_date).await?;
 
         expected.push_row(Array1::from(row).view())?;
         {
@@ -1669,7 +1780,7 @@ mod tests {
             bor_row[2] = 60.0;
         }
 
-        cache.sync_borrowed(1).await?;
+        cache.sync_borrowed(1, rq_date).await?;
 
         expected[(1, 0)] = 40.0;
         expected[(1, 1)] = 50.0;
@@ -1679,6 +1790,43 @@ mod tests {
             let borrowed_matrix = &*cache.borrowed_matrix.read().await;
             assert_eq!(borrowed_matrix, expected);
         }
+
+        Ok(())
+    }
+
+    mock! {
+        pub Aave {}
+
+        impl Provider for Aave {
+            fn root(&self) -> &alloy::providers::RootProvider;
+        }
+
+        impl Clone for Aave {
+            fn clone(&self) -> Self;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_supply() -> eyre::Result<()> {
+        let cache = Arc::new(Cache::default());
+        let mock_provider = Arc::new(MockAave::new());
+
+        let mut tokens = HashMap::new();
+        tokens.insert(Address::from_str("0x1Af54C263cefD1792CbFcF41B711834d657ea61D")?,
+                      TokenDetails::new(String::from("AAVE"),
+                                        Address::from_str("0xba5DdD1f9d7F570dc94a51479a000E3BCE967196")?,
+                                        0));
+        tokens.insert(Address::from_str("0x1Af54C113cefD1792CbFcF41B711834d657ea61D")?,
+                      TokenDetails::new(String::from("USDC"),
+                                        Address::from_str("0xaf88d065e77c8cC2239327C5EDb3A432268e5831")?,
+                                        1));
+        tokens.insert(Address::from_str("0x1Af54C113cefD1792CbFcF41B711824d657eb61D")?,
+                      TokenDetails::new(String::from("DAI"),
+                                        Address::from_str("0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1")?,
+                                        2));
+        let tokens = Arc::new(tokens);
+
+        // supply(cache, mock_provider, tokens)
 
         Ok(())
     }
