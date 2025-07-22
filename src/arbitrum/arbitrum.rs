@@ -12,17 +12,17 @@ use alloy::sol_types::SolEventInterface;
 use bitvec::prelude::*;
 use chrono::Utc;
 use dashmap::DashMap;
-use futures::FutureExt;
 use futures::future::join_all;
-use ndarray::{Array1, Array2, Axis, array, concatenate};
+use futures::FutureExt;
+use ndarray::{array, concatenate, Array1, Array2, Axis};
 use std::any::Any;
 use std::collections::HashMap;
 use std::default::Default;
 use std::panic;
-use std::sync::{Arc, mpsc};
+use std::sync::{mpsc, Arc};
 use std::time::Duration;
+use tokio::sync::mpsc::{channel, Sender};
 use tokio::sync::RwLock;
-use tokio::sync::mpsc::{Sender, channel};
 use tokio::{task, time};
 use tracing::{debug, error, info};
 
@@ -784,6 +784,7 @@ where
     Ok(())
 }
 
+#[derive(Debug, PartialEq)]
 enum SyncRequest {
     Collateral(usize, TimeStamp),
     Borrowed(usize, TimeStamp),
@@ -827,6 +828,7 @@ async fn listen_sync(
     Ok(senders)
 }
 
+#[derive(Debug, PartialEq)]
 enum HFRequest {
     User(Address, TimeStamp),
     Full(TimeStamp),
@@ -846,7 +848,10 @@ async fn listen_hf_calc(
             let panicked = panic::AssertUnwindSafe(async move {
                 while let Some(hf_rq) = rc.recv().await {
                     match hf_rq {
-                        HFRequest::User(user, rq_date) => match c.calc_hf(Some(&user), rq_date).await {
+                        HFRequest::User(user, rq_date) => match c
+                            .calc_hf(Some(&user), rq_date)
+                            .await
+                        {
                             Ok(_) => {
                                 let (hf, _) = &*c.health_factors.read().await;
                                 debug!("listen_hf_calc: user = {}, hf = {}", user, hf);
@@ -1078,37 +1083,33 @@ impl Cache {
         );
 
         if row_num > low_bound {
-            debug!("{}",
-                {
-                    let received = Utc::now().timestamp_micros();
-                    format!(
-                        "sync_collateral: we sync collateral, rq_date = {}, \
+            debug!("{}", {
+                let received = Utc::now().timestamp_micros();
+                format!(
+                    "sync_collateral: we sync collateral, rq_date = {}, \
                          received = {}, delta = {} μs",
-                        rq_date,
-                        received,
-                        received - rq_date
-                    )
-                }
-            );
+                    rq_date,
+                    received,
+                    received - rq_date
+                )
+            });
             return Ok(());
         }
 
         let row = col_lock.0.get(row_num).unwrap().read().await;
         col_matrix_lock.row_mut(row_num).assign(&row);
 
-        debug!("{}",
-            {
-                let received = Utc::now().timestamp_micros();
-                format!(
-                    "sync_collateral: after row insert col_matrix_lock = {:?}, rq_date = {}, \
+        debug!("{}", {
+            let received = Utc::now().timestamp_micros();
+            format!(
+                "sync_collateral: after row insert col_matrix_lock = {:?}, rq_date = {}, \
                      received = {}, delta = {} μs",
-                    col_matrix_lock,
-                    rq_date,
-                    received,
-                    received - rq_date
-                )
-            }
-        );
+                col_matrix_lock,
+                rq_date,
+                received,
+                received - rq_date
+            )
+        });
 
         Ok(())
     }
@@ -1139,37 +1140,33 @@ impl Cache {
         );
 
         if row_num > low_bound {
-            debug!("{}",
-                {
-                    let received = Utc::now().timestamp_micros();
-                    format!(
-                        "sync_borrowed: we sync borrowed, rq_date = {}, \
+            debug!("{}", {
+                let received = Utc::now().timestamp_micros();
+                format!(
+                    "sync_borrowed: we sync borrowed, rq_date = {}, \
                          received = {}, delta = {} μs",
-                        rq_date,
-                        received,
-                        received - rq_date
-                    )
-                }
-            );
+                    rq_date,
+                    received,
+                    received - rq_date
+                )
+            });
             return Ok(());
         }
 
         let row = bor_lock.0.get(row_num).unwrap().read().await;
         bor_matrix_lock.row_mut(row_num).assign(&row);
 
-        debug!("{}",
-            {
-                let received = Utc::now().timestamp_micros();
-                format!(
-                    "sync_borrowed: after row insert bor_matrix_lock = {:?}, rq_date = {}, \
+        debug!("{}", {
+            let received = Utc::now().timestamp_micros();
+            format!(
+                "sync_borrowed: after row insert bor_matrix_lock = {:?}, rq_date = {}, \
                      received = {}, delta = {} μs",
-                    bor_matrix_lock,
-                    rq_date,
-                    received,
-                    received - rq_date
-                )
-            }
-        );
+                bor_matrix_lock,
+                rq_date,
+                received,
+                received - rq_date
+            )
+        });
 
         Ok(())
     }
@@ -1209,8 +1206,7 @@ impl Cache {
             }
             (hf_lock.0[row_num], hf_lock.1) = (col_eff / bor_eff, Utc::now().timestamp_micros());
 
-            debug!("{}",
-            {
+            debug!("{}", {
                 let received = Utc::now().timestamp_micros();
                 format!(
                     "calc_hf: user = {:?}, hf = {:?}, rq_date = {}, \
@@ -1221,8 +1217,7 @@ impl Cache {
                     received,
                     received - rq_date
                 )
-            }
-        );
+            });
 
             return Ok(());
         }
@@ -1234,19 +1229,17 @@ impl Cache {
         let mut hf_lock = self.health_factors.write().await;
         (hf_lock.0, hf_lock.1) = (col_eff / bor_eff, Utc::now().timestamp_micros());
 
-        debug!("{}",
-            {
-                let received = Utc::now().timestamp_micros();
-                format!(
-                    "calc_hf: hf = {:?}, rq_date = {}, \
+        debug!("{}", {
+            let received = Utc::now().timestamp_micros();
+            format!(
+                "calc_hf: hf = {:?}, rq_date = {}, \
                      received = {}, delta = {} μs",
-                    hf_lock,
-                    rq_date,
-                    received,
-                    received - rq_date
-                )
-            }
-        );
+                hf_lock,
+                rq_date,
+                received,
+                received - rq_date
+            )
+        });
 
         Ok(())
     }
@@ -1267,22 +1260,23 @@ where
     match cache.init_user(user, tokens, provider.clone()).await {
         Ok(exist) => {
             if !exist {
-                debug!("{}",
-                    {
-                        let received = Utc::now().timestamp_micros();
-                        format!(
-                            "create_user: cache = {:?}, rq_date = {}, \
+                debug!("{}", {
+                    let received = Utc::now().timestamp_micros();
+                    format!(
+                        "create_user: cache = {:?}, rq_date = {}, \
                              received = {}, delta = {} μs",
-                            cache,
-                            rq_date,
-                            received,
-                            received - rq_date
-                        )
-                    }
-                );
+                        cache,
+                        rq_date,
+                        received,
+                        received - rq_date
+                    )
+                });
 
                 sync_tx
-                    .send(SyncRequest::Both(cache.users.get(user).unwrap().row_num, rq_date))
+                    .send(SyncRequest::Both(
+                        cache.users.get(user).unwrap().row_num,
+                        rq_date,
+                    ))
                     .await?;
                 hf_tx.send(HFRequest::User(user.clone(), rq_date)).await?;
                 return Ok(true);
@@ -1349,17 +1343,15 @@ where
 {
     let (event, sync_tx, hf_tx, rq_date) = event;
 
-    debug!("{}",
-        {
-            let received = Utc::now().timestamp_micros();
-            format!(
-                "supply: rq_date = {}, received = {}, delta = {} μs",
-                rq_date,
-                received,
-                received - rq_date
-            )
-        }
-    );
+    debug!("{}", {
+        let received = Utc::now().timestamp_micros();
+        format!(
+            "supply: rq_date = {}, received = {}, delta = {} μs",
+            rq_date,
+            received,
+            received - rq_date
+        )
+    });
 
     if create_user(
         rq_date,
@@ -1396,11 +1388,13 @@ where
         sync_t
             .send(SyncRequest::Both(
                 c.users.get(&event.onBehalfOf).unwrap().row_num,
-                rq_date
+                rq_date,
             ))
             .await
             .unwrap();
-        hf_t.send(HFRequest::User(event.onBehalfOf, rq_date)).await.unwrap();
+        hf_t.send(HFRequest::User(event.onBehalfOf, rq_date))
+            .await
+            .unwrap();
     };
 
     let (last_sync, last_modified);
@@ -1418,7 +1412,10 @@ where
                 .send(SyncRequest::Collateral(row_num, rq_date))
                 .await
                 .unwrap();
-            hf_tx.send(HFRequest::User(event.onBehalfOf, rq_date)).await.unwrap();
+            hf_tx
+                .send(HFRequest::User(event.onBehalfOf, rq_date))
+                .await
+                .unwrap();
         };
         let skip_event = async move || {
             debug!(
@@ -1483,19 +1480,17 @@ where
         .await?;
     }
 
-    debug!("{}",
-            {
-                let received = Utc::now().timestamp_micros();
-                format!(
-                    "supplied: cache = {:?}, rq_date = {}, \
+    debug!("{}", {
+        let received = Utc::now().timestamp_micros();
+        format!(
+            "supplied: cache = {:?}, rq_date = {}, \
                      received = {}, delta = {} μs",
-                    cache,
-                    rq_date,
-                    received,
-                    received - rq_date
-                )
-            }
-        );
+            cache,
+            rq_date,
+            received,
+            received - rq_date
+        )
+    });
 
     Ok(())
 }
@@ -1604,7 +1599,12 @@ async fn liquidation_call<P>(
     cache: Arc<Cache>,
     provider: Arc<P>,
     tokens: Arc<Tokens>,
-    event: (LiquidationCall, Sender<SyncRequest>, Sender<HFRequest>, TimeStamp),
+    event: (
+        LiquidationCall,
+        Sender<SyncRequest>,
+        Sender<HFRequest>,
+        TimeStamp,
+    ),
 ) -> eyre::Result<()>
 where
     P: Provider + Clone + 'static,
@@ -1648,9 +1648,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
-    use mockall::mock;
     use super::*;
+    use mockall::mock;
+    use std::str::FromStr;
 
     #[tokio::test]
     async fn test_sync_collateral() -> eyre::Result<()> {
@@ -1810,23 +1810,172 @@ mod tests {
     async fn test_supply() -> eyre::Result<()> {
         let cache = Arc::new(Cache::default());
         let mock_provider = Arc::new(MockAave::new());
+        let token = Address::from_str("0x1Af54C263cefD1792CbFcF41B711834d657ea61D")?;
+        let user = Address::from_str("0x1Af54C263cefD1792CbFcF41B722834d657ea61D")?;
+
+        {
+            cache.users.insert(
+                user.clone(),
+                UserSettings::new(0, BitVec::<usize, Lsb0>::from_iter([true, false, false])),
+            );
+            let (collaterals, _, _) = &mut *cache.collateral.write().await;
+            collaterals.push(RwLock::new(Array1::from_vec(vec![0.0; 3])));
+        }
 
         let mut tokens = HashMap::new();
-        tokens.insert(Address::from_str("0x1Af54C263cefD1792CbFcF41B711834d657ea61D")?,
-                      TokenDetails::new(String::from("AAVE"),
-                                        Address::from_str("0xba5DdD1f9d7F570dc94a51479a000E3BCE967196")?,
-                                        0));
-        tokens.insert(Address::from_str("0x1Af54C113cefD1792CbFcF41B711834d657ea61D")?,
-                      TokenDetails::new(String::from("USDC"),
-                                        Address::from_str("0xaf88d065e77c8cC2239327C5EDb3A432268e5831")?,
-                                        1));
-        tokens.insert(Address::from_str("0x1Af54C113cefD1792CbFcF41B711824d657eb61D")?,
-                      TokenDetails::new(String::from("DAI"),
-                                        Address::from_str("0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1")?,
-                                        2));
+        tokens.insert(
+            token.clone(),
+            TokenDetails::new(
+                String::from("AAVE"),
+                Address::from_str("0xba5DdD1f9d7F570dc94a51479a000E3BCE967196")?,
+                0,
+            ),
+        );
+        tokens.insert(
+            Address::from_str("0x1Af54C113cefD1792CbFcF41B711834d657ea61D")?,
+            TokenDetails::new(
+                String::from("USDC"),
+                Address::from_str("0xaf88d065e77c8cC2239327C5EDb3A432268e5831")?,
+                1,
+            ),
+        );
+        tokens.insert(
+            Address::from_str("0x1Af54C113cefD1792CbFcF41B711824d657eb61D")?,
+            TokenDetails::new(
+                String::from("DAI"),
+                Address::from_str("0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1")?,
+                2,
+            ),
+        );
         let tokens = Arc::new(tokens);
 
-        // supply(cache, mock_provider, tokens)
+        let event = Supply {
+            reserve: token.clone(),
+            user: user.clone(),
+            onBehalfOf: user.clone(),
+            amount: alloy_primitives::U256::from(10.0),
+            referralCode: 0,
+        };
+        let (sync_tx, mut sync_rc) = channel::<SyncRequest>(1);
+        let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
+        let rq_date = Utc::now().timestamp_micros();
+
+        let sync_handler = task::spawn(async move {
+            while let Some(msg) = sync_rc.recv().await {
+                assert_eq!(SyncRequest::Collateral(0, rq_date), msg);
+            }
+        });
+
+        let hf_handler = task::spawn(async move {
+            while let Some(msg) = hf_rc.recv().await {
+                assert_eq!(HFRequest::User(user.clone(), rq_date), msg);
+            }
+        });
+
+        // 1 case: new message containing collateral
+
+        supply(
+            cache.clone(),
+            mock_provider.clone(),
+            tokens.clone(),
+            (event, sync_tx, hf_tx, rq_date),
+        )
+        .await?;
+        sync_handler.await?;
+        hf_handler.await?;
+
+        {
+            let (collaterals, _, _) = &*cache.collateral.read().await;
+            let collateral = &*collaterals.get(0).unwrap().read().await;
+
+            assert_eq!(collateral, Array1::from_vec(vec![10.0, 0.0, 0.0]));
+        }
+
+        // 2 case: new message containing reserve
+
+        let token = Address::from_str("0x1Af54C113cefD1792CbFcF41B711834d657ea61D")?;
+        let user = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
+
+        {
+            cache.users.insert(
+                user.clone(),
+                UserSettings::new(1, BitVec::<usize, Lsb0>::from_iter([false, false, false])),
+            );
+            let (reserves, _, _) = &mut *cache.reserve.write().await;
+            reserves.push(RwLock::new(Array1::from_vec(vec![0.0; 3])));
+            reserves.push(RwLock::new(Array1::from_vec(vec![0.0; 3])));
+        }
+
+        let event = Supply {
+            reserve: token.clone(),
+            user: user.clone(),
+            onBehalfOf: user.clone(),
+            amount: alloy_primitives::U256::from(3.0),
+            referralCode: 0,
+        };
+
+        let (sync_tx, _) = channel::<SyncRequest>(1);
+        let (hf_tx, _) = channel::<HFRequest>(1);
+
+        supply(
+            cache.clone(),
+            mock_provider.clone(),
+            tokens.clone(),
+            (event, sync_tx, hf_tx, rq_date),
+        )
+        .await?;
+
+        {
+            let (reserves, _, _) = &*cache.reserve.read().await;
+            let reserve = &*reserves.get(1).unwrap().read().await;
+
+            assert_eq!(reserve, Array1::from_vec(vec![0.0, 3.0, 0.0]));
+        }
+
+        // 3 case: new message skip event
+
+        let token = Address::from_str("0x1Af54C113cefD1792CbFcF41B711824d657eb61D")?;
+        let user = Address::from_str("0x1Af54C263cefD1792CbFcF41B722834d611ea61D")?;
+
+        {
+            cache.users.insert(
+                user.clone(),
+                UserSettings::new(2, BitVec::<usize, Lsb0>::from_iter([false, false, true])),
+            );
+            let (collaterals, last_sync, _) = &mut *cache.collateral.write().await;
+            collaterals.push(RwLock::new(Array1::from_vec(vec![0.0; 3])));
+            collaterals.push(RwLock::new(Array1::from_vec(vec![0.0; 3])));
+
+            *last_sync = Utc::now().timestamp_micros();
+        }
+
+        let event = Supply {
+            reserve: token.clone(),
+            user: user.clone(),
+            onBehalfOf: user.clone(),
+            amount: alloy_primitives::U256::from(3.0),
+            referralCode: 0,
+        };
+
+        let (sync_tx, _) = channel::<SyncRequest>(1);
+        let (hf_tx, _) = channel::<HFRequest>(1);
+
+        supply(
+            cache.clone(),
+            mock_provider.clone(),
+            tokens.clone(),
+            (event, sync_tx, hf_tx, rq_date),
+        )
+        .await?;
+
+        {
+            let (collaterals, _, _) = &*cache.collateral.read().await;
+            let collateral = &*collaterals.get(1).unwrap().read().await;
+
+            assert_eq!(collateral, Array1::from_vec(vec![0.0, 0.0, 0.0]));
+        }
+
+        // 4 case: new message sync user
 
         Ok(())
     }
