@@ -9,20 +9,21 @@ use alloy::providers::Provider;
 use alloy::rpc::types::{Filter, Header};
 use alloy::sol;
 use alloy::sol_types::SolEventInterface;
+use alloy_primitives::logs_bloom;
 use bitvec::prelude::*;
 use chrono::Utc;
 use dashmap::DashMap;
-use futures::future::join_all;
 use futures::FutureExt;
-use ndarray::{array, concatenate, Array1, Array2, Axis};
+use futures::future::join_all;
+use ndarray::{Array1, Array2, Axis, array, concatenate};
 use std::any::Any;
 use std::collections::HashMap;
 use std::default::Default;
 use std::panic;
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
-use tokio::sync::mpsc::{channel, Sender};
 use tokio::sync::RwLock;
+use tokio::sync::mpsc::{Sender, channel};
 use tokio::{task, time};
 use tracing::{debug, error, info};
 
@@ -608,16 +609,6 @@ where
     Ok(tokens)
 }
 
-fn handle_panic(err: Option<Box<dyn Any + Send>>, msg: &str) {
-    if let Some(e) = err {
-        if let Some(s) = e.downcast_ref::<&str>() {
-            error!("{} error = {}", msg, s);
-        } else if let Some(s) = e.downcast_ref::<String>() {
-            error!("{} error = {}", msg, s);
-        }
-    }
-}
-
 type TimeStamp = i64;
 
 enum AaveEvents {
@@ -627,15 +618,16 @@ enum AaveEvents {
 
 async fn listen_events<P>(provider: Arc<P>, tx: Sender<AaveEvents>) -> eyre::Result<()>
 where
-    P: Provider + Clone,
+    P: Provider + Clone + 'static,
 {
-    let l2_pool = IL2Pool::new(L2_POOL_ADDRESS.parse()?, provider.clone());
-    let filter = Filter::new().address(l2_pool.address().clone());
-    let mut stream = provider.subscribe_logs(&filter).await?;
-
     task::spawn(async move {
-        debug!("listen_events: created thread");
-        let panicked = panic::AssertUnwindSafe(async move {
+        loop {
+            debug!("listen_events: created thread");
+
+            let l2_pool = IL2Pool::new(L2_POOL_ADDRESS.parse().unwrap(), provider.clone());
+            let filter = Filter::new().address(l2_pool.address().clone());
+            let mut stream = provider.subscribe_logs(&filter).await.unwrap();
+
             while let Ok(log) = stream.recv().await {
                 if let Ok(Log { data, .. }) = IL2PoolEvents::decode_log(log.as_ref()) {
                     match data {
@@ -670,11 +662,7 @@ where
                     }
                 }
             }
-        })
-        .catch_unwind()
-        .await;
-
-        handle_panic(panicked.err(), "listen_events:");
+        }
     });
 
     Ok(())
@@ -686,35 +674,47 @@ async fn listen_price_update<P>(
     tx: Sender<AaveEvents>,
 ) -> eyre::Result<()>
 where
-    P: Provider + Clone,
+    P: Provider + Clone + 'static,
 {
     for (token_name, TokenDetails { price_source, .. }) in tokens {
-        let filter = Filter::new().address(price_source.clone());
-        let mut stream = provider.clone().subscribe_logs(&filter).await?;
-
-        let (t, name) = (tx.clone(), token_name.clone());
+        let (token_name, price_source, provider, tx) = (
+            token_name.clone(),
+            price_source.clone(),
+            provider.clone(),
+            tx.clone(),
+        );
         task::spawn(async move {
-            debug!("listen_price_update: created thread");
-            let panicked = panic::AssertUnwindSafe(async move {
+            loop {
+                debug!("listen_price_update: created thread");
+
+                let filter = Filter::new().address(price_source);
+                let mut stream = provider.subscribe_logs(&filter).await.unwrap();
+
                 while let Ok(log) = stream.recv().await {
-                    if let Ok(Log { data, .. }) = IChainlinkAggregatorEvents::decode_log(log.as_ref()) {
-                        if t.send(AaveEvents::IChainlinkAggregatorEvents(
-                            data,
-                            name,
-                            Utc::now().timestamp_micros(),
-                        )).await
-                            .is_err()
-                        {
-                            info!(
-                            "Main thread dropped receiver for chainlink events, exiting background task."
-                        );
-                            break;
+                    if let Ok(Log { data, .. }) =
+                        IChainlinkAggregatorEvents::decode_log(log.as_ref())
+                    {
+                        match data {
+                            IChainlinkAggregatorEvents::AnswerUpdated(_) => {
+                                debug!("listen_price_update: answer updated event")
+                            }
+                        }
+
+                        let r = tx
+                            .send(AaveEvents::IChainlinkAggregatorEvents(
+                                data,
+                                token_name,
+                                Utc::now().timestamp_micros(),
+                            ))
+                            .await;
+
+                        match r.err() {
+                            Some(_) => debug!("listen_price_update: error"),
+                            None => debug!("listen_price_update: OK"),
                         }
                     }
                 }
-            }).catch_unwind().await;
-
-            handle_panic(panicked.err(), "listen_price_update:");
+            }
         });
     }
 
@@ -734,8 +734,10 @@ where
         AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS.parse()?,
         provider.clone(),
     );
+
     task::spawn(async move {
         debug!("liquidation_threshold_update: created thread");
+
         let mut interval = time::interval(Duration::from_secs(600));
         loop {
             interval.tick().await;
@@ -799,28 +801,25 @@ async fn listen_sync(
     let mut senders = Vec::with_capacity(workers);
     for _ in 0..workers {
         let (tx, mut rc) = channel::<SyncRequest>(bound);
-        let c = cache.clone();
+        let cache = cache.clone();
         task::spawn(async move {
-            debug!("listen_sync: created thread");
-            let panicked = panic::AssertUnwindSafe(async move {
+            loop {
+                debug!("listen_sync: created thread");
+
                 while let Some(sync_rq) = rc.recv().await {
                     match sync_rq {
                         SyncRequest::Collateral(row_num, rq_date) => {
-                            let _ = c.sync_collateral(row_num, rq_date).await;
+                            let _ = cache.sync_collateral(row_num, rq_date).await;
                         }
                         SyncRequest::Borrowed(row_num, rq_date) => {
-                            let _ = c.sync_borrowed(row_num, rq_date).await;
+                            let _ = cache.sync_borrowed(row_num, rq_date).await;
                         }
                         SyncRequest::Both(row_num, rq_date) => {
-                            let _ = c.sync_data(row_num, rq_date).await;
+                            let _ = cache.sync_data(row_num, rq_date).await;
                         }
                     }
                 }
-            })
-            .catch_unwind()
-            .await;
-
-            handle_panic(panicked.err(), "listen_sync:");
+            }
         });
         senders.push(tx);
     }
@@ -842,36 +841,34 @@ async fn listen_hf_calc(
     let mut senders = Vec::with_capacity(workers);
     for _ in 0..workers {
         let (tx, mut rc) = channel::<HFRequest>(bound);
-        let c = cache.clone();
+        let cache = cache.clone();
         task::spawn(async move {
-            debug!("listen_hf_calc: created thread");
-            let panicked = panic::AssertUnwindSafe(async move {
+            loop {
+                debug!("listen_hf_calc: created thread");
+
                 while let Some(hf_rq) = rc.recv().await {
                     match hf_rq {
-                        HFRequest::User(user, rq_date) => match c
-                            .calc_hf(Some(&user), rq_date)
-                            .await
-                        {
-                            Ok(_) => {
-                                let (hf, _) = &*c.health_factors.read().await;
-                                debug!("listen_hf_calc: user = {}, hf = {}", user, hf);
+                        HFRequest::User(user, rq_date) => {
+                            match cache.calc_hf(Some(&user), rq_date).await {
+                                Ok(_) => {
+                                    let (hf, _) = &*cache.health_factors.read().await;
+                                    debug!("listen_hf_calc: user = {}, hf = {}", user, hf);
+                                }
+                                Err(e) => {
+                                    error!("listen_hf_calc: user = {}, error = {:?}", user, e)
+                                }
                             }
-                            Err(e) => error!("listen_hf_calc: user = {}, error = {:?}", user, e),
-                        },
-                        HFRequest::Full(rq_date) => match c.calc_hf(None, rq_date).await {
+                        }
+                        HFRequest::Full(rq_date) => match cache.calc_hf(None, rq_date).await {
                             Ok(_) => {
-                                let (hf, _) = &*c.health_factors.read().await;
+                                let (hf, _) = &*cache.health_factors.read().await;
                                 debug!("listen_hf_calc: hf = {}", hf);
                             }
                             Err(e) => error!("listen_hf_calc: error = {:?}", e),
                         },
                     }
                 }
-            })
-            .catch_unwind()
-            .await;
-
-            handle_panic(panicked.err(), "listen_hf_calc:");
+            }
         });
         senders.push(tx);
     }
@@ -918,6 +915,45 @@ impl Cache {
         self.users.contains_key(addr)
     }
 
+    async fn sync_user<P>(
+        &self,
+        user: &Address,
+        tokens: &Tokens,
+        provider: Arc<P>,
+    ) -> eyre::Result<()>
+    where
+        P: Provider + Clone,
+    {
+        let (collateral, reserve, borrowed) = self.get_user_data(provider, tokens, user).await?;
+        let row_num = self.users.get(user).unwrap().row_num;
+
+        {
+            let collaterals = self.collateral.write().await;
+            let mut col = collaterals.0.get(row_num).unwrap().write().await;
+            *col = Array1::from(collateral);
+
+            debug!("sync_user: new collateral = {:?}", col);
+        }
+
+        {
+            let reserves = self.reserve.write().await;
+            let mut res = reserves.0.get(row_num).unwrap().write().await;
+            *res = Array1::from(reserve);
+
+            debug!("sync_user: new reserve = {:?}", res);
+        }
+
+        {
+            let borroweds = self.borrowed.write().await;
+            let mut bor = borroweds.0.get(row_num).unwrap().write().await;
+            *bor = Array1::from(borrowed);
+
+            debug!("sync_user: new borrowed = {:?}", bor);
+        }
+
+        Ok(())
+    }
+
     async fn init_user<P>(
         &self,
         user: &Address,
@@ -950,6 +986,44 @@ impl Cache {
             *user_num_lock += 1;
         }
 
+        let (collateral, reserve, borrowed) = self.get_user_data(provider, tokens, user).await?;
+        let now = Utc::now().timestamp_micros();
+        {
+            let mut locked = self.collateral.write().await;
+            locked.0.push(RwLock::new(Array1::from(collateral)));
+            (locked.1, locked.2) = (now, now);
+
+            debug!("init_user: new collateral = {:?}", locked.1);
+        }
+
+        {
+            let mut locked = self.reserve.write().await;
+            locked.0.push(RwLock::new(Array1::from(reserve)));
+            (locked.1, locked.2) = (now, now);
+
+            debug!("init_user: new reserve = {:?}", locked.1);
+        }
+
+        {
+            let mut locked = self.borrowed.write().await;
+            locked.0.push(RwLock::new(Array1::from(borrowed)));
+            (locked.1, locked.2) = (now, now);
+
+            debug!("init_user: new borrowed = {:?}", locked.1);
+        }
+
+        Ok(false)
+    }
+
+    async fn get_user_data<P>(
+        &self,
+        provider: Arc<P>,
+        tokens: &Tokens,
+        user: &Address,
+    ) -> eyre::Result<(Vec<f64>, Vec<f64>, Vec<f64>)>
+    where
+        P: Provider + Clone,
+    {
         let aave_protocol_data_provider = IAaveProtocolDataProvider::new(
             AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS.parse()?,
             provider.clone(),
@@ -986,32 +1060,7 @@ impl Cache {
             borrowed[idx] = f64::from(urd.currentVariableDebt);
         }
 
-        let now = Utc::now().timestamp_micros();
-        {
-            let mut locked = self.collateral.write().await;
-            locked.0.push(RwLock::new(Array1::from(collateral)));
-            (locked.1, locked.2) = (now, now);
-
-            debug!("init_user: new collateral = {:?}", locked.1);
-        }
-
-        {
-            let mut locked = self.reserve.write().await;
-            locked.0.push(RwLock::new(Array1::from(reserve)));
-            (locked.1, locked.2) = (now, now);
-
-            debug!("init_user: new reserve = {:?}", locked.1);
-        }
-
-        {
-            let mut locked = self.borrowed.write().await;
-            locked.0.push(RwLock::new(Array1::from(borrowed)));
-            (locked.1, locked.2) = (now, now);
-
-            debug!("init_user: new borrowed = {:?}", locked.1);
-        }
-
-        Ok(false)
+        Ok((collateral, reserve, borrowed))
     }
 
     fn remove_user(&self, addr: &Address) {
@@ -1036,17 +1085,22 @@ impl Cache {
         let mut senders = vec![];
         for _ in 0..workers {
             let (tx, mut rc) = channel::<T>(bound);
-            let (cb, c, p, t) = (
+            let (callback, cache, provider, tokens) = (
                 callback.clone(),
                 cache.clone(),
                 provider.clone(),
                 tokens.clone(),
             );
             task::spawn(async move {
-                debug!("subscribe: created thread");
-                while let Some(msg) = rc.recv().await {
-                    if let Err(e) = cb(c.clone(), p.clone(), t.clone(), msg).await {
-                        error!("Error while calling event listener: {:?}", e);
+                loop {
+                    debug!("subscribe: created thread");
+
+                    while let Some(msg) = rc.recv().await {
+                        if let Err(e) =
+                            callback(cache.clone(), provider.clone(), tokens.clone(), msg).await
+                        {
+                            error!("Error while calling event listener: {:?}", e);
+                        }
                     }
                 }
             });
@@ -1377,24 +1431,25 @@ where
     let idx = tokens.get(&event.reserve).unwrap().order;
     let now = Utc::now().timestamp_micros();
 
-    let (c, sync_t, hf_t) = (cache.clone(), sync_tx.clone(), hf_tx.clone());
+    let c = cache.clone();
     let sync_user = async move || {
         debug!("supply: sync_user user = {}", event.onBehalfOf);
 
-        c.remove_user(&event.onBehalfOf);
-        c.init_user(&event.onBehalfOf, &tokens, provider.clone())
+        c.sync_user(&event.onBehalfOf, &tokens, provider)
             .await
             .unwrap();
-        sync_t
-            .send(SyncRequest::Both(
-                c.users.get(&event.onBehalfOf).unwrap().row_num,
+
+        debug!("{}", {
+            let received = Utc::now().timestamp_micros();
+            format!(
+                "sync_user: cache = {:?}, rq_date = {}, \
+                             received = {}, delta = {} μs",
+                c,
                 rq_date,
-            ))
-            .await
-            .unwrap();
-        hf_t.send(HFRequest::User(event.onBehalfOf, rq_date))
-            .await
-            .unwrap();
+                received,
+                received - rq_date
+            )
+        });
     };
 
     let (last_sync, last_modified);
@@ -1649,6 +1704,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Days;
     use mockall::mock;
     use std::str::FromStr;
 
@@ -1976,6 +2032,58 @@ mod tests {
         }
 
         // 4 case: new message sync user
+
+        let rq_date = Utc::now()
+            .checked_sub_days(Days::new(1))
+            .unwrap()
+            .timestamp_micros();
+        {
+            cache.users.insert(
+                user.clone(),
+                UserSettings::new(2, BitVec::<usize, Lsb0>::from_iter([false, false, true])),
+            );
+            let (_, last_sync, last_modified) = &mut *cache.collateral.write().await;
+            *last_sync = Utc::now()
+                .checked_sub_days(Days::new(2))
+                .unwrap()
+                .timestamp_micros();
+            *last_modified = Utc::now().timestamp_micros();
+        }
+
+        let event = Supply {
+            reserve: token.clone(),
+            user: user.clone(),
+            onBehalfOf: user.clone(),
+            amount: alloy_primitives::U256::from(3.0),
+            referralCode: 0,
+        };
+
+        let (sync_tx, mut sync_rc) = channel::<SyncRequest>(1);
+        let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
+
+        let sync_handler = task::spawn(async move {
+            while let Some(msg) = sync_rc.recv().await {
+                assert_eq!(SyncRequest::Both(2, rq_date), msg);
+            }
+        });
+
+        let hf_handler = task::spawn(async move {
+            while let Some(msg) = hf_rc.recv().await {
+                assert_eq!(HFRequest::User(user.clone(), rq_date), msg);
+            }
+        });
+
+        supply(
+            cache.clone(),
+            mock_provider.clone(),
+            tokens.clone(),
+            (event, sync_tx, hf_tx, rq_date),
+        )
+        .await?;
+        sync_handler.await?;
+        hf_handler.await?;
+
+        assert_eq!(cache.contains(&user), true);
 
         Ok(())
     }
