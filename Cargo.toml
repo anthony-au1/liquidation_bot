@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 alloy = { version = "1.0.9", features = ["provider-ws",
-    "sol-types", "contract", "transport-ws"] }
+    "sol-types", "contract", "transport-ws", "transports", "rpc-types"] }
 clap = { version = "4.5.39", features = ["derive"] }
 eyre = "0.6.12"
 ndarray = "0.16.1"

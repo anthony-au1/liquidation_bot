@@ -1707,6 +1707,8 @@ mod tests {
     use chrono::Days;
     use mockall::mock;
     use std::str::FromStr;
+    use alloy::providers::{ProviderBuilder, WsConnect};
+    use crate::arbitrum;
 
     #[tokio::test]
     async fn test_sync_collateral() -> eyre::Result<()> {
@@ -2073,9 +2075,14 @@ mod tests {
             }
         });
 
+        let provider = ProviderBuilder::new()
+            .connect_ws(WsConnect::new(WS_URL))
+            .await?;
+        let provider = Arc::new(provider);
+
         supply(
             cache.clone(),
-            mock_provider.clone(),
+            provider,
             tokens.clone(),
             (event, sync_tx, hf_tx, rq_date),
         )
