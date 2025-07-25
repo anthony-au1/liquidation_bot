@@ -1,12 +1,12 @@
+use crate::arbitrum::arbitrum::IAaveProtocolDataProvider::{IAaveProtocolDataProviderInstance, TokenData};
 use crate::arbitrum::arbitrum::IChainlinkAggregator::{AnswerUpdated, IChainlinkAggregatorEvents};
 use crate::arbitrum::arbitrum::IL2Pool::{
     Borrow, IL2PoolEvents, LiquidationCall, Repay, ReserveDataUpdated,
     ReserveUsedAsCollateralDisabled, ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
-use alloy::eips::{BlockId, BlockNumberOrTag};
-use alloy::primitives::{Address, BlockNumber, Log};
+use alloy::primitives::{Address, Log};
 use alloy::providers::Provider;
-use alloy::rpc::types::{Filter, Header};
+use alloy::rpc::types::Filter;
 use alloy::sol;
 use alloy::sol_types::SolEventInterface;
 use bitvec::prelude::*;
@@ -16,10 +16,11 @@ use futures::future::join_all;
 use ndarray::{Array1, Array2, Axis, array, concatenate};
 use std::collections::HashMap;
 use std::default::Default;
-use std::sync::{Arc, mpsc};
+use std::sync::Arc;
 use std::time::Duration;
+use async_trait::async_trait;
 use tokio::sync::RwLock;
-use tokio::sync::mpsc::{Sender, channel};
+use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::{task, time};
 use tracing::{debug, error, info};
 
@@ -153,141 +154,9 @@ sol! {
     }
 }
 
-pub async fn get_block_number(provider: &dyn Provider) -> eyre::Result<BlockNumber> {
-    let block_number = provider.get_block_number().await?;
-    debug!("block number: {}", block_number);
-
-    Ok(block_number)
-}
-
-pub async fn get_block(provider: &dyn Provider, block: BlockNumber) -> eyre::Result<()> {
-    let block_id = BlockId::from(block as u64);
-    let block = provider.get_block(block_id).await?;
-    if let Some(block) = block {
-        debug!("block: {:?}", block);
-    }
-
-    Ok(())
-}
-
-pub async fn get_logs(provider: &dyn Provider) -> eyre::Result<()> {
-    let filter = Filter::new()
-        .from_block(BlockNumberOrTag::Latest)
-        .to_block(BlockNumberOrTag::Latest);
-    let logs = provider.get_logs(&filter).await?;
-    for log in logs {
-        debug!("Log: {:?}", log);
-        debug!("Block: {:?}", log.block_number);
-        debug!("Data: {:?}", log.inner.data);
-    }
-
-    Ok(())
-}
-
-pub async fn get_headers(provider: &dyn Provider) -> eyre::Result<()> {
-    let mut stream = provider.subscribe_blocks().await?;
-
-    let (tx, rc) = mpsc::sync_channel::<Header>(100);
-
-    task::spawn(async move {
-        while let Ok(header) = stream.recv().await {
-            if tx.send(header).is_err() {
-                info!("Main thread dropped receiver, exiting background task.");
-                break;
-            }
-        }
-    });
-
-    while let Ok(header) = rc.recv() {
-        info!("header: {:?}", header);
-
-        time::sleep(Duration::from_secs(5)).await;
-    }
-
-    Ok(())
-}
-
-pub async fn get_borrows<P>(provider: Box<P>) -> eyre::Result<()>
-where
-    P: Provider + Clone,
-{
-    let l2_pool = IL2Pool::new(L2_POOL_ADDRESS.parse()?, provider.clone());
-    let latest = provider.get_block_number().await?;
-    let filter = l2_pool
-        .Borrow_filter()
-        .from_block(BlockNumberOrTag::Number(latest - 100u64))
-        .to_block(BlockNumberOrTag::Latest)
-        .filter;
-
-    let mut stream = provider.subscribe_logs(&filter).await?;
-    let (tx, rc) = mpsc::sync_channel::<Borrow>(100);
-
-    task::spawn(async move {
-        while let Ok(log) = stream.recv().await {
-            if let Ok(Log {
-                data: IL2PoolEvents::Borrow(event),
-                ..
-            }) = IL2PoolEvents::decode_log(log.as_ref())
-            {
-                if tx.send(event).is_err() {
-                    info!("Main thread dropped receiver, exiting background task.");
-                    break;
-                }
-            }
-        }
-    });
-
-    while let Ok(event) = rc.recv() {
-        info!(
-            "event: reserve = {}, user = {}, onBehalfOf = {}, amount = {}, interestRateMode = {}, borrowRate = {}, referralCode = {}",
-            event.reserve,
-            event.user,
-            event.onBehalfOf,
-            event.amount,
-            event.interestRateMode,
-            event.borrowRate,
-            event.referralCode
-        );
-
-        let user_account_data = l2_pool.getUserAccountData(event.user).call().await?;
-
-        info!(
-            "user data: totalCollateralBase = {}, totalDebtBase = {}, availableBorrowsBase = {}, currentLiquidationThreshold = {}, ltv = {}, healthFactor = {}",
-            user_account_data.totalCollateralBase,
-            user_account_data.totalDebtBase,
-            user_account_data.availableBorrowsBase,
-            user_account_data.currentLiquidationThreshold,
-            user_account_data.ltv,
-            user_account_data.healthFactor
-        );
-
-        info!("******************************************************************************");
-
-        time::sleep(Duration::from_secs(5)).await;
-    }
-
-    Ok(())
-}
-
-pub async fn test_me() -> eyre::Result<()> {
-    let coll = array![[0.1, 0.5, 5_f64], [0.3, 1_f64, 100_f64]];
-    let bor = array![[0.5, 0.1, 10_f64], [0.8, 0_f64, 0_f64]];
-    let lt = array![0.8, 0.73, 0.85];
-    let prices = array![110_000_f64, 3500_f64, 200_f64];
-
-    let ltp = &lt * &prices;
-    info!("ltp: {:?}", ltp);
-
-    let coll_eff = coll.dot(&ltp);
-    info!("coll_eff: {:?}", coll_eff);
-
-    let bor_eff = bor.dot(&prices);
-    info!("bor_eff: {:?}", bor_eff);
-
-    let hf = &coll_eff / &bor_eff;
-    info!("hf: {:?}", hf);
-
-    Ok(())
+#[async_trait]
+trait AaveProtocolDataProvider: Send + Sync {
+    async fn get_all_reserves_tokens() -> eyre::Result<Vec<TokenData>>;
 }
 
 pub async fn start<P>(provider: Arc<P>) -> eyre::Result<()>
@@ -312,7 +181,7 @@ where
 
     let (tx_events, mut rc_events) = channel::<AaveEvents>(1000_000);
     listen_events(provider.clone(), tx_events.clone()).await?;
-    listen_price_update(provider.clone(), &tokens, tx_events.clone()).await?;
+    listen_price_update(provider.clone(), &tokens, tx_events).await?;
 
     let w_num = 4;
     let bound = 1000;
@@ -620,46 +489,52 @@ where
         loop {
             debug!("listen_events: created thread");
 
-            let l2_pool = IL2Pool::new(L2_POOL_ADDRESS.parse().unwrap(), provider.clone());
-            let filter = Filter::new().address(l2_pool.address().clone());
-            let mut stream = provider.subscribe_logs(&filter).await.unwrap();
-
-            while let Ok(log) = stream.recv().await {
-                if let Ok(Log { data, .. }) = IL2PoolEvents::decode_log(log.as_ref()) {
-                    match data {
-                        IL2PoolEvents::Supply(_) => debug!("listen_events: supply event"),
-                        IL2PoolEvents::Withdraw(_) => debug!("listen_events: withdraw event"),
-                        IL2PoolEvents::Borrow(_) => debug!("listen_events: borrow event"),
-                        IL2PoolEvents::Repay(_) => debug!("listen_events: repay event"),
-                        IL2PoolEvents::ReserveUsedAsCollateralEnabled(_) => {
-                            debug!("listen_events: enable collateral event")
-                        }
-                        IL2PoolEvents::ReserveUsedAsCollateralDisabled(_) => {
-                            debug!("listen_events: disable collateral event")
-                        }
-                        IL2PoolEvents::LiquidationCall(_) => {
-                            debug!("listen_events: liquidation event")
-                        }
-                        IL2PoolEvents::ReserveDataUpdated(_) => {
-                            debug!("listen_events: reserve data updated event")
-                        }
-                    }
-
-                    let r = tx
-                        .send(AaveEvents::IL2PoolEvents(
-                            data,
-                            Utc::now().timestamp_micros(),
-                        ))
-                        .await;
-
-                    match r.err() {
-                        Some(_) => debug!("listen_events: error"),
-                        None => debug!("listen_events: OK"),
-                    }
-                }
+            match listen_events_handler(&provider, &tx).await {
+                Ok(_) => debug!("listen_events: Ok"),
+                Err(e) => debug!("listen_events: error = {:?}", e),
             }
         }
     });
+
+    Ok(())
+}
+
+async fn listen_events_handler<P>(provider: &P, tx: &Sender<AaveEvents>) -> eyre::Result<()>
+where
+    P: Provider + Clone + 'static,
+{
+    let l2_pool = IL2Pool::new(L2_POOL_ADDRESS.parse()?, provider.clone());
+    let filter = Filter::new().address(l2_pool.address().clone());
+    let mut stream = provider.subscribe_logs(&filter).await?;
+
+    while let Ok(log) = stream.recv().await {
+        if let Ok(Log { data, .. }) = IL2PoolEvents::decode_log(log.as_ref()) {
+            match data {
+                IL2PoolEvents::Supply(_) => debug!("listen_events: supply event"),
+                IL2PoolEvents::Withdraw(_) => debug!("listen_events: withdraw event"),
+                IL2PoolEvents::Borrow(_) => debug!("listen_events: borrow event"),
+                IL2PoolEvents::Repay(_) => debug!("listen_events: repay event"),
+                IL2PoolEvents::ReserveUsedAsCollateralEnabled(_) => {
+                    debug!("listen_events: enable collateral event")
+                }
+                IL2PoolEvents::ReserveUsedAsCollateralDisabled(_) => {
+                    debug!("listen_events: disable collateral event")
+                }
+                IL2PoolEvents::LiquidationCall(_) => {
+                    debug!("listen_events: liquidation event")
+                }
+                IL2PoolEvents::ReserveDataUpdated(_) => {
+                    debug!("listen_events: reserve data updated event")
+                }
+            }
+
+            tx.send(AaveEvents::IL2PoolEvents(
+                data,
+                Utc::now().timestamp_micros(),
+            ))
+            .await?;
+        }
+    }
 
     Ok(())
 }
@@ -672,9 +547,9 @@ async fn listen_price_update<P>(
 where
     P: Provider + Clone + 'static,
 {
-    for (token_name, TokenDetails { price_source, .. }) in tokens {
-        let (token_name, price_source, provider, tx) = (
-            token_name.clone(),
+    for (token, TokenDetails { price_source, .. }) in tokens {
+        let (token, price_source, provider, tx) = (
+            token.clone(),
             price_source.clone(),
             provider.clone(),
             tx.clone(),
@@ -683,35 +558,44 @@ where
             loop {
                 debug!("listen_price_update: created thread");
 
-                let filter = Filter::new().address(price_source);
-                let mut stream = provider.subscribe_logs(&filter).await.unwrap();
-
-                while let Ok(log) = stream.recv().await {
-                    if let Ok(Log { data, .. }) =
-                        IChainlinkAggregatorEvents::decode_log(log.as_ref())
-                    {
-                        match data {
-                            IChainlinkAggregatorEvents::AnswerUpdated(_) => {
-                                debug!("listen_price_update: answer updated event")
-                            }
-                        }
-
-                        let r = tx
-                            .send(AaveEvents::IChainlinkAggregatorEvents(
-                                data,
-                                token_name,
-                                Utc::now().timestamp_micros(),
-                            ))
-                            .await;
-
-                        match r.err() {
-                            Some(_) => debug!("listen_price_update: error"),
-                            None => debug!("listen_price_update: OK"),
-                        }
-                    }
+                match listen_price_update_handler(&provider, token, price_source, &tx).await {
+                    Ok(_) => debug!("listen_price_update: Ok"),
+                    Err(e) => debug!("listen_price_update: error = {:?}", e),
                 }
             }
         });
+    }
+
+    Ok(())
+}
+
+async fn listen_price_update_handler<P>(
+    provider: &P,
+    token: Address,
+    price_source: Address,
+    tx: &Sender<AaveEvents>,
+) -> eyre::Result<()>
+where
+    P: Provider + Clone + 'static,
+{
+    let filter = Filter::new().address(price_source);
+    let mut stream = provider.subscribe_logs(&filter).await?;
+
+    while let Ok(log) = stream.recv().await {
+        if let Ok(Log { data, .. }) = IChainlinkAggregatorEvents::decode_log(log.as_ref()) {
+            match data {
+                IChainlinkAggregatorEvents::AnswerUpdated(_) => {
+                    debug!("listen_price_update: answer updated event")
+                }
+            }
+
+            tx.send(AaveEvents::IChainlinkAggregatorEvents(
+                data,
+                token,
+                Utc::now().timestamp_micros(),
+            ))
+            .await?;
+        }
     }
 
     Ok(())
@@ -738,46 +622,70 @@ where
         loop {
             interval.tick().await;
 
-            let mut data = vec![0.0; tokens.len()];
-            let tasks = tokens
-                .iter()
-                .map(|(token_address, TokenDetails { name, order, .. })| {
-                    let provider = aave_protocol_data_provider.clone();
-                    async move {
-                        (
-                            provider
-                                .getReserveConfigurationData(token_address.clone())
-                                .call()
-                                .await
-                                .unwrap(),
-                            name.clone(),
-                            order,
-                        )
-                    }
-                });
-
-            for (rs, name, order) in join_all(tasks).await {
-                debug!(
-                    "liquidation_threshold_update: name = {}, liquidation_threshold = {}",
-                    name, rs.liquidationThreshold
-                );
-
-                data[order.clone()] = f64::from(rs.liquidationThreshold);
-            }
-
-            let d = Array1::from_vec(data);
-            let lt_modified = {
-                let (lt, _) = &*cache.liquidation_threshold.read().await;
-                !d.iter().zip(lt).all(|(a, b)| (a - b).abs() < 1e-8)
-            };
-
-            if lt_modified {
-                let rq_date = Utc::now().timestamp_micros();
-                *cache.liquidation_threshold.write().await = (d, rq_date);
-                hf_tx.send(HFRequest::Full(rq_date)).await.unwrap();
+            match liquidation_threshold_update_handler(
+                &cache,
+                &tokens,
+                &aave_protocol_data_provider,
+                &hf_tx,
+            )
+            .await
+            {
+                Ok(_) => debug!("liquidation_threshold_update: Ok"),
+                Err(e) => debug!("liquidation_threshold_update: error = {:?}", e),
             }
         }
     });
+
+    Ok(())
+}
+
+async fn liquidation_threshold_update_handler<P>(
+    cache: &Cache,
+    tokens: &Tokens,
+    aave_protocol_data_provider: &IAaveProtocolDataProviderInstance<Arc<P>>,
+    hf_tx: &Sender<HFRequest>,
+) -> eyre::Result<()>
+where
+    P: Provider + Clone + 'static,
+{
+    let mut data = vec![0.0; tokens.len()];
+    let tasks = tokens
+        .iter()
+        .map(|(token_address, TokenDetails { name, order, .. })| {
+            let provider = aave_protocol_data_provider.clone();
+            async move {
+                (
+                    provider
+                        .getReserveConfigurationData(token_address.clone())
+                        .call()
+                        .await
+                        .unwrap(),
+                    name.clone(),
+                    order,
+                )
+            }
+        });
+
+    for (rs, name, order) in join_all(tasks).await {
+        debug!(
+            "liquidation_threshold_update: name = {}, liquidation_threshold = {}",
+            name, rs.liquidationThreshold
+        );
+
+        data[order.clone()] = f64::from(rs.liquidationThreshold);
+    }
+
+    let d = Array1::from_vec(data);
+    let lt_modified = {
+        let (lt, _) = &*cache.liquidation_threshold.read().await;
+        !d.iter().zip(lt).all(|(a, b)| (a - b).abs() < 1e-8)
+    };
+
+    if lt_modified {
+        let rq_date = Utc::now().timestamp_micros();
+        *cache.liquidation_threshold.write().await = (d, rq_date);
+        hf_tx.send(HFRequest::Full(rq_date)).await.unwrap();
+    }
 
     Ok(())
 }
@@ -802,18 +710,9 @@ async fn listen_sync(
             loop {
                 debug!("listen_sync: created thread");
 
-                while let Some(sync_rq) = rc.recv().await {
-                    match sync_rq {
-                        SyncRequest::Collateral(row_num, rq_date) => {
-                            let _ = cache.sync_collateral(row_num, rq_date).await;
-                        }
-                        SyncRequest::Borrowed(row_num, rq_date) => {
-                            let _ = cache.sync_borrowed(row_num, rq_date).await;
-                        }
-                        SyncRequest::Both(row_num, rq_date) => {
-                            let _ = cache.sync_data(row_num, rq_date).await;
-                        }
-                    }
+                match listen_sync_handler(&cache, &rc).await {
+                    Ok(_) => debug!("listen_sync: Ok"),
+                    Err(e) => debug!("listen_sync: error = {:?}", e),
                 }
             }
         });
@@ -821,6 +720,24 @@ async fn listen_sync(
     }
 
     Ok(senders)
+}
+
+async fn listen_sync_handler(cache: &Cache, mut rc: &Receiver<SyncRequest>) -> eyre::Result<()> {
+    while let Some(sync_rq) = rc.recv().await {
+        match sync_rq {
+            SyncRequest::Collateral(row_num, rq_date) => {
+                let _ = cache.sync_collateral(row_num, rq_date).await;
+            }
+            SyncRequest::Borrowed(row_num, rq_date) => {
+                let _ = cache.sync_borrowed(row_num, rq_date).await;
+            }
+            SyncRequest::Both(row_num, rq_date) => {
+                let _ = cache.sync_data(row_num, rq_date).await;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, PartialEq)]
@@ -842,27 +759,9 @@ async fn listen_hf_calc(
             loop {
                 debug!("listen_hf_calc: created thread");
 
-                while let Some(hf_rq) = rc.recv().await {
-                    match hf_rq {
-                        HFRequest::User(user, rq_date) => {
-                            match cache.calc_hf(Some(&user), rq_date).await {
-                                Ok(_) => {
-                                    let (hf, _) = &*cache.health_factors.read().await;
-                                    debug!("listen_hf_calc: user = {}, hf = {}", user, hf);
-                                }
-                                Err(e) => {
-                                    error!("listen_hf_calc: user = {}, error = {:?}", user, e)
-                                }
-                            }
-                        }
-                        HFRequest::Full(rq_date) => match cache.calc_hf(None, rq_date).await {
-                            Ok(_) => {
-                                let (hf, _) = &*cache.health_factors.read().await;
-                                debug!("listen_hf_calc: hf = {}", hf);
-                            }
-                            Err(e) => error!("listen_hf_calc: error = {:?}", e),
-                        },
-                    }
+                match listen_hf_calc_handler(&cache, &rc).await {
+                    Ok(_) => debug!("listen_hf_calc: Ok"),
+                    Err(e) => debug!("listen_hf_calc: error = {:?}", e),
                 }
             }
         });
@@ -870,6 +769,31 @@ async fn listen_hf_calc(
     }
 
     Ok(senders)
+}
+
+async fn listen_hf_calc_handler(cache: &Cache, mut rc: &Receiver<HFRequest>) -> eyre::Result<()> {
+    while let Some(hf_rq) = rc.recv().await {
+        match hf_rq {
+            HFRequest::User(user, rq_date) => match cache.calc_hf(Some(&user), rq_date).await {
+                Ok(_) => {
+                    let (hf, _) = &*cache.health_factors.read().await;
+                    debug!("listen_hf_calc: user = {}, hf = {}", user, hf);
+                }
+                Err(e) => {
+                    error!("listen_hf_calc: user = {}, error = {:?}", user, e)
+                }
+            },
+            HFRequest::Full(rq_date) => match cache.calc_hf(None, rq_date).await {
+                Ok(_) => {
+                    let (hf, _) = &*cache.health_factors.read().await;
+                    debug!("listen_hf_calc: hf = {}", hf);
+                }
+                Err(e) => error!("listen_hf_calc: error = {:?}", e),
+            },
+        }
+    }
+
+    Ok(())
 }
 
 type UserDetails = DashMap<Address, UserSettings>;
@@ -1700,8 +1624,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::arbitrum;
-    use alloy::providers::{ProviderBuilder, WsConnect};
     use chrono::Days;
     use mockall::mock;
     use std::str::FromStr;

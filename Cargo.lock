@@ -2195,6 +2195,7 @@ version = "0.1.0"
 dependencies = [
  "alloy",
  "alloy-primitives",
+ "async-trait",
  "bitvec",
  "chrono",
  "clap",
@@ -2203,7 +2204,6 @@ dependencies = [
  "futures",
  "mockall",
  "ndarray",
- "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
