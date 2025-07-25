@@ -9,17 +9,13 @@ use alloy::providers::Provider;
 use alloy::rpc::types::{Filter, Header};
 use alloy::sol;
 use alloy::sol_types::SolEventInterface;
-use alloy_primitives::logs_bloom;
 use bitvec::prelude::*;
 use chrono::Utc;
 use dashmap::DashMap;
-use futures::FutureExt;
 use futures::future::join_all;
 use ndarray::{Array1, Array2, Axis, array, concatenate};
-use std::any::Any;
 use std::collections::HashMap;
 use std::default::Default;
-use std::panic;
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -1704,11 +1700,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::arbitrum;
+    use alloy::providers::{ProviderBuilder, WsConnect};
     use chrono::Days;
     use mockall::mock;
     use std::str::FromStr;
-    use alloy::providers::{ProviderBuilder, WsConnect};
-    use crate::arbitrum;
 
     #[tokio::test]
     async fn test_sync_collateral() -> eyre::Result<()> {
@@ -1867,7 +1863,7 @@ mod tests {
     #[tokio::test]
     async fn test_supply() -> eyre::Result<()> {
         let cache = Arc::new(Cache::default());
-        let mock_provider = Arc::new(MockAave::new());
+        let mut mock_provider = Arc::new(MockAave::new());
         let token = Address::from_str("0x1Af54C263cefD1792CbFcF41B711834d657ea61D")?;
         let user = Address::from_str("0x1Af54C263cefD1792CbFcF41B722834d657ea61D")?;
 
@@ -2075,14 +2071,9 @@ mod tests {
             }
         });
 
-        let provider = ProviderBuilder::new()
-            .connect_ws(WsConnect::new(WS_URL))
-            .await?;
-        let provider = Arc::new(provider);
-
         supply(
             cache.clone(),
-            provider,
+            mock_provider.clone(),
             tokens.clone(),
             (event, sync_tx, hf_tx, rq_date),
         )
