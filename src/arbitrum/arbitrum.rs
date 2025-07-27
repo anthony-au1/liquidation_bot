@@ -1,4 +1,7 @@
-use crate::arbitrum::arbitrum::IAaveProtocolDataProvider::{IAaveProtocolDataProviderInstance, TokenData};
+use crate::arbitrum::arbitrum::IAaveOracle::IAaveOracleInstance;
+use crate::arbitrum::arbitrum::IAaveProtocolDataProvider::{
+    IAaveProtocolDataProviderInstance, TokenData, getUserReserveDataReturn,
+};
 use crate::arbitrum::arbitrum::IChainlinkAggregator::{AnswerUpdated, IChainlinkAggregatorEvents};
 use crate::arbitrum::arbitrum::IL2Pool::{
     Borrow, IL2PoolEvents, LiquidationCall, Repay, ReserveDataUpdated,
@@ -9,16 +12,16 @@ use alloy::providers::Provider;
 use alloy::rpc::types::Filter;
 use alloy::sol;
 use alloy::sol_types::SolEventInterface;
+use async_trait::async_trait;
 use bitvec::prelude::*;
 use chrono::Utc;
 use dashmap::DashMap;
 use futures::future::join_all;
-use ndarray::{Array1, Array2, Axis, array, concatenate};
+use ndarray::{Array1, Array2, Axis, concatenate};
 use std::collections::HashMap;
 use std::default::Default;
 use std::sync::Arc;
 use std::time::Duration;
-use async_trait::async_trait;
 use tokio::sync::RwLock;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::{task, time};
@@ -155,13 +158,179 @@ sol! {
 }
 
 #[async_trait]
-trait AaveProtocolDataProvider: Send + Sync {
-    async fn get_all_reserves_tokens() -> eyre::Result<Vec<TokenData>>;
+trait DataProvider: Send + Sync {
+    async fn get_all_reserves_tokens(&self) -> eyre::Result<Vec<TokenData>>;
+    async fn get_source_of_asset(&self, token: &Address) -> eyre::Result<Address>;
+    async fn listen_events<F, Fut>(&self, callback: F) -> eyre::Result<()>
+    where
+        F: Fn(IL2PoolEvents) -> Fut + Send + 'static,
+        Fut: Future<Output = eyre::Result<()>> + Send;
+    async fn listen_price_update<F, Fut>(
+        &self,
+        price_source: &Address,
+        callback: F,
+    ) -> eyre::Result<()>
+    where
+        F: Fn(IChainlinkAggregatorEvents) -> Fut + Send + 'static,
+        Fut: Future<Output = eyre::Result<()>> + Send;
+    async fn get_reserve_configuration_data(&self, token: &Address) -> eyre::Result<f64>;
+    async fn get_user_reserve_data(
+        &self,
+        token: &Address,
+        user: &Address,
+    ) -> eyre::Result<UserReserveData>;
+}
+
+struct UserReserveData {
+    usage_as_collateral_enabled: bool,
+    current_atoken_balance: f64,
+    current_variable_debt: f64,
+}
+
+impl UserReserveData {
+    fn new(
+        current_atoken_balance: f64,
+        current_variable_debt: f64,
+        usage_as_collateral_enabled: bool,
+    ) -> Self {
+        Self {
+            current_atoken_balance,
+            current_variable_debt,
+            usage_as_collateral_enabled,
+        }
+    }
+}
+
+pub struct AaveDataProvider<P>
+where
+    P: Provider + Clone + Send + Sync + 'static,
+{
+    aave_protocol_data_provider: IAaveProtocolDataProviderInstance<P>,
+    aave_oracle: IAaveOracleInstance<P>,
+    provider: P,
+}
+
+impl<P> AaveDataProvider<P>
+where
+    P: Provider + Clone + Send + Sync + 'static,
+{
+    pub fn new(provider: &P) -> Self {
+        let aave_protocol_data_provider = IAaveProtocolDataProvider::new(
+            AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS.parse().unwrap(),
+            provider.clone(),
+        );
+
+        let aave_oracle = IAaveOracle::new(AAVE_ORACLE_ADDRESS.parse().unwrap(), provider.clone());
+
+        Self {
+            aave_protocol_data_provider,
+            aave_oracle,
+            provider: provider.clone(),
+        }
+    }
+}
+
+#[async_trait]
+impl<P> DataProvider for AaveDataProvider<P>
+where
+    P: Provider + Clone + Send + Sync + 'static,
+{
+    async fn get_all_reserves_tokens(&self) -> eyre::Result<Vec<TokenData>> {
+        let token_data = self
+            .aave_protocol_data_provider
+            .getAllReservesTokens()
+            .call()
+            .await?;
+
+        Ok(token_data)
+    }
+
+    async fn get_source_of_asset(&self, token: &Address) -> eyre::Result<Address> {
+        let asset_source = self
+            .aave_oracle
+            .getSourceOfAsset(token.clone())
+            .call()
+            .await?;
+
+        Ok(asset_source)
+    }
+
+    async fn listen_events<F, Fut>(&self, callback: F) -> eyre::Result<()>
+    where
+        F: Fn(IL2PoolEvents) -> Fut + Send + 'static,
+        Fut: Future<Output = eyre::Result<()>> + Send,
+    {
+        let l2_pool = IL2Pool::new(L2_POOL_ADDRESS.parse()?, self.provider.clone());
+        let filter = Filter::new().address(l2_pool.address().clone());
+        let mut stream = self.provider.subscribe_logs(&filter).await?;
+
+        while let Ok(log) = stream.recv().await {
+            if let Ok(Log { data, .. }) = IL2PoolEvents::decode_log(log.as_ref()) {
+                callback(data).await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn listen_price_update<F, Fut>(
+        &self,
+        price_source: &Address,
+        callback: F,
+    ) -> eyre::Result<()>
+    where
+        F: Fn(IChainlinkAggregatorEvents) -> Fut + Send + 'static,
+        Fut: Future<Output = eyre::Result<()>> + Send,
+    {
+        let filter = Filter::new().address(price_source.clone());
+        let mut stream = self.provider.subscribe_logs(&filter).await?;
+
+        while let Ok(log) = stream.recv().await {
+            if let Ok(Log { data, .. }) = IChainlinkAggregatorEvents::decode_log(log.as_ref()) {
+                callback(data).await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn get_reserve_configuration_data(&self, token: &Address) -> eyre::Result<f64> {
+        let data = self
+            .aave_protocol_data_provider
+            .getReserveConfigurationData(token.clone())
+            .call()
+            .await?;
+
+        Ok(f64::from(data.liquidationThreshold))
+    }
+
+    async fn get_user_reserve_data(
+        &self,
+        token: &Address,
+        user: &Address,
+    ) -> eyre::Result<UserReserveData> {
+        let getUserReserveDataReturn {
+            currentATokenBalance: current_atoken_balance,
+            currentVariableDebt: current_variable_debt,
+            usageAsCollateralEnabled: usage_as_collateral_enabled,
+            ..
+        } = self
+            .aave_protocol_data_provider
+            .getUserReserveData(token.clone(), user.clone())
+            .call()
+            .await?;
+
+        Ok(UserReserveData::new(
+            f64::from(current_atoken_balance),
+            f64::from(current_variable_debt),
+            bool::from(usage_as_collateral_enabled),
+        ))
+    }
 }
 
 pub async fn start<P>(provider: Arc<P>) -> eyre::Result<()>
 where
-    P: Provider + Clone + 'static,
+    P: DataProvider + 'static,
 {
     let tokens = Arc::new(setup(provider.clone()).await?);
 
@@ -435,19 +604,9 @@ impl TokenDetails {
 
 async fn setup<P>(provider: Arc<P>) -> eyre::Result<Tokens>
 where
-    P: Provider + Clone,
+    P: DataProvider,
 {
-    let aave_protocol_data_provider = IAaveProtocolDataProvider::new(
-        AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS.parse()?,
-        provider.clone(),
-    );
-
-    let aave_oracle_provider = IAaveOracle::new(AAVE_ORACLE_ADDRESS.parse()?, provider.clone());
-
-    let token_data = aave_protocol_data_provider
-        .getAllReservesTokens()
-        .call()
-        .await?;
+    let token_data = provider.get_all_reserves_tokens().await?;
 
     let mut tokens = HashMap::new();
     let mut order = 0;
@@ -457,10 +616,7 @@ where
             token.symbol, token.tokenAddress
         );
 
-        let asset_source = aave_oracle_provider
-            .getSourceOfAsset(token.tokenAddress)
-            .call()
-            .await?;
+        let asset_source = provider.get_source_of_asset(&token.tokenAddress).await?;
 
         debug!("setup: token asset_address = {}", asset_source);
 
@@ -483,58 +639,52 @@ enum AaveEvents {
 
 async fn listen_events<P>(provider: Arc<P>, tx: Sender<AaveEvents>) -> eyre::Result<()>
 where
-    P: Provider + Clone + 'static,
+    P: DataProvider + 'static,
 {
     task::spawn(async move {
         loop {
             debug!("listen_events: created thread");
 
-            match listen_events_handler(&provider, &tx).await {
+            let tx = tx.clone();
+            match provider
+                .listen_events(move |data| {
+                    let tx = tx.clone();
+                    async move {
+                        match data {
+                            IL2PoolEvents::Supply(_) => debug!("listen_events: supply event"),
+                            IL2PoolEvents::Withdraw(_) => debug!("listen_events: withdraw event"),
+                            IL2PoolEvents::Borrow(_) => debug!("listen_events: borrow event"),
+                            IL2PoolEvents::Repay(_) => debug!("listen_events: repay event"),
+                            IL2PoolEvents::ReserveUsedAsCollateralEnabled(_) => {
+                                debug!("listen_events: enable collateral event")
+                            }
+                            IL2PoolEvents::ReserveUsedAsCollateralDisabled(_) => {
+                                debug!("listen_events: disable collateral event")
+                            }
+                            IL2PoolEvents::LiquidationCall(_) => {
+                                debug!("listen_events: liquidation event")
+                            }
+                            IL2PoolEvents::ReserveDataUpdated(_) => {
+                                debug!("listen_events: reserve data updated event")
+                            }
+                        }
+
+                        tx.send(AaveEvents::IL2PoolEvents(
+                            data,
+                            Utc::now().timestamp_micros(),
+                        ))
+                        .await?;
+
+                        Ok(())
+                    }
+                })
+                .await
+            {
                 Ok(_) => debug!("listen_events: Ok"),
                 Err(e) => debug!("listen_events: error = {:?}", e),
             }
         }
     });
-
-    Ok(())
-}
-
-async fn listen_events_handler<P>(provider: &P, tx: &Sender<AaveEvents>) -> eyre::Result<()>
-where
-    P: Provider + Clone + 'static,
-{
-    let l2_pool = IL2Pool::new(L2_POOL_ADDRESS.parse()?, provider.clone());
-    let filter = Filter::new().address(l2_pool.address().clone());
-    let mut stream = provider.subscribe_logs(&filter).await?;
-
-    while let Ok(log) = stream.recv().await {
-        if let Ok(Log { data, .. }) = IL2PoolEvents::decode_log(log.as_ref()) {
-            match data {
-                IL2PoolEvents::Supply(_) => debug!("listen_events: supply event"),
-                IL2PoolEvents::Withdraw(_) => debug!("listen_events: withdraw event"),
-                IL2PoolEvents::Borrow(_) => debug!("listen_events: borrow event"),
-                IL2PoolEvents::Repay(_) => debug!("listen_events: repay event"),
-                IL2PoolEvents::ReserveUsedAsCollateralEnabled(_) => {
-                    debug!("listen_events: enable collateral event")
-                }
-                IL2PoolEvents::ReserveUsedAsCollateralDisabled(_) => {
-                    debug!("listen_events: disable collateral event")
-                }
-                IL2PoolEvents::LiquidationCall(_) => {
-                    debug!("listen_events: liquidation event")
-                }
-                IL2PoolEvents::ReserveDataUpdated(_) => {
-                    debug!("listen_events: reserve data updated event")
-                }
-            }
-
-            tx.send(AaveEvents::IL2PoolEvents(
-                data,
-                Utc::now().timestamp_micros(),
-            ))
-            .await?;
-        }
-    }
 
     Ok(())
 }
@@ -545,7 +695,7 @@ async fn listen_price_update<P>(
     tx: Sender<AaveEvents>,
 ) -> eyre::Result<()>
 where
-    P: Provider + Clone + 'static,
+    P: DataProvider + 'static,
 {
     for (token, TokenDetails { price_source, .. }) in tokens {
         let (token, price_source, provider, tx) = (
@@ -558,44 +708,34 @@ where
             loop {
                 debug!("listen_price_update: created thread");
 
-                match listen_price_update_handler(&provider, token, price_source, &tx).await {
+                let tx = tx.clone();
+                match provider
+                    .listen_price_update(&price_source, move |data| {
+                        let tx = tx.clone();
+                        async move {
+                            match data {
+                                IChainlinkAggregatorEvents::AnswerUpdated(_) => {
+                                    debug!("listen_price_update: answer updated event")
+                                }
+                            }
+
+                            tx.send(AaveEvents::IChainlinkAggregatorEvents(
+                                data,
+                                token,
+                                Utc::now().timestamp_micros(),
+                            ))
+                            .await?;
+
+                            Ok(())
+                        }
+                    })
+                    .await
+                {
                     Ok(_) => debug!("listen_price_update: Ok"),
                     Err(e) => debug!("listen_price_update: error = {:?}", e),
                 }
             }
         });
-    }
-
-    Ok(())
-}
-
-async fn listen_price_update_handler<P>(
-    provider: &P,
-    token: Address,
-    price_source: Address,
-    tx: &Sender<AaveEvents>,
-) -> eyre::Result<()>
-where
-    P: Provider + Clone + 'static,
-{
-    let filter = Filter::new().address(price_source);
-    let mut stream = provider.subscribe_logs(&filter).await?;
-
-    while let Ok(log) = stream.recv().await {
-        if let Ok(Log { data, .. }) = IChainlinkAggregatorEvents::decode_log(log.as_ref()) {
-            match data {
-                IChainlinkAggregatorEvents::AnswerUpdated(_) => {
-                    debug!("listen_price_update: answer updated event")
-                }
-            }
-
-            tx.send(AaveEvents::IChainlinkAggregatorEvents(
-                data,
-                token,
-                Utc::now().timestamp_micros(),
-            ))
-            .await?;
-        }
     }
 
     Ok(())
@@ -608,13 +748,8 @@ async fn liquidation_threshold_update<P>(
     hf_tx: Sender<HFRequest>,
 ) -> eyre::Result<()>
 where
-    P: Provider + Clone + 'static,
+    P: DataProvider + 'static,
 {
-    let aave_protocol_data_provider = IAaveProtocolDataProvider::new(
-        AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS.parse()?,
-        provider.clone(),
-    );
-
     task::spawn(async move {
         debug!("liquidation_threshold_update: created thread");
 
@@ -622,13 +757,8 @@ where
         loop {
             interval.tick().await;
 
-            match liquidation_threshold_update_handler(
-                &cache,
-                &tokens,
-                &aave_protocol_data_provider,
-                &hf_tx,
-            )
-            .await
+            match liquidation_threshold_update_handler(&cache, &tokens, provider.as_ref(), &hf_tx)
+                .await
             {
                 Ok(_) => debug!("liquidation_threshold_update: Ok"),
                 Err(e) => debug!("liquidation_threshold_update: error = {:?}", e),
@@ -642,37 +772,33 @@ where
 async fn liquidation_threshold_update_handler<P>(
     cache: &Cache,
     tokens: &Tokens,
-    aave_protocol_data_provider: &IAaveProtocolDataProviderInstance<Arc<P>>,
+    provider: &P,
     hf_tx: &Sender<HFRequest>,
 ) -> eyre::Result<()>
 where
-    P: Provider + Clone + 'static,
+    P: DataProvider + 'static,
 {
     let mut data = vec![0.0; tokens.len()];
-    let tasks = tokens
-        .iter()
-        .map(|(token_address, TokenDetails { name, order, .. })| {
-            let provider = aave_protocol_data_provider.clone();
-            async move {
-                (
-                    provider
-                        .getReserveConfigurationData(token_address.clone())
-                        .call()
-                        .await
-                        .unwrap(),
-                    name.clone(),
-                    order,
-                )
-            }
-        });
+    let tasks = tokens.iter().map(
+        |(token_address, TokenDetails { name, order, .. })| async move {
+            (
+                provider
+                    .get_reserve_configuration_data(token_address)
+                    .await
+                    .unwrap(),
+                name.clone(),
+                order,
+            )
+        },
+    );
 
-    for (rs, name, order) in join_all(tasks).await {
+    for (lt, name, order) in join_all(tasks).await {
         debug!(
             "liquidation_threshold_update: name = {}, liquidation_threshold = {}",
-            name, rs.liquidationThreshold
+            name, lt
         );
 
-        data[order.clone()] = f64::from(rs.liquidationThreshold);
+        data[order.clone()] = lt;
     }
 
     let d = Array1::from_vec(data);
@@ -684,7 +810,7 @@ where
     if lt_modified {
         let rq_date = Utc::now().timestamp_micros();
         *cache.liquidation_threshold.write().await = (d, rq_date);
-        hf_tx.send(HFRequest::Full(rq_date)).await.unwrap();
+        hf_tx.send(HFRequest::Full(rq_date)).await?;
     }
 
     Ok(())
@@ -710,7 +836,7 @@ async fn listen_sync(
             loop {
                 debug!("listen_sync: created thread");
 
-                match listen_sync_handler(&cache, &rc).await {
+                match listen_sync_handler(&cache, &mut rc).await {
                     Ok(_) => debug!("listen_sync: Ok"),
                     Err(e) => debug!("listen_sync: error = {:?}", e),
                 }
@@ -722,7 +848,7 @@ async fn listen_sync(
     Ok(senders)
 }
 
-async fn listen_sync_handler(cache: &Cache, mut rc: &Receiver<SyncRequest>) -> eyre::Result<()> {
+async fn listen_sync_handler(cache: &Cache, rc: &mut Receiver<SyncRequest>) -> eyre::Result<()> {
     while let Some(sync_rq) = rc.recv().await {
         match sync_rq {
             SyncRequest::Collateral(row_num, rq_date) => {
@@ -759,7 +885,7 @@ async fn listen_hf_calc(
             loop {
                 debug!("listen_hf_calc: created thread");
 
-                match listen_hf_calc_handler(&cache, &rc).await {
+                match listen_hf_calc_handler(&cache, &mut rc).await {
                     Ok(_) => debug!("listen_hf_calc: Ok"),
                     Err(e) => debug!("listen_hf_calc: error = {:?}", e),
                 }
@@ -771,7 +897,7 @@ async fn listen_hf_calc(
     Ok(senders)
 }
 
-async fn listen_hf_calc_handler(cache: &Cache, mut rc: &Receiver<HFRequest>) -> eyre::Result<()> {
+async fn listen_hf_calc_handler(cache: &Cache, rc: &mut Receiver<HFRequest>) -> eyre::Result<()> {
     while let Some(hf_rq) = rc.recv().await {
         match hf_rq {
             HFRequest::User(user, rq_date) => match cache.calc_hf(Some(&user), rq_date).await {
@@ -842,7 +968,7 @@ impl Cache {
         provider: Arc<P>,
     ) -> eyre::Result<()>
     where
-        P: Provider + Clone,
+        P: DataProvider + 'static,
     {
         let (collateral, reserve, borrowed) = self.get_user_data(provider, tokens, user).await?;
         let row_num = self.users.get(user).unwrap().row_num;
@@ -881,7 +1007,7 @@ impl Cache {
         provider: Arc<P>,
     ) -> eyre::Result<bool>
     where
-        P: Provider + Clone,
+        P: DataProvider + 'static,
     {
         if self.contains(user) {
             debug!("init_user: existing user = {}", user);
@@ -942,26 +1068,25 @@ impl Cache {
         user: &Address,
     ) -> eyre::Result<(Vec<f64>, Vec<f64>, Vec<f64>)>
     where
-        P: Provider + Clone,
+        P: DataProvider + 'static,
     {
-        let aave_protocol_data_provider = IAaveProtocolDataProvider::new(
-            AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS.parse()?,
-            provider.clone(),
-        );
-        let tasks = tokens.iter().map(|(token_address, _)| {
-            let provider = aave_protocol_data_provider.clone();
-            let u = user.clone();
-            async move {
-                (
-                    provider
-                        .getUserReserveData(token_address.clone(), u)
-                        .call()
-                        .await
-                        .unwrap(),
-                    token_address.clone(),
-                )
-            }
-        });
+        let tasks = tokens
+            .iter()
+            .map(|(token_address, _)| {
+                let provider = provider.clone();
+                async move {
+                    (
+                        provider
+                            .get_user_reserve_data(token_address, user)
+                            .await
+                            .unwrap(),
+                        token_address.clone(),
+                    )
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let results = futures::future::join_all(tasks).await;
 
         let (mut collateral, mut reserve, use_as_collateral, mut borrowed) = (
             vec![0.0; tokens.len()],
@@ -969,15 +1094,23 @@ impl Cache {
             &mut self.users.get_mut(user).unwrap().use_as_collateral,
             vec![0.0; tokens.len()],
         );
-        for (urd, token_address) in futures::future::join_all(tasks).await {
+        for (
+            UserReserveData {
+                current_atoken_balance,
+                current_variable_debt,
+                usage_as_collateral_enabled,
+            },
+            token_address,
+        ) in results
+        {
             let idx = tokens.get(&token_address).unwrap().order;
-            if urd.usageAsCollateralEnabled {
-                collateral[idx] = f64::from(urd.currentATokenBalance);
+            if usage_as_collateral_enabled {
+                collateral[idx] = current_atoken_balance;
                 use_as_collateral.set(idx, true);
             } else {
-                reserve[idx] = f64::from(urd.currentATokenBalance);
+                reserve[idx] = current_atoken_balance;
             }
-            borrowed[idx] = f64::from(urd.currentVariableDebt);
+            borrowed[idx] = current_variable_debt;
         }
 
         Ok((collateral, reserve, borrowed))
@@ -996,7 +1129,7 @@ impl Cache {
         callback: F,
     ) -> eyre::Result<Vec<Sender<T>>>
     where
-        P: Provider + Clone + 'static,
+        P: DataProvider + 'static,
         T: Send + 'static,
         F: Fn(Arc<Cache>, Arc<P>, Arc<Tokens>, T) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = eyre::Result<()>> + Send + 'static,
@@ -1229,7 +1362,7 @@ async fn create_user<P>(
     hf_tx: &Sender<HFRequest>,
 ) -> eyre::Result<bool>
 where
-    P: Provider + Clone,
+    P: DataProvider + 'static,
 {
     match cache.init_user(user, tokens, provider.clone()).await {
         Ok(exist) => {
@@ -1313,7 +1446,7 @@ async fn supply<P>(
     event: (Supply, Sender<SyncRequest>, Sender<HFRequest>, TimeStamp),
 ) -> eyre::Result<()>
 where
-    P: Provider + Clone + 'static,
+    P: DataProvider + 'static,
 {
     let (event, sync_tx, hf_tx, rq_date) = event;
 
@@ -1477,7 +1610,7 @@ async fn withdraw<P>(
     event: (Withdraw, Sender<SyncRequest>, Sender<HFRequest>, TimeStamp),
 ) -> eyre::Result<()>
 where
-    P: Provider + Clone + 'static,
+    P: DataProvider + 'static,
 {
     debug!("withdraw: called");
     // let (event, sync_tx, hf_tx, rq_date) = event;
@@ -1495,7 +1628,7 @@ async fn borrow<P>(
     event: (Borrow, Sender<SyncRequest>, Sender<HFRequest>, TimeStamp),
 ) -> eyre::Result<()>
 where
-    P: Provider + Clone + 'static,
+    P: DataProvider + 'static,
 {
     debug!("borrow: called");
     // let (event, sync_tx, hf_tx, rq_date) = event;
@@ -1513,7 +1646,7 @@ async fn repay<P>(
     event: (Repay, Sender<SyncRequest>, Sender<HFRequest>, TimeStamp),
 ) -> eyre::Result<()>
 where
-    P: Provider + Clone + 'static,
+    P: DataProvider + 'static,
 {
     debug!("repay: called");
     // let (event, sync_tx, hf_tx, rq_date) = event;
@@ -1536,7 +1669,7 @@ async fn reserve_used_as_collateral_enabled<P>(
     ),
 ) -> eyre::Result<()>
 where
-    P: Provider + Clone + 'static,
+    P: DataProvider + 'static,
 {
     debug!("reserve_used_as_collateral_enabled: called");
     // let (event, sync_tx, hf_tx, rq_date) = event;
@@ -1559,7 +1692,7 @@ async fn reserve_used_as_collateral_disabled<P>(
     ),
 ) -> eyre::Result<()>
 where
-    P: Provider + Clone + 'static,
+    P: DataProvider + 'static,
 {
     debug!("reserve_used_as_collateral_disabled: called");
     // let (event, sync_tx, hf_tx, rq_date) = event;
@@ -1582,7 +1715,7 @@ async fn liquidation_call<P>(
     ),
 ) -> eyre::Result<()>
 where
-    P: Provider + Clone + 'static,
+    P: DataProvider + 'static,
 {
     debug!("liquidation_call: called");
     // let (event, sync_tx, hf_tx, rq_date) = event;
@@ -1600,7 +1733,7 @@ async fn reserve_data_updated<P>(
     event: (ReserveDataUpdated, Sender<HFRequest>, TimeStamp),
 ) -> eyre::Result<()>
 where
-    P: Provider + Clone + 'static,
+    P: DataProvider + 'static,
 {
     debug!("reserve_data_updated: called");
     // let (event, hf_tx, rq_date) = event;
@@ -1614,7 +1747,7 @@ async fn answer_updated<P>(
     event: (AnswerUpdated, Address, Sender<HFRequest>, TimeStamp),
 ) -> eyre::Result<()>
 where
-    P: Provider + Clone + 'static,
+    P: DataProvider + 'static,
 {
     debug!("answer_updated: called");
     // let (event, token, sync_tx, rq_date) = event;
@@ -1625,8 +1758,64 @@ where
 mod tests {
     use super::*;
     use chrono::Days;
-    use mockall::mock;
+    use rand::Rng;
     use std::str::FromStr;
+
+    struct DummyDataProvider;
+
+    #[async_trait]
+    impl DataProvider for DummyDataProvider {
+        async fn get_all_reserves_tokens(&self) -> eyre::Result<Vec<TokenData>> {
+            todo!()
+        }
+
+        async fn get_source_of_asset(&self, token: &Address) -> eyre::Result<Address> {
+            todo!()
+        }
+
+        async fn listen_events<F, Fut>(&self, callback: F) -> eyre::Result<()>
+        where
+            F: Fn(IL2PoolEvents) -> Fut + Send + 'static,
+            Fut: Future<Output = eyre::Result<()>> + Send,
+        {
+            todo!()
+        }
+
+        async fn listen_price_update<F, Fut>(
+            &self,
+            price_source: &Address,
+            callback: F,
+        ) -> eyre::Result<()>
+        where
+            F: Fn(IChainlinkAggregatorEvents) -> Fut + Send + 'static,
+            Fut: Future<Output = eyre::Result<()>> + Send,
+        {
+            todo!()
+        }
+
+        async fn get_reserve_configuration_data(&self, token: &Address) -> eyre::Result<f64> {
+            todo!()
+        }
+
+        async fn get_user_reserve_data(
+            &self,
+            _: &Address,
+            _: &Address,
+        ) -> eyre::Result<UserReserveData> {
+            let mut rng = rand::rng();
+            let n = rng.random_range(0..4);
+            let urd = match n {
+                0 => UserReserveData::new(0.0, 0.0, false),
+                1 => UserReserveData::new(1.0, 1.0, false),
+                2 => UserReserveData::new(2.0, 2.0, true),
+                3 => UserReserveData::new(3.0, 3.0, false),
+                4 => UserReserveData::new(4.0, 4.0, true),
+                _ => unreachable!(),
+            };
+
+            Ok(urd)
+        }
+    }
 
     #[tokio::test]
     async fn test_sync_collateral() -> eyre::Result<()> {
@@ -1770,22 +1959,10 @@ mod tests {
         Ok(())
     }
 
-    mock! {
-        pub Aave {}
-
-        impl Provider for Aave {
-            fn root(&self) -> &alloy::providers::RootProvider;
-        }
-
-        impl Clone for Aave {
-            fn clone(&self) -> Self;
-        }
-    }
-
     #[tokio::test]
     async fn test_supply() -> eyre::Result<()> {
         let cache = Arc::new(Cache::default());
-        let mut mock_provider = Arc::new(MockAave::new());
+        let dummy_data_provider = Arc::new(DummyDataProvider {});
         let token = Address::from_str("0x1Af54C263cefD1792CbFcF41B711834d657ea61D")?;
         let user = Address::from_str("0x1Af54C263cefD1792CbFcF41B722834d657ea61D")?;
 
@@ -1852,7 +2029,7 @@ mod tests {
 
         supply(
             cache.clone(),
-            mock_provider.clone(),
+            dummy_data_provider.clone(),
             tokens.clone(),
             (event, sync_tx, hf_tx, rq_date),
         )
@@ -1895,7 +2072,7 @@ mod tests {
 
         supply(
             cache.clone(),
-            mock_provider.clone(),
+            dummy_data_provider.clone(),
             tokens.clone(),
             (event, sync_tx, hf_tx, rq_date),
         )
@@ -1938,7 +2115,7 @@ mod tests {
 
         supply(
             cache.clone(),
-            mock_provider.clone(),
+            dummy_data_provider.clone(),
             tokens.clone(),
             (event, sync_tx, hf_tx, rq_date),
         )
@@ -1995,7 +2172,7 @@ mod tests {
 
         supply(
             cache.clone(),
-            mock_provider.clone(),
+            dummy_data_provider.clone(),
             tokens.clone(),
             (event, sync_tx, hf_tx, rq_date),
         )

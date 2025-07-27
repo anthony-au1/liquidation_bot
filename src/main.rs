@@ -1,7 +1,7 @@
 mod arbitrum;
 
 use std::sync::Arc;
-use crate::arbitrum::arbitrum::{start};
+use crate::arbitrum::arbitrum::{start, AaveDataProvider};
 use alloy::providers::{ProviderBuilder, WsConnect};
 use clap::{Parser, Subcommand};
 use tracing::info;
@@ -47,7 +47,9 @@ async fn main() -> eyre::Result<()> {
             // get_logs(&provider).await?;
             // get_headers(&provider).await?;
             // get_borrows(Box::new(provider)).await?;
-            start(Arc::new(provider)).await?;
+
+            let data_provider = AaveDataProvider::new(&provider);
+            start(Arc::new(data_provider)).await?;
             // test_me().await?;
         }
         Commands::Stop => {
