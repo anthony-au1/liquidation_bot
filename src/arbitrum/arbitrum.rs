@@ -2149,6 +2149,15 @@ mod tests {
                 user.clone(),
                 UserSettings::new(2, BitVec::<usize, Lsb0>::from_iter([false, false, true])),
             );
+
+            let (reserves, _, _) = &mut *cache.reserve.write().await;
+            reserves.push(RwLock::new(Array1::from_vec(vec![0.0; 3])));
+
+            let (borrowed, _, _) = &mut *cache.borrowed.write().await;
+            borrowed.push(RwLock::new(Array1::from_vec(vec![0.0; 3])));
+            borrowed.push(RwLock::new(Array1::from_vec(vec![0.0; 3])));
+            borrowed.push(RwLock::new(Array1::from_vec(vec![0.0; 3])));
+
             let (_, last_sync, last_modified) = &mut *cache.collateral.write().await;
             *last_sync = Utc::now()
                 .checked_sub_days(Days::new(2))
@@ -2189,6 +2198,35 @@ mod tests {
         .await?;
         sync_handler.await?;
         hf_handler.await?;
+
+        let (collateral, reserve, borrowed) = {
+            let (collaterals, _, _) = &*cache.collateral.read().await;
+            let col_futs = collaterals.iter().map(|c| async {
+                let row = c.read().await;
+                Array1::to_vec(&*row)
+            });
+            let col = join_all(col_futs).await;
+
+            let (reserves, _, _) = &*cache.reserve.read().await;
+            let res_futs = reserves.iter().map(|c| async {
+                let row = c.read().await;
+                Array1::to_vec(&*row)
+            });
+            let res = join_all(res_futs).await;
+
+            let (borroweds, _, _) = &*cache.borrowed.read().await;
+            let bor_futs = borroweds.iter().map(|c| async {
+                let row = c.read().await;
+                Array1::to_vec(&*row)
+            });
+            let bor = join_all(bor_futs).await;
+
+            (col, res, bor)
+        };
+
+        println!("collateral: {:?}", collateral);
+        println!("reserve: {:?}", reserve);
+        println!("borrowed: {:?}", borrowed);
 
         assert_eq!(cache.contains(&user), true);
 
