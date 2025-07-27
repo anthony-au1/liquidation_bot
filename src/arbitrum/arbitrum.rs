@@ -927,7 +927,7 @@ type Array = RwLock<(Array1<f64>, TimeStamp)>;
 type Arrays = RwLock<(Vec<RwLock<Array1<f64>>>, TimeStamp, TimeStamp)>;
 type Matrix = RwLock<Array2<f64>>;
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 struct UserSettings {
     row_num: usize,
     use_as_collateral: BitVec<usize, Lsb0>,
@@ -1086,14 +1086,15 @@ impl Cache {
             })
             .collect::<Vec<_>>();
 
-        let results = futures::future::join_all(tasks).await;
+        let user_reserve_data = futures::future::join_all(tasks).await;
 
-        let (mut collateral, mut reserve, use_as_collateral, mut borrowed) = (
+        let (mut collateral, mut reserve, mut user_settings, mut borrowed) = (
             vec![0.0; tokens.len()],
             vec![0.0; tokens.len()],
-            &mut self.users.get_mut(user).unwrap().use_as_collateral,
+            self.users.get(user).unwrap().clone(),
             vec![0.0; tokens.len()],
         );
+
         for (
             UserReserveData {
                 current_atoken_balance,
@@ -1101,17 +1102,19 @@ impl Cache {
                 usage_as_collateral_enabled,
             },
             token_address,
-        ) in results
+        ) in user_reserve_data
         {
             let idx = tokens.get(&token_address).unwrap().order;
             if usage_as_collateral_enabled {
                 collateral[idx] = current_atoken_balance;
-                use_as_collateral.set(idx, true);
+                user_settings.use_as_collateral.set(idx, true);
             } else {
                 reserve[idx] = current_atoken_balance;
             }
             borrowed[idx] = current_variable_debt;
         }
+
+        self.users.insert(user.clone(), user_settings);
 
         Ok((collateral, reserve, borrowed))
     }
@@ -1479,7 +1482,7 @@ where
         return Ok(());
     }
 
-    let user_settings = cache.users.get(&event.onBehalfOf).unwrap();
+    let user_settings = cache.users.get(&event.onBehalfOf).unwrap().clone();
     let row_num = user_settings.row_num;
     let idx = tokens.get(&event.reserve).unwrap().order;
     let now = Utc::now().timestamp_micros();
@@ -1505,14 +1508,17 @@ where
         });
     };
 
-    let (last_sync, last_modified);
     if user_settings.use_as_collateral[idx] {
-        let mut collateral_lock = cache.collateral.write().await;
-        (last_sync, last_modified) = (collateral_lock.1, collateral_lock.2);
+        let (last_sync, last_modified) = {
+            let collateral_lock = cache.collateral.read().await;
+            (collateral_lock.1, collateral_lock.2)
+        };
 
+        let cache = cache.clone();
         let new_event = async move || {
             debug!("supply: collateral new event user = {}", event.onBehalfOf);
 
+            let mut collateral_lock = cache.collateral.write().await;
             (collateral_lock.1, collateral_lock.2) = (now, now);
             let mut row_lock = collateral_lock.0[row_num].write().await;
             row_lock[idx] += f64::from(event.amount);
@@ -1551,12 +1557,16 @@ where
         )
         .await?;
     } else {
-        let mut reserve_lock = cache.reserve.write().await;
-        (last_sync, last_modified) = (reserve_lock.1, reserve_lock.2);
+        let (last_sync, last_modified) = {
+            let reserve_lock = cache.reserve.read().await;
+            (reserve_lock.1, reserve_lock.2)
+        };
 
+        let cache = cache.clone();
         let new_event = async move || {
             debug!("supply: borrowed new event user = {}", event.onBehalfOf);
 
+            let mut reserve_lock = cache.reserve.write().await;
             (reserve_lock.1, reserve_lock.2) = (now, now);
             let mut row_lock = reserve_lock.0[row_num].write().await;
             row_lock[idx] += f64::from(event.amount);
