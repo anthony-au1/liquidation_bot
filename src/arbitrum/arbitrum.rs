@@ -158,7 +158,7 @@ sol! {
 }
 
 #[async_trait]
-trait DataProvider: Send + Sync {
+pub trait DataProvider: Send + Sync {
     async fn get_all_reserves_tokens(&self) -> eyre::Result<Vec<TokenData>>;
     async fn get_source_of_asset(&self, token: &Address) -> eyre::Result<Address>;
     async fn listen_events<F, Fut>(&self, callback: F) -> eyre::Result<()>
@@ -181,7 +181,7 @@ trait DataProvider: Send + Sync {
     ) -> eyre::Result<UserReserveData>;
 }
 
-struct UserReserveData {
+pub struct UserReserveData {
     usage_as_collateral_enabled: bool,
     current_atoken_balance: f64,
     current_variable_debt: f64,
@@ -1032,31 +1032,7 @@ impl Cache {
             *user_num_lock += 1;
         }
 
-        let (collateral, reserve, borrowed) = self.get_user_data(provider, tokens, user).await?;
-        let now = Utc::now().timestamp_micros();
-        {
-            let mut locked = self.collateral.write().await;
-            locked.0.push(RwLock::new(Array1::from(collateral)));
-            (locked.1, locked.2) = (now, now);
-
-            debug!("init_user: new collateral = {:?}", locked.1);
-        }
-
-        {
-            let mut locked = self.reserve.write().await;
-            locked.0.push(RwLock::new(Array1::from(reserve)));
-            (locked.1, locked.2) = (now, now);
-
-            debug!("init_user: new reserve = {:?}", locked.1);
-        }
-
-        {
-            let mut locked = self.borrowed.write().await;
-            locked.0.push(RwLock::new(Array1::from(borrowed)));
-            (locked.1, locked.2) = (now, now);
-
-            debug!("init_user: new borrowed = {:?}", locked.1);
-        }
+        self.sync_user(user, tokens, provider).await?;
 
         Ok(false)
     }
@@ -1070,21 +1046,18 @@ impl Cache {
     where
         P: DataProvider + 'static,
     {
-        let tasks = tokens
-            .iter()
-            .map(|(token_address, _)| {
-                let provider = provider.clone();
-                async move {
-                    (
-                        provider
-                            .get_user_reserve_data(token_address, user)
-                            .await
-                            .unwrap(),
-                        token_address.clone(),
-                    )
-                }
-            })
-            .collect::<Vec<_>>();
+        let tasks = tokens.iter().map(|(token_address, _)| {
+            let provider = provider.clone();
+            async move {
+                (
+                    provider
+                        .get_user_reserve_data(token_address, user)
+                        .await
+                        .unwrap(),
+                    token_address.clone(),
+                )
+            }
+        });
 
         let user_reserve_data = futures::future::join_all(tasks).await;
 
@@ -1768,10 +1741,15 @@ where
 mod tests {
     use super::*;
     use chrono::Days;
-    use rand::Rng;
     use std::str::FromStr;
 
     struct DummyDataProvider;
+
+    impl DummyDataProvider {
+        fn new() -> Self {
+            Self {}
+        }
+    }
 
     #[async_trait]
     impl DataProvider for DummyDataProvider {
@@ -1809,22 +1787,104 @@ mod tests {
 
         async fn get_user_reserve_data(
             &self,
-            _: &Address,
+            token_address: &Address,
             _: &Address,
         ) -> eyre::Result<UserReserveData> {
-            let mut rng = rand::rng();
-            let n = rng.random_range(0..4);
-            let urd = match n {
-                0 => UserReserveData::new(0.0, 0.0, false),
-                1 => UserReserveData::new(1.0, 1.0, false),
-                2 => UserReserveData::new(2.0, 2.0, true),
-                3 => UserReserveData::new(3.0, 3.0, false),
-                4 => UserReserveData::new(4.0, 4.0, true),
-                _ => unreachable!(),
+            let urd = match token_address {
+                t if *t == Address::from_str("0x1Ac54C113cefD1792CbFcF41B711824d657eb61D")? => {
+                    UserReserveData::new(1.0, 1.0, false)
+                }
+                t if *t == Address::from_str("0x1Af54C113cefD1792CbFcF41B711834d657ea61D")? => {
+                    UserReserveData::new(2.0, 2.0, true)
+                }
+                t if *t == Address::from_str("0x1Af54C113cefD1792CbFcF41B711824d657eb61D")? => {
+                    UserReserveData::new(3.0, 3.0, false)
+                }
+                _ => UserReserveData::new(4.0, 4.0, true),
             };
 
             Ok(urd)
         }
+    }
+
+    async fn generate_cache_and_tokens(
+        user_num: usize,
+    ) -> eyre::Result<(Cache, HashMap<Address, TokenDetails>)> {
+        let cache = Cache::default();
+
+        let mut tokens = HashMap::new();
+        tokens.insert(
+            Address::from_str("0x1Ac54C113cefD1792CbFcF41B711824d657eb61D")?,
+            TokenDetails::new(
+                String::from("AAVE"),
+                Address::from_str("0xba5DdD1f9d7F570dc94a51479a000E3BCE967196")?,
+                0,
+            ),
+        );
+        tokens.insert(
+            Address::from_str("0x1Af54C113cefD1792CbFcF41B711834d657ea61D")?,
+            TokenDetails::new(
+                String::from("USDC"),
+                Address::from_str("0xaf88d065e77c8cC2239327C5EDb3A432268e5831")?,
+                1,
+            ),
+        );
+        tokens.insert(
+            Address::from_str("0x1Af54C113cefD1792CbFcF41B711824d657eb61D")?,
+            TokenDetails::new(
+                String::from("DAI"),
+                Address::from_str("0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1")?,
+                2,
+            ),
+        );
+
+        if user_num > 0 {
+            let mut user_addr = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
+            for i in 0..user_num {
+                cache.users.insert(
+                    user_addr,
+                    UserSettings::new(i, BitVec::<usize, Lsb0>::from_iter([true, false, false])),
+                );
+                user_addr = user_addr.create((i + 1) as u64);
+            }
+        }
+
+        {
+            let (collaterals, _, _) = &mut *cache.collateral.write().await;
+            collaterals.push(RwLock::new(Array1::from_vec(vec![0.0; 3])));
+
+            let (reserves, _, _) = &mut *cache.reserve.write().await;
+            reserves.push(RwLock::new(Array1::from_vec(vec![0.0; 3])));
+
+            let (borroweds, _, _) = &mut *cache.borrowed.write().await;
+            borroweds.push(RwLock::new(Array1::from_vec(vec![0.0; 3])));
+        }
+
+        Ok((cache, tokens))
+    }
+
+    async fn get_all_user_data(
+        cache: &Cache,
+        user_row_num: usize,
+    ) -> eyre::Result<(Vec<f64>, Vec<f64>, Vec<f64>)> {
+        let (collateral, reserve, borrowed) = {
+            let (collaterals, _, _) = &*cache.collateral.read().await;
+            let collateral = &*collaterals.get(user_row_num).unwrap().read().await;
+
+            let (reserves, _, _) = &*cache.reserve.read().await;
+            let reserve = &*reserves.get(user_row_num).unwrap().read().await;
+
+            let (borroweds, _, _) = &*cache.borrowed.read().await;
+            let borrowed = &*borroweds.get(user_row_num).unwrap().read().await;
+
+            (
+                Array1::to_vec(collateral),
+                Array1::to_vec(reserve),
+                Array1::to_vec(borrowed),
+            )
+        };
+
+        Ok((collateral, reserve, borrowed))
     }
 
     #[tokio::test]
@@ -1972,7 +2032,7 @@ mod tests {
     #[tokio::test]
     async fn test_supply() -> eyre::Result<()> {
         let cache = Arc::new(Cache::default());
-        let dummy_data_provider = Arc::new(DummyDataProvider {});
+        let dummy_data_provider = Arc::new(DummyDataProvider::new());
         let token = Address::from_str("0x1Af54C263cefD1792CbFcF41B711834d657ea61D")?;
         let user = Address::from_str("0x1Af54C263cefD1792CbFcF41B722834d657ea61D")?;
 
@@ -2229,6 +2289,144 @@ mod tests {
         println!("borrowed: {:?}", borrowed);
 
         assert_eq!(cache.contains(&user), true);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_sync_user() -> eyre::Result<()> {
+        let dummy_data_provider = Arc::new(DummyDataProvider::new());
+        let (cache, tokens) = generate_cache_and_tokens(1).await?;
+        let user = cache.users.iter().next().unwrap().key().clone();
+
+        cache
+            .sync_user(&user, &tokens, dummy_data_provider.clone())
+            .await?;
+
+        assert_eq!(cache.contains(&user), true);
+
+        let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
+
+        assert_eq!(collateral, vec![0.0, 2.0, 0.0]);
+        assert_eq!(reserve, vec![1.0, 0.0, 3.0]);
+        assert_eq!(borrowed, vec![1.0, 2.0, 3.0]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_init_user() -> eyre::Result<()> {
+        // 1 case - cache has this user
+
+        let dummy_data_provider = Arc::new(DummyDataProvider::new());
+        let (cache, tokens) = generate_cache_and_tokens(1).await?;
+        let user = cache.users.iter().next().unwrap().key().clone();
+
+        cache.init_user(&user, &tokens, dummy_data_provider).await?;
+
+        assert_eq!(cache.contains(&user), true);
+        assert_eq!(cache.users.len(), 1);
+
+        // 2 case - new user
+
+        let dummy_data_provider = Arc::new(DummyDataProvider::new());
+        let (cache, tokens) = generate_cache_and_tokens(0).await?;
+        let user = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
+
+        cache.init_user(&user, &tokens, dummy_data_provider).await?;
+
+        assert_eq!(cache.contains(&user), true);
+        assert_eq!(cache.users.len(), 1);
+
+        let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
+
+        assert_eq!(collateral, vec![0.0, 2.0, 0.0]);
+        assert_eq!(reserve, vec![1.0, 0.0, 3.0]);
+        assert_eq!(borrowed, vec![1.0, 2.0, 3.0]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_get_user_data() -> eyre::Result<()> {
+        let dummy_data_provider = Arc::new(DummyDataProvider::new());
+        let (cache, tokens) = generate_cache_and_tokens(1).await?;
+        let user = cache.users.iter().next().unwrap().key().clone();
+
+        let (collateral, reserve, borrowed) = cache
+            .get_user_data(dummy_data_provider, &tokens, &user)
+            .await?;
+
+        assert_eq!(cache.contains(&user), true);
+        assert_eq!(cache.users.len(), 1);
+
+        assert_eq!(collateral, vec![0.0, 2.0, 0.0]);
+        assert_eq!(reserve, vec![1.0, 0.0, 3.0]);
+        assert_eq!(borrowed, vec![1.0, 2.0, 3.0]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_contains() -> eyre::Result<()> {
+        let (cache, _) = generate_cache_and_tokens(1).await?;
+        let user = cache.users.iter().next().unwrap().key().clone();
+
+        assert_eq!(cache.contains(&user), true);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_remove_user() -> eyre::Result<()> {
+        let (cache, _) = generate_cache_and_tokens(1).await?;
+        let user = cache.users.iter().next().unwrap().key().clone();
+        cache.remove_user(&user);
+
+        assert_eq!(cache.contains(&user), false);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_subscribe() -> eyre::Result<()> {
+        let dummy_data_provider = Arc::new(DummyDataProvider::new());
+        let (cache, tokens) = generate_cache_and_tokens(1).await?;
+        let test_message = String::from("test_message");
+        struct Message(String);
+
+        let msg = test_message.clone();
+        let cb = move |c: Arc<Cache>, p, t, Message(text)| {
+            let test_message = test_message.clone();
+            async move {
+                assert_eq!(text, test_message);
+
+                let (collaterals, _, _) = &*c.collateral.write().await;
+                let mut col = collaterals.get(0).unwrap().write().await;
+                *col = Array1::from(vec![7.0, 7.0, 7.0]);
+
+                Ok(())
+            }
+        };
+
+        let cache = Arc::new(cache);
+        let senders = Cache::subscribe(
+            cache.clone(),
+            1,
+            1,
+            dummy_data_provider,
+            Arc::new(tokens),
+            cb,
+        )
+        .await?;
+
+        senders.get(0).unwrap().send(Message(msg)).await?;
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        let (collaterals, _, _) = &*cache.collateral.read().await;
+        let col = collaterals.get(0).unwrap().write().await;
+        assert_eq!(*col, Array1::from(vec![7.0, 7.0, 7.0]));
 
         Ok(())
     }
