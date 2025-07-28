@@ -1262,20 +1262,29 @@ impl Cache {
     }
 
     async fn calc_hf(&self, user: Option<&Address>, rq_date: TimeStamp) -> eyre::Result<()> {
-        let lt_lock = self.liquidation_threshold.read().await;
-        let price_lock = self.prices.read().await;
-        let ltp = &(&*lt_lock).0 * &(&*price_lock).0;
+        let lt = {
+            let lt_lock = self.liquidation_threshold.read().await;
+            (&(&*lt_lock).0.view()).to_owned()
+        };
+        let price = {
+            let price_lock = self.prices.read().await;
+            (&(&*price_lock).0.view()).to_owned()
+        };
+        let ltp = &lt * &price;
 
         if let Some(user) = user {
             let row_num = self.users.get(user).unwrap().row_num;
 
-            let collateral_lock = self.collateral.read().await;
-            let col_row_lock = collateral_lock.0.get(row_num).unwrap().read().await;
-            let col_eff = col_row_lock.dot(&ltp);
-
-            let borrowed_lock = self.borrowed.read().await;
-            let bor_row_lock = borrowed_lock.0.get(row_num).unwrap().read().await;
-            let bor_eff = bor_row_lock.dot(&(&*price_lock).0);
+            let col_eff = {
+                let collateral_lock = self.collateral.read().await;
+                let col_row_lock = collateral_lock.0.get(row_num).unwrap().read().await;
+                col_row_lock.dot(&ltp)
+            };
+            let bor_eff = {
+                let borrowed_lock = self.borrowed.read().await;
+                let bor_row_lock = borrowed_lock.0.get(row_num).unwrap().read().await;
+                bor_row_lock.dot(&price)
+            };
 
             let mut hf_lock = self.health_factors.write().await;
             if row_num > hf_lock.0.len() - 1 {
@@ -1305,10 +1314,15 @@ impl Cache {
             return Ok(());
         }
 
-        let collateral_lock = self.collateral_matrix.read().await;
-        let col_eff = collateral_lock.dot(&ltp);
-        let borrowed_lock = self.borrowed_matrix.read().await;
-        let bor_eff = borrowed_lock.dot(&price_lock.0);
+        let col_eff = {
+            let collateral_lock = self.collateral_matrix.read().await;
+            collateral_lock.dot(&ltp)
+        };
+        let bor_eff = {
+            let borrowed_lock = self.borrowed_matrix.read().await;
+            borrowed_lock.dot(&price)
+        };
+
         let mut hf_lock = self.health_factors.write().await;
         (hf_lock.0, hf_lock.1) = (col_eff / bor_eff, Utc::now().timestamp_micros());
 
@@ -2427,6 +2441,15 @@ mod tests {
         let (collaterals, _, _) = &*cache.collateral.read().await;
         let col = collaterals.get(0).unwrap().write().await;
         assert_eq!(*col, Array1::from(vec![7.0, 7.0, 7.0]));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_calc_hf() -> eyre::Result<()> {
+        let dummy_data_provider = Arc::new(DummyDataProvider::new());
+        let (cache, tokens) = generate_cache_and_tokens(1).await?;
+        let user = cache.users.iter().next().unwrap().key().clone();
 
         Ok(())
     }
