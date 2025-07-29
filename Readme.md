@@ -16,7 +16,7 @@ test
 7. sync_collateral - DONE
 8. sync_borrowed - DONE
 9. sync_data - DONE
-10. calc_hf
+10. calc_hf - DONE
 11. create_user
 12. handle_event 
 13. start

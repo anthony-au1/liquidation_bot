@@ -1,6 +1,6 @@
 use crate::arbitrum::arbitrum::IAaveOracle::IAaveOracleInstance;
 use crate::arbitrum::arbitrum::IAaveProtocolDataProvider::{
-    IAaveProtocolDataProviderInstance, TokenData, getUserReserveDataReturn,
+    getUserReserveDataReturn, IAaveProtocolDataProviderInstance, TokenData,
 };
 use crate::arbitrum::arbitrum::IChainlinkAggregator::{AnswerUpdated, IChainlinkAggregatorEvents};
 use crate::arbitrum::arbitrum::IL2Pool::{
@@ -17,13 +17,13 @@ use bitvec::prelude::*;
 use chrono::Utc;
 use dashmap::DashMap;
 use futures::future::join_all;
-use ndarray::{Array1, Array2, Axis, concatenate};
+use ndarray::{concatenate, Array1, Array2, Axis};
 use std::collections::HashMap;
 use std::default::Default;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::RwLock;
-use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::{task, time};
 use tracing::{debug, error, info};
 
@@ -339,8 +339,8 @@ where
     let cache = Arc::new(Cache::default());
 
     {
-        *cache.collateral_matrix.write().await = Array2::from_elem((1, tokens.len()), 0.);
-        *cache.borrowed_matrix.write().await = Array2::from_elem((1, tokens.len()), 0.);
+        *cache.collateral_matrix.write().await = Array2::from_elem((0, tokens.len()), 0.);
+        *cache.borrowed_matrix.write().await = Array2::from_elem((0, tokens.len()), 0.);
 
         let now = Utc::now().timestamp_micros();
         *cache.prices.write().await = (Array1::from_elem(tokens.len(), 0.), now);
@@ -1263,12 +1263,12 @@ impl Cache {
 
     async fn calc_hf(&self, user: Option<&Address>, rq_date: TimeStamp) -> eyre::Result<()> {
         let lt = {
-            let lt_lock = self.liquidation_threshold.read().await;
-            (&(&*lt_lock).0.view()).to_owned()
+            let (lt, _) = &*self.liquidation_threshold.read().await;
+            lt.view().to_owned() / 10_000.0
         };
         let price = {
-            let price_lock = self.prices.read().await;
-            (&(&*price_lock).0.view()).to_owned()
+            let (price, _) = &*self.prices.read().await;
+            price.view().to_owned()
         };
         let ltp = &lt * &price;
 
@@ -1276,13 +1276,14 @@ impl Cache {
             let row_num = self.users.get(user).unwrap().row_num;
 
             let col_eff = {
-                let collateral_lock = self.collateral.read().await;
-                let col_row_lock = collateral_lock.0.get(row_num).unwrap().read().await;
+                let (collateral, _, _) = &*self.collateral.read().await;
+                let col_row_lock = collateral.get(row_num).unwrap().read().await;
                 col_row_lock.dot(&ltp)
             };
+
             let bor_eff = {
-                let borrowed_lock = self.borrowed.read().await;
-                let bor_row_lock = borrowed_lock.0.get(row_num).unwrap().read().await;
+                let (borrowed, _, _) = &*self.borrowed.read().await;
+                let bor_row_lock = borrowed.get(row_num).unwrap().read().await;
                 bor_row_lock.dot(&price)
             };
 
@@ -1318,6 +1319,8 @@ impl Cache {
             let collateral_lock = self.collateral_matrix.read().await;
             collateral_lock.dot(&ltp)
         };
+
+
         let bor_eff = {
             let borrowed_lock = self.borrowed_matrix.read().await;
             borrowed_lock.dot(&price)
@@ -2298,10 +2301,6 @@ mod tests {
             (col, res, bor)
         };
 
-        println!("collateral: {:?}", collateral);
-        println!("reserve: {:?}", reserve);
-        println!("borrowed: {:?}", borrowed);
-
         assert_eq!(cache.contains(&user), true);
 
         Ok(())
@@ -2447,9 +2446,96 @@ mod tests {
 
     #[tokio::test]
     async fn test_calc_hf() -> eyre::Result<()> {
-        let dummy_data_provider = Arc::new(DummyDataProvider::new());
-        let (cache, tokens) = generate_cache_and_tokens(1).await?;
+        // 1 case - hf calculation for 1 user
+
+        let (cache, _) = generate_cache_and_tokens(1).await?;
         let user = cache.users.iter().next().unwrap().key().clone();
+
+        {
+            let (lt, _) = &mut *cache.liquidation_threshold.write().await;
+            *lt = Array1::from_vec(vec![0.0, 7500.0, 8000.0]);
+
+            let (price, _) = &mut *cache.prices.write().await;
+            *price = Array1::from_vec(vec![120_000.0, 4000.0, 200.0]);
+
+            let (hf, _) = &mut *cache.health_factors.write().await;
+            *hf = Array1::from_vec(vec![0.0]);
+
+            let (collaterals, _, _) = &mut *cache.collateral.write().await;
+            let mut col_row = collaterals.get(0).unwrap().write().await;
+            *col_row = Array1::from_vec(vec![2.0, 10.0, 200.0]);
+
+            let (borroweds, _, _) = &mut *cache.borrowed.write().await;
+            let mut bor_row = borroweds.get(0).unwrap().write().await;
+            *bor_row = Array1::from_vec(vec![1.5, 15.0, 0.0]);
+        }
+
+        cache
+            .calc_hf(Some(&user), Utc::now().timestamp_millis())
+            .await?;
+
+        let hf = {
+            let (hf, _) = &*cache.health_factors.read().await;
+            hf.to_vec()
+        };
+
+        assert_eq!(hf, vec![0.25833333333333336]);
+
+        // 2 case - hf calculation for all users
+
+        let (cache, _) = generate_cache_and_tokens(3).await?;
+
+        {
+            let (lt, _) = &mut *cache.liquidation_threshold.write().await;
+            *lt = Array1::from_vec(vec![0.0, 7500.0, 8000.0]);
+
+            let (price, _) = &mut *cache.prices.write().await;
+            *price = Array1::from_vec(vec![120_000.0, 4000.0, 200.0]);
+
+            let (hf, _) = &mut *cache.health_factors.write().await;
+            *hf = Array1::from_vec(vec![0.0; 3]);
+
+            let (collaterals, _, _) = &mut *cache.collateral.write().await;
+            collaterals.push(RwLock::new(Array1::from_vec(vec![2.0, 10.0, 200.0])));
+            collaterals.push(RwLock::new(Array1::from_vec(vec![2.0, 10.0, 200.0])));
+            let mut col_row = collaterals.get(0).unwrap().write().await;
+            *col_row = Array1::from_vec(vec![2.0, 10.0, 200.0]);
+
+            let (borroweds, _, _) = &mut *cache.borrowed.write().await;
+            borroweds.push(RwLock::new(Array1::from_vec(vec![1.5, 15.0, 0.0])));
+            borroweds.push(RwLock::new(Array1::from_vec(vec![1.5, 15.0, 0.0])));
+            let mut bor_row = borroweds.get(0).unwrap().write().await;
+            *bor_row = Array1::from_vec(vec![1.5, 15.0, 0.0]);
+
+            *cache.collateral_matrix.write().await = Array2::from_elem((0, 3), 0.);
+            let col_matrix = &mut *cache.collateral_matrix.write().await;
+            col_matrix.push_row(Array1::from_vec(vec![2.0, 10.0, 200.0]).view())?;
+            col_matrix.push_row(Array1::from_vec(vec![2.0, 10.0, 200.0]).view())?;
+            col_matrix.push_row(Array1::from_vec(vec![2.0, 10.0, 200.0]).view())?;
+
+            *cache.borrowed_matrix.write().await = Array2::from_elem((0, 3), 0.);
+            let bor_matrix = &mut *cache.borrowed_matrix.write().await;
+            bor_matrix.push_row(Array1::from_vec(vec![1.5, 15.0, 0.0]).view())?;
+            bor_matrix.push_row(Array1::from_vec(vec![1.5, 15.0, 0.0]).view())?;
+            bor_matrix.push_row(Array1::from_vec(vec![1.5, 15.0, 0.0]).view())?;
+        }
+
+        cache.calc_hf(None, Utc::now().timestamp_millis()).await?;
+
+
+        let hf = {
+            let (hf, _) = &*cache.health_factors.read().await;
+            hf.to_vec()
+        };
+
+        assert_eq!(
+            hf,
+            vec![
+                0.25833333333333336,
+                0.25833333333333336,
+                0.25833333333333336
+            ]
+        );
 
         Ok(())
     }
