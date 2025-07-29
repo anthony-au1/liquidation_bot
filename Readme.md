@@ -17,15 +17,16 @@ test
 8. sync_borrowed - DONE
 9. sync_data - DONE
 10. calc_hf - DONE
-11. create_user
-12. handle_event 
-13. start
-14. setup
-15. listen_events
-16. listen_price_update
-17. liquidation_threshold_update
-18. liquidation_threshold_update_handler
-19. listen_sync
-20. listen_sync_handler 
-21. listen_hf_calc
-22. listen_hf_calc_handler
+11. supply
+12. create_user
+13. handle_event 
+14. start
+15. setup
+16. listen_events
+17. listen_price_update
+18. liquidation_threshold_update
+19. liquidation_threshold_update_handler
+20. listen_sync
+21. listen_sync_handler 
+22. listen_hf_calc
+23. listen_hf_calc_handler

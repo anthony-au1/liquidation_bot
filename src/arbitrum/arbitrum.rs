@@ -1,6 +1,6 @@
 use crate::arbitrum::arbitrum::IAaveOracle::IAaveOracleInstance;
 use crate::arbitrum::arbitrum::IAaveProtocolDataProvider::{
-    getUserReserveDataReturn, IAaveProtocolDataProviderInstance, TokenData,
+    IAaveProtocolDataProviderInstance, TokenData, getUserReserveDataReturn,
 };
 use crate::arbitrum::arbitrum::IChainlinkAggregator::{AnswerUpdated, IChainlinkAggregatorEvents};
 use crate::arbitrum::arbitrum::IL2Pool::{
@@ -17,13 +17,13 @@ use bitvec::prelude::*;
 use chrono::Utc;
 use dashmap::DashMap;
 use futures::future::join_all;
-use ndarray::{concatenate, Array1, Array2, Axis};
+use ndarray::{Array1, Array2, Axis, concatenate};
 use std::collections::HashMap;
 use std::default::Default;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::RwLock;
+use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::{task, time};
 use tracing::{debug, error, info};
 
@@ -972,27 +972,31 @@ impl Cache {
     {
         let (collateral, reserve, borrowed) = self.get_user_data(provider, tokens, user).await?;
         let row_num = self.users.get(user).unwrap().row_num;
+        let now = Utc::now().timestamp_micros();
 
         {
-            let collaterals = self.collateral.write().await;
+            let collaterals = &mut *self.collateral.write().await;
             let mut col = collaterals.0.get(row_num).unwrap().write().await;
             *col = Array1::from(collateral);
+            (collaterals.1, collaterals.2) = (now, now);
 
             debug!("sync_user: new collateral = {:?}", col);
         }
 
         {
-            let reserves = self.reserve.write().await;
+            let reserves = &mut *self.reserve.write().await;
             let mut res = reserves.0.get(row_num).unwrap().write().await;
             *res = Array1::from(reserve);
+            (reserves.1, reserves.2) = (now, now);
 
             debug!("sync_user: new reserve = {:?}", res);
         }
 
         {
-            let borroweds = self.borrowed.write().await;
+            let borroweds = &mut *self.borrowed.write().await;
             let mut bor = borroweds.0.get(row_num).unwrap().write().await;
             *bor = Array1::from(borrowed);
+            (borroweds.1, borroweds.2) = (now, now);
 
             debug!("sync_user: new borrowed = {:?}", bor);
         }
@@ -1030,6 +1034,31 @@ impl Cache {
                 UserSettings::new(*user_num_lock, bitvec![usize, Lsb0; 0; tokens.len()]),
             );
             *user_num_lock += 1;
+        }
+
+        let now = Utc::now().timestamp_micros();
+        {
+            let collaterals = &mut *self.collateral.write().await;
+            collaterals
+                .0
+                .push(RwLock::new(Array1::from_vec(vec![0.0; tokens.len()])));
+            (collaterals.1, collaterals.2) = (now, now);
+        }
+
+        {
+            let reserves = &mut *self.reserve.write().await;
+            reserves
+                .0
+                .push(RwLock::new(Array1::from_vec(vec![0.0; tokens.len()])));
+            (reserves.1, reserves.2) = (now, now);
+        }
+
+        {
+            let borroweds = &mut *self.borrowed.write().await;
+            borroweds
+                .0
+                .push(RwLock::new(Array1::from_vec(vec![0.0; tokens.len()])));
+            (borroweds.1, borroweds.2) = (now, now);
         }
 
         self.sync_user(user, tokens, provider).await?;
@@ -1360,7 +1389,7 @@ impl Cache {
     }
 }
 
-async fn create_user<P>(
+pub(in crate::arbitrum) async fn create_user<P>(
     rq_date: TimeStamp,
     cache: &Cache,
     provider: Arc<P>,
