@@ -1,6 +1,6 @@
 use crate::arbitrum::arbitrum::IAaveOracle::IAaveOracleInstance;
 use crate::arbitrum::arbitrum::IAaveProtocolDataProvider::{
-    IAaveProtocolDataProviderInstance, TokenData, getUserReserveDataReturn,
+    getUserReserveDataReturn, IAaveProtocolDataProviderInstance, TokenData,
 };
 use crate::arbitrum::arbitrum::IChainlinkAggregator::{AnswerUpdated, IChainlinkAggregatorEvents};
 use crate::arbitrum::arbitrum::IL2Pool::{
@@ -16,14 +16,15 @@ use async_trait::async_trait;
 use bitvec::prelude::*;
 use chrono::Utc;
 use dashmap::DashMap;
-use futures::future::join_all;
-use ndarray::{Array1, Array2, Axis, concatenate};
+use eyre::eyre;
+use futures::future::try_join_all;
+use ndarray::{concatenate, Array1, Array2, Axis};
 use std::collections::HashMap;
 use std::default::Default;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::RwLock;
-use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::{task, time};
 use tracing::{debug, error, info};
 
@@ -214,19 +215,19 @@ impl<P> AaveDataProvider<P>
 where
     P: Provider + Clone + Send + Sync + 'static,
 {
-    pub fn new(provider: &P) -> Self {
+    pub fn new(provider: &P) -> eyre::Result<Self> {
         let aave_protocol_data_provider = IAaveProtocolDataProvider::new(
-            AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS.parse().unwrap(),
+            AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS.parse()?,
             provider.clone(),
         );
 
-        let aave_oracle = IAaveOracle::new(AAVE_ORACLE_ADDRESS.parse().unwrap(), provider.clone());
+        let aave_oracle = IAaveOracle::new(AAVE_ORACLE_ADDRESS.parse()?, provider.clone());
 
-        Self {
+        Ok(Self {
             aave_protocol_data_provider,
             aave_oracle,
             provider: provider.clone(),
-        }
+        })
     }
 }
 
@@ -781,24 +782,25 @@ where
     let mut data = vec![0.0; tokens.len()];
     let tasks = tokens.iter().map(
         |(token_address, TokenDetails { name, order, .. })| async move {
-            (
+            Ok::<_, eyre::Error>((
                 provider
                     .get_reserve_configuration_data(token_address)
-                    .await
-                    .unwrap(),
+                    .await?,
                 name.clone(),
-                order,
-            )
+                order.clone(),
+            ))
         },
     );
 
-    for (lt, name, order) in join_all(tasks).await {
+    let rc_data = try_join_all(tasks).await?;
+
+    for (lt, name, order) in rc_data {
         debug!(
             "liquidation_threshold_update: name = {}, liquidation_threshold = {}",
             name, lt
         );
 
-        data[order.clone()] = lt;
+        data[order] = lt;
     }
 
     let d = Array1::from_vec(data);
@@ -971,12 +973,21 @@ impl Cache {
         P: DataProvider + 'static,
     {
         let (collateral, reserve, borrowed) = self.get_user_data(provider, tokens, user).await?;
-        let row_num = self.users.get(user).unwrap().row_num;
+        let row_num = self
+            .users
+            .get(user)
+            .ok_or_else(|| eyre!("user = {:?} not found", user))?
+            .row_num;
         let now = Utc::now().timestamp_micros();
 
         {
             let collaterals = &mut *self.collateral.write().await;
-            let mut col = collaterals.0.get(row_num).unwrap().write().await;
+            let mut col = collaterals
+                .0
+                .get(row_num)
+                .ok_or_else(|| eyre!("can't get row = {} from collateral", row_num))?
+                .write()
+                .await;
             *col = Array1::from(collateral);
             (collaterals.1, collaterals.2) = (now, now);
 
@@ -985,7 +996,12 @@ impl Cache {
 
         {
             let reserves = &mut *self.reserve.write().await;
-            let mut res = reserves.0.get(row_num).unwrap().write().await;
+            let mut res = reserves
+                .0
+                .get(row_num)
+                .ok_or_else(|| eyre!("can't get row = {} from reserve", row_num))?
+                .write()
+                .await;
             *res = Array1::from(reserve);
             (reserves.1, reserves.2) = (now, now);
 
@@ -994,7 +1010,12 @@ impl Cache {
 
         {
             let borroweds = &mut *self.borrowed.write().await;
-            let mut bor = borroweds.0.get(row_num).unwrap().write().await;
+            let mut bor = borroweds
+                .0
+                .get(row_num)
+                .ok_or_else(|| eyre!("can't get row = {} from borrowed", row_num))?
+                .write()
+                .await;
             *bor = Array1::from(borrowed);
             (borroweds.1, borroweds.2) = (now, now);
 
@@ -1078,22 +1099,22 @@ impl Cache {
         let tasks = tokens.iter().map(|(token_address, _)| {
             let provider = provider.clone();
             async move {
-                (
-                    provider
-                        .get_user_reserve_data(token_address, user)
-                        .await
-                        .unwrap(),
+                Ok::<_, eyre::Error>((
+                    provider.get_user_reserve_data(token_address, user).await?,
                     token_address.clone(),
-                )
+                ))
             }
         });
 
-        let user_reserve_data = futures::future::join_all(tasks).await;
+        let user_reserve_data = try_join_all(tasks).await?;
 
         let (mut collateral, mut reserve, mut user_settings, mut borrowed) = (
             vec![0.0; tokens.len()],
             vec![0.0; tokens.len()],
-            self.users.get(user).unwrap().clone(),
+            self.users
+                .get(user)
+                .ok_or_else(|| eyre!("user = {:?} not found", user))?
+                .clone(),
             vec![0.0; tokens.len()],
         );
 
@@ -1106,7 +1127,10 @@ impl Cache {
             token_address,
         ) in user_reserve_data
         {
-            let idx = tokens.get(&token_address).unwrap().order;
+            let idx = tokens
+                .get(&token_address)
+                .ok_or_else(|| eyre!("token = {} not found", token_address))?
+                .order;
             if usage_as_collateral_enabled {
                 collateral[idx] = current_atoken_balance;
                 user_settings.use_as_collateral.set(idx, true);
@@ -1187,7 +1211,7 @@ impl Cache {
             let row_lock = col_lock
                 .0
                 .get(col_matrix_lock.nrows())
-                .unwrap()
+                .ok_or_else(|| eyre!("row = {} not found in collateral", col_matrix_lock.nrows()))?
                 .read()
                 .await;
             col_matrix_lock.push_row(row_lock.view())?;
@@ -1212,7 +1236,12 @@ impl Cache {
             return Ok(());
         }
 
-        let row = col_lock.0.get(row_num).unwrap().read().await;
+        let row = col_lock
+            .0
+            .get(row_num)
+            .ok_or_else(|| eyre!("row = {} not found in collateral", row_num))?
+            .read()
+            .await;
         col_matrix_lock.row_mut(row_num).assign(&row);
 
         debug!("{}", {
@@ -1248,7 +1277,7 @@ impl Cache {
             let row_lock = bor_lock
                 .0
                 .get(bor_matrix_lock.nrows())
-                .unwrap()
+                .ok_or_else(|| eyre!("row = {} not found in borrowed", bor_matrix_lock.nrows()))?
                 .read()
                 .await;
             bor_matrix_lock.push_row(row_lock.view())?;
@@ -1273,7 +1302,12 @@ impl Cache {
             return Ok(());
         }
 
-        let row = bor_lock.0.get(row_num).unwrap().read().await;
+        let row = bor_lock
+            .0
+            .get(row_num)
+            .ok_or_else(|| eyre!("row = {} not found in borrowed", row_num))?
+            .read()
+            .await;
         bor_matrix_lock.row_mut(row_num).assign(&row);
 
         debug!("{}", {
@@ -1318,17 +1352,29 @@ impl Cache {
         let ltp = &lt * &price;
 
         if let Some(user) = user {
-            let row_num = self.users.get(user).unwrap().row_num;
+            let row_num = self
+                .users
+                .get(user)
+                .ok_or_else(|| eyre!("user = {:?} not found", user))?
+                .row_num;
 
             let col_eff = {
                 let (collateral, _, _) = &*self.collateral.read().await;
-                let col_row_lock = collateral.get(row_num).unwrap().read().await;
+                let col_row_lock = collateral
+                    .get(row_num)
+                    .ok_or_else(|| eyre!("row = {} not found in collateral", row_num))?
+                    .read()
+                    .await;
                 col_row_lock.dot(&ltp)
             };
 
             let bor_eff = {
                 let (borrowed, _, _) = &*self.borrowed.read().await;
-                let bor_row_lock = borrowed.get(row_num).unwrap().read().await;
+                let bor_row_lock = borrowed
+                    .get(row_num)
+                    .ok_or_else(|| eyre!("row = {} not found in borrowed", row_num))?
+                    .read()
+                    .await;
                 bor_row_lock.dot(&price)
             };
 
@@ -1418,7 +1464,11 @@ where
 
                 sync_tx
                     .send(SyncRequest::Both(
-                        cache.users.get(user).unwrap().row_num,
+                        cache
+                            .users
+                            .get(user)
+                            .ok_or_else(|| eyre!("user = {:?} not found", user))?
+                            .row_num,
                         rq_date,
                     ))
                     .await?;
@@ -1447,29 +1497,29 @@ async fn handle_event<F1, R1, F2, R2, F3, R3, F4, R4>(
 ) -> eyre::Result<()>
 where
     F1: FnOnce() -> R1,
-    R1: Future<Output = ()> + Send,
+    R1: Future<Output = eyre::Result<()>> + Send,
     F2: FnOnce() -> R2,
-    R2: Future<Output = ()> + Send,
+    R2: Future<Output = eyre::Result<()>> + Send,
     F3: FnOnce() -> R3,
-    R3: Future<Output = ()> + Send,
+    R3: Future<Output = eyre::Result<()>> + Send,
     F4: FnOnce() -> R4,
-    R4: Future<Output = ()> + Send,
+    R4: Future<Output = eyre::Result<()>> + Send,
 {
     match rq_date {
         t if t > last_modified => {
             // new event
-            new_event().await;
+            new_event().await?;
         }
         t if t <= last_sync => {
             // skip event
-            skip_event().await;
+            skip_event().await?;
         }
         t if t > last_sync && t <= last_modified => {
             // remove user and add
-            sync_user().await;
+            sync_user().await?;
         }
         _ => {
-            unknown().await;
+            unknown().await?;
         }
     }
 
@@ -1516,18 +1566,23 @@ where
         return Ok(());
     }
 
-    let user_settings = cache.users.get(&event.onBehalfOf).unwrap().clone();
+    let user_settings = cache
+        .users
+        .get(&event.onBehalfOf)
+        .ok_or_else(|| eyre!("user = {:?} not found", event.onBehalfOf))?
+        .clone();
     let row_num = user_settings.row_num;
-    let idx = tokens.get(&event.reserve).unwrap().order;
+    let idx = tokens
+        .get(&event.reserve)
+        .ok_or_else(|| eyre!("token = {:?} not found", event.reserve))?
+        .order;
     let now = Utc::now().timestamp_micros();
 
     let c = cache.clone();
     let sync_user = async move || {
         debug!("supply: sync_user user = {}", event.onBehalfOf);
 
-        c.sync_user(&event.onBehalfOf, &tokens, provider)
-            .await
-            .unwrap();
+        c.sync_user(&event.onBehalfOf, &tokens, provider).await?;
 
         debug!("{}", {
             let received = Utc::now().timestamp_micros();
@@ -1540,6 +1595,8 @@ where
                 received - rq_date
             )
         });
+
+        Ok(())
     };
 
     if user_settings.use_as_collateral[idx] {
@@ -1558,12 +1615,12 @@ where
             row_lock[idx] += f64::from(event.amount);
             sync_tx
                 .send(SyncRequest::Collateral(row_num, rq_date))
-                .await
-                .unwrap();
+                .await?;
             hf_tx
                 .send(HFRequest::User(event.onBehalfOf, rq_date))
-                .await
-                .unwrap();
+                .await?;
+
+            Ok(())
         };
         let skip_event = async move || {
             debug!(
@@ -1571,6 +1628,8 @@ where
                      event = supply, user = {}, rq_date = {}, collateral sync = {}, collateral rq_date = {}",
                 event.onBehalfOf, rq_date, last_sync, last_modified,
             );
+
+            Ok(())
         };
         let unknown = async move || {
             info!(
@@ -1578,6 +1637,8 @@ where
                      event = supply, user = {}, rq_date = {}, collateral sync = {}, collateral rq_date = {}",
                 event.onBehalfOf, rq_date, last_sync, last_modified
             );
+
+            Ok(())
         };
 
         handle_event(
@@ -1604,6 +1665,8 @@ where
             (reserve_lock.1, reserve_lock.2) = (now, now);
             let mut row_lock = reserve_lock.0[row_num].write().await;
             row_lock[idx] += f64::from(event.amount);
+
+            Ok(())
         };
         let skip_event = async move || {
             debug!(
@@ -1611,6 +1674,8 @@ where
                      event = supply, user = {}, rq_date = {}, reserve sync = {}, reserve rq_date = {}",
                 event.onBehalfOf, rq_date, last_sync, last_modified,
             );
+
+            Ok(())
         };
         let unknown = async move || {
             info!(
@@ -1618,6 +1683,8 @@ where
                      event = supply, user = {}, rq_date = {}, reserve sync = {}, reserve rq_date = {}",
                 event.onBehalfOf, rq_date, last_sync, last_modified
             );
+
+            Ok(())
         };
 
         handle_event(

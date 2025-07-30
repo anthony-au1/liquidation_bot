@@ -2,21 +2,22 @@ use crate::arbitrum::arbitrum::IAaveProtocolDataProvider::TokenData;
 use crate::arbitrum::arbitrum::IChainlinkAggregator::IChainlinkAggregatorEvents;
 use crate::arbitrum::arbitrum::IL2Pool::{IL2PoolEvents, Supply};
 use crate::arbitrum::arbitrum::{
-    Cache, DataProvider, HFRequest, SyncRequest, TokenDetails, UserReserveData, UserSettings,
-    create_user, supply,
+    create_user, supply, Cache, DataProvider, HFRequest, SyncRequest, TokenDetails,
+    UserReserveData, UserSettings,
 };
 use alloy_primitives::Address;
 use async_trait::async_trait;
 use bitvec::order::Lsb0;
 use bitvec::prelude::BitVec;
 use chrono::{Days, Utc};
+use eyre::eyre;
 use ndarray::{Array1, Array2};
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
 use tokio::sync::mpsc::channel;
+use tokio::sync::RwLock;
 use tokio::task;
 
 struct DummyDataProvider;
@@ -139,13 +140,25 @@ async fn get_all_user_data(
 ) -> eyre::Result<(Vec<f64>, Vec<f64>, Vec<f64>)> {
     let (collateral, reserve, borrowed) = {
         let (collaterals, _, _) = &*cache.collateral.read().await;
-        let collateral = &*collaterals.get(user_row_num).unwrap().read().await;
+        let collateral = &*collaterals
+            .get(user_row_num)
+            .ok_or_else(|| eyre!("row = {} not found in collateral", user_row_num))?
+            .read()
+            .await;
 
         let (reserves, _, _) = &*cache.reserve.read().await;
-        let reserve = &*reserves.get(user_row_num).unwrap().read().await;
+        let reserve = &*reserves
+            .get(user_row_num)
+            .ok_or_else(|| eyre!("row = {} not found in reserve", user_row_num))?
+            .read()
+            .await;
 
         let (borroweds, _, _) = &*cache.borrowed.read().await;
-        let borrowed = &*borroweds.get(user_row_num).unwrap().read().await;
+        let borrowed = &*borroweds
+            .get(user_row_num)
+            .ok_or_else(|| eyre!("row = {} not found in borrowed", user_row_num))?
+            .read()
+            .await;
 
         (
             Array1::to_vec(collateral),
@@ -208,7 +221,11 @@ async fn test_sync_collateral() -> eyre::Result<()> {
 
     {
         let (collateral, _, _) = &mut *cache.collateral.write().await;
-        let mut col_row = collateral.get(1).unwrap().write().await;
+        let mut col_row = collateral
+            .get(1)
+            .ok_or_else(|| eyre!("row = 1 not found in collateral"))?
+            .write()
+            .await;
         col_row[0] = 40.0;
         col_row[1] = 50.0;
         col_row[2] = 60.0;
@@ -279,7 +296,11 @@ async fn test_sync_borrowed() -> eyre::Result<()> {
 
     {
         let (borrowed, _, _) = &mut *cache.borrowed.write().await;
-        let mut bor_row = borrowed.get(1).unwrap().write().await;
+        let mut bor_row = borrowed
+            .get(1)
+            .ok_or_else(|| eyre!("row = 1 not found in borrowed"))?
+            .write()
+            .await;
         bor_row[0] = 40.0;
         bor_row[1] = 50.0;
         bor_row[2] = 60.0;
@@ -354,13 +375,23 @@ async fn test_supply() -> eyre::Result<()> {
     let rq_date = Utc::now().timestamp_micros();
 
     let sync_handler = task::spawn(async move {
-        let msg = sync_rc.recv().await.unwrap();
+        let msg = sync_rc
+            .recv()
+            .await
+            .ok_or_else(|| eyre!("sync channel closed"))?;
         assert_eq!(SyncRequest::Collateral(0, rq_date), msg);
+
+        Ok::<_, eyre::Error>(())
     });
 
     let hf_handler = task::spawn(async move {
-        let msg = hf_rc.recv().await.unwrap();
+        let msg = hf_rc
+            .recv()
+            .await
+            .ok_or_else(|| eyre!("hf channel closed"))?;
         assert_eq!(HFRequest::User(user.clone(), rq_date), msg);
+
+        Ok::<_, eyre::Error>(())
     });
 
     // 1 case: new message containing collateral
@@ -372,12 +403,16 @@ async fn test_supply() -> eyre::Result<()> {
         (event, sync_tx, hf_tx, rq_date),
     )
     .await?;
-    sync_handler.await?;
-    hf_handler.await?;
+    let _ = sync_handler.await?;
+    let _ = hf_handler.await?;
 
     {
         let (collaterals, _, _) = &*cache.collateral.read().await;
-        let collateral = &*collaterals.get(0).unwrap().read().await;
+        let collateral = &*collaterals
+            .get(0)
+            .ok_or_else(|| eyre!("row = 0 not found in collateral"))?
+            .read()
+            .await;
 
         assert_eq!(collateral, Array1::from_vec(vec![10.0, 0.0, 0.0]));
     }
@@ -418,7 +453,11 @@ async fn test_supply() -> eyre::Result<()> {
 
     {
         let (reserves, _, _) = &*cache.reserve.read().await;
-        let reserve = &*reserves.get(1).unwrap().read().await;
+        let reserve = &*reserves
+            .get(1)
+            .ok_or_else(|| eyre!("row = 1 not found in reserve"))?
+            .read()
+            .await;
 
         assert_eq!(reserve, Array1::from_vec(vec![0.0, 3.0, 0.0]));
     }
@@ -461,7 +500,11 @@ async fn test_supply() -> eyre::Result<()> {
 
     {
         let (collaterals, _, _) = &*cache.collateral.read().await;
-        let collateral = &*collaterals.get(1).unwrap().read().await;
+        let collateral = &*collaterals
+            .get(1)
+            .ok_or_else(|| eyre!("row = 1 not found in collateral"))?
+            .read()
+            .await;
 
         assert_eq!(collateral, Array1::from_vec(vec![0.0, 0.0, 0.0]));
     }
@@ -470,7 +513,7 @@ async fn test_supply() -> eyre::Result<()> {
 
     let rq_date = Utc::now()
         .checked_sub_days(Days::new(1))
-        .unwrap()
+        .ok_or_else(|| eyre!("invalid date"))?
         .timestamp_micros();
     {
         cache.users.insert(
@@ -489,7 +532,7 @@ async fn test_supply() -> eyre::Result<()> {
         let (_, last_sync, last_modified) = &mut *cache.collateral.write().await;
         *last_sync = Utc::now()
             .checked_sub_days(Days::new(2))
-            .unwrap()
+            .ok_or_else(|| eyre!("invalid date"))?
             .timestamp_micros();
         *last_modified = Utc::now().timestamp_micros();
     }
@@ -506,13 +549,23 @@ async fn test_supply() -> eyre::Result<()> {
     let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
 
     let sync_handler = task::spawn(async move {
-        let msg = sync_rc.recv().await.unwrap();
+        let msg = sync_rc
+            .recv()
+            .await
+            .ok_or_else(|| eyre!("sync channel closed"))?;
         assert_eq!(SyncRequest::Both(2, rq_date), msg);
+
+        Ok::<_, eyre::Error>(())
     });
 
     let hf_handler = task::spawn(async move {
-        let msg = hf_rc.recv().await.unwrap();
+        let msg = hf_rc
+            .recv()
+            .await
+            .ok_or_else(|| eyre!("hf channel closed"))?;
         assert_eq!(HFRequest::User(user.clone(), rq_date), msg);
+
+        Ok::<_, eyre::Error>(())
     });
 
     supply(
@@ -522,8 +575,8 @@ async fn test_supply() -> eyre::Result<()> {
         (event, sync_tx, hf_tx, rq_date),
     )
     .await?;
-    sync_handler.await?;
-    hf_handler.await?;
+    let _ = sync_handler.await?;
+    let _ = hf_handler.await?;
 
     assert_eq!(cache.contains(&user), true);
 
@@ -534,7 +587,13 @@ async fn test_supply() -> eyre::Result<()> {
 async fn test_sync_user() -> eyre::Result<()> {
     let dummy_data_provider = Arc::new(DummyDataProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1).await?;
-    let user = cache.users.iter().next().unwrap().key().clone();
+    let user = cache
+        .users
+        .iter()
+        .next()
+        .ok_or_else(|| eyre!("no users found"))?
+        .key()
+        .clone();
 
     cache
         .sync_user(&user, &tokens, dummy_data_provider.clone())
@@ -557,7 +616,13 @@ async fn test_init_user() -> eyre::Result<()> {
 
     let dummy_data_provider = Arc::new(DummyDataProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1).await?;
-    let user = cache.users.iter().next().unwrap().key().clone();
+    let user = cache
+        .users
+        .iter()
+        .next()
+        .ok_or_else(|| eyre!("no users found"))?
+        .key()
+        .clone();
 
     cache.init_user(&user, &tokens, dummy_data_provider).await?;
 
@@ -588,7 +653,13 @@ async fn test_init_user() -> eyre::Result<()> {
 async fn test_get_user_data() -> eyre::Result<()> {
     let dummy_data_provider = Arc::new(DummyDataProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1).await?;
-    let user = cache.users.iter().next().unwrap().key().clone();
+    let user = cache
+        .users
+        .iter()
+        .next()
+        .ok_or_else(|| eyre!("no users found"))?
+        .key()
+        .clone();
 
     let (collateral, reserve, borrowed) = cache
         .get_user_data(dummy_data_provider, &tokens, &user)
@@ -607,7 +678,13 @@ async fn test_get_user_data() -> eyre::Result<()> {
 #[tokio::test]
 async fn test_contains() -> eyre::Result<()> {
     let (cache, _) = generate_cache_and_tokens(1).await?;
-    let user = cache.users.iter().next().unwrap().key().clone();
+    let user = cache
+        .users
+        .iter()
+        .next()
+        .ok_or_else(|| eyre!("no users found"))?
+        .key()
+        .clone();
 
     assert_eq!(cache.contains(&user), true);
 
@@ -617,7 +694,13 @@ async fn test_contains() -> eyre::Result<()> {
 #[tokio::test]
 async fn test_remove_user() -> eyre::Result<()> {
     let (cache, _) = generate_cache_and_tokens(1).await?;
-    let user = cache.users.iter().next().unwrap().key().clone();
+    let user = cache
+        .users
+        .iter()
+        .next()
+        .ok_or_else(|| eyre!("no users found"))?
+        .key()
+        .clone();
     cache.remove_user(&user);
 
     assert_eq!(cache.contains(&user), false);
@@ -639,7 +722,11 @@ async fn test_subscribe() -> eyre::Result<()> {
             assert_eq!(text, test_message);
 
             let (collaterals, _, _) = &*c.collateral.write().await;
-            let mut col = collaterals.get(0).unwrap().write().await;
+            let mut col = collaterals
+                .get(0)
+                .ok_or_else(|| eyre!("row = 0 not found in collateral"))?
+                .write()
+                .await;
             *col = Array1::from(vec![7.0, 7.0, 7.0]);
 
             Ok(())
@@ -657,12 +744,20 @@ async fn test_subscribe() -> eyre::Result<()> {
     )
     .await?;
 
-    senders.get(0).unwrap().send(Message(msg)).await?;
+    senders
+        .get(0)
+        .ok_or_else(|| eyre!("no senders found"))?
+        .send(Message(msg))
+        .await?;
 
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     let (collaterals, _, _) = &*cache.collateral.read().await;
-    let col = collaterals.get(0).unwrap().write().await;
+    let col = collaterals
+        .get(0)
+        .ok_or_else(|| eyre!("row = 0 not found in collateral"))?
+        .write()
+        .await;
     assert_eq!(*col, Array1::from(vec![7.0, 7.0, 7.0]));
 
     Ok(())
@@ -673,7 +768,13 @@ async fn test_calc_hf() -> eyre::Result<()> {
     // 1 case - hf calculation for 1 user
 
     let (cache, _) = generate_cache_and_tokens(1).await?;
-    let user = cache.users.iter().next().unwrap().key().clone();
+    let user = cache
+        .users
+        .iter()
+        .next()
+        .ok_or_else(|| eyre!("no users found"))?
+        .key()
+        .clone();
 
     {
         let (lt, _) = &mut *cache.liquidation_threshold.write().await;
@@ -686,11 +787,19 @@ async fn test_calc_hf() -> eyre::Result<()> {
         *hf = Array1::from_vec(vec![0.0]);
 
         let (collaterals, _, _) = &mut *cache.collateral.write().await;
-        let mut col_row = collaterals.get(0).unwrap().write().await;
+        let mut col_row = collaterals
+            .get(0)
+            .ok_or_else(|| eyre!("row = 0 not found in collateral"))?
+            .write()
+            .await;
         *col_row = Array1::from_vec(vec![2.0, 10.0, 200.0]);
 
         let (borroweds, _, _) = &mut *cache.borrowed.write().await;
-        let mut bor_row = borroweds.get(0).unwrap().write().await;
+        let mut bor_row = borroweds
+            .get(0)
+            .ok_or_else(|| eyre!("row = 0 not found in borrowed"))?
+            .write()
+            .await;
         *bor_row = Array1::from_vec(vec![1.5, 15.0, 0.0]);
     }
 
@@ -722,13 +831,21 @@ async fn test_calc_hf() -> eyre::Result<()> {
         let (collaterals, _, _) = &mut *cache.collateral.write().await;
         collaterals.push(RwLock::new(Array1::from_vec(vec![2.0, 10.0, 200.0])));
         collaterals.push(RwLock::new(Array1::from_vec(vec![2.0, 10.0, 200.0])));
-        let mut col_row = collaterals.get(0).unwrap().write().await;
+        let mut col_row = collaterals
+            .get(0)
+            .ok_or_else(|| eyre!("row = 0 not found in collateral"))?
+            .write()
+            .await;
         *col_row = Array1::from_vec(vec![2.0, 10.0, 200.0]);
 
         let (borroweds, _, _) = &mut *cache.borrowed.write().await;
         borroweds.push(RwLock::new(Array1::from_vec(vec![1.5, 15.0, 0.0])));
         borroweds.push(RwLock::new(Array1::from_vec(vec![1.5, 15.0, 0.0])));
-        let mut bor_row = borroweds.get(0).unwrap().write().await;
+        let mut bor_row = borroweds
+            .get(0)
+            .ok_or_else(|| eyre!("row = 0 not found in borrowed"))?
+            .write()
+            .await;
         *bor_row = Array1::from_vec(vec![1.5, 15.0, 0.0]);
 
         *cache.collateral_matrix.write().await = Array2::from_elem((0, 3), 0.);
@@ -816,7 +933,13 @@ async fn test_create_user() -> eyre::Result<()> {
 
     let dummy_data_provider = Arc::new(DummyDataProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1).await?;
-    let user = cache.users.iter().next().unwrap().key().clone();
+    let user = cache
+        .users
+        .iter()
+        .next()
+        .ok_or_else(|| eyre!("no users found"))?
+        .key()
+        .clone();
     let rq_date = Utc::now().timestamp_micros();
 
     let (sync_tx, _) = channel::<SyncRequest>(1);
@@ -849,13 +972,23 @@ async fn test_create_user() -> eyre::Result<()> {
     let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
 
     let sync_handler = task::spawn(async move {
-        let msg = sync_rc.recv().await.unwrap();
+        let msg = sync_rc
+            .recv()
+            .await
+            .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
         assert_eq!(SyncRequest::Both(0, rq_date), msg);
+
+        Ok::<_, eyre::Error>(())
     });
 
     let hf_handler = task::spawn(async move {
-        let msg = hf_rc.recv().await.unwrap();
+        let msg = hf_rc
+            .recv()
+            .await
+            .ok_or_else(|| eyre::eyre!("hf channel closed"))?;
         assert_eq!(HFRequest::User(user.clone(), rq_date), msg);
+
+        Ok::<_, eyre::Error>(())
     });
 
     let created = create_user(
@@ -868,8 +1001,8 @@ async fn test_create_user() -> eyre::Result<()> {
         &hf_tx,
     )
     .await?;
-    sync_handler.await?;
-    hf_handler.await?;
+    let _ = sync_handler.await?;
+    let _ = hf_handler.await?;
 
     assert_eq!(created, true);
 
@@ -887,6 +1020,7 @@ async fn test_create_user() -> eyre::Result<()> {
     // 3 case - error
 
     let create_user_data_provider = Arc::new(CreateUserDataProvider::new());
+    let (cache, tokens) = generate_cache_and_tokens(0).await?;
 
     let err = create_user(
         rq_date,

@@ -48,7 +48,7 @@ async fn main() -> eyre::Result<()> {
             // get_headers(&provider).await?;
             // get_borrows(Box::new(provider)).await?;
 
-            let data_provider = AaveDataProvider::new(&provider);
+            let data_provider = AaveDataProvider::new(&provider)?;
             start(Arc::new(data_provider)).await?;
             // test_me().await?;
         }
