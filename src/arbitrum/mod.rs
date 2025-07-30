@@ -1,3 +1,4 @@
 pub mod arbitrum;
+mod events;
 #[cfg(test)]
-mod arbitrum_tests;
+mod tests;
