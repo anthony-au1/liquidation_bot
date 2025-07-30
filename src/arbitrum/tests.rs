@@ -2,9 +2,10 @@ use crate::arbitrum::arbitrum::IAaveProtocolDataProvider::TokenData;
 use crate::arbitrum::arbitrum::IChainlinkAggregator::IChainlinkAggregatorEvents;
 use crate::arbitrum::arbitrum::IL2Pool::{IL2PoolEvents, Supply};
 use crate::arbitrum::arbitrum::{
-    create_user, supply, Cache, DataProvider, HFRequest, SyncRequest, TokenDetails,
+    Cache, DataProvider, HFRequest, SyncRequest, TokenDetails,
     UserReserveData, UserSettings,
 };
+use crate::arbitrum::events::{create_user, supply};
 use alloy_primitives::Address;
 use async_trait::async_trait;
 use bitvec::order::Lsb0;
@@ -920,7 +921,7 @@ impl DataProvider for CreateUserDataProvider {
 
     async fn get_user_reserve_data(
         &self,
-        token_address: &Address,
+        _: &Address,
         _: &Address,
     ) -> eyre::Result<UserReserveData> {
         Err(eyre::eyre!("mock error"))
