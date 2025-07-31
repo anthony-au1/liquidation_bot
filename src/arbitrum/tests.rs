@@ -2,14 +2,14 @@ use crate::arbitrum::arbitrum::IAaveProtocolDataProvider::TokenData;
 use crate::arbitrum::arbitrum::IChainlinkAggregator::IChainlinkAggregatorEvents;
 use crate::arbitrum::arbitrum::IL2Pool::{IL2PoolEvents, Supply};
 use crate::arbitrum::arbitrum::{
-    Cache, DataProvider, HFRequest, SyncRequest, TokenDetails, UserReserveData, UserSettings,
+    Cache, DataProvider, HFRequest, SyncRequest, TokenDetails, UserReserveData, UserSettings, setup,
 };
 use crate::arbitrum::events::{create_user, supply};
 use alloy_primitives::Address;
 use async_trait::async_trait;
 use bitvec::order::Lsb0;
 use bitvec::prelude::BitVec;
-use chrono::{Days, Utc};
+use chrono::Utc;
 use eyre::eyre;
 use ndarray::{Array1, Array2};
 use std::collections::HashMap;
@@ -31,11 +31,26 @@ impl DummyDataProvider {
 #[async_trait]
 impl DataProvider for DummyDataProvider {
     async fn get_all_reserves_tokens(&self) -> eyre::Result<Vec<TokenData>> {
-        todo!()
+        let mut token_data = vec![];
+        let (_, tokens) = generate_cache_and_tokens(0).await?;
+        for (token_address, TokenDetails { name, .. }) in tokens {
+            token_data.push(TokenData {
+                symbol: name,
+                tokenAddress: token_address,
+            })
+        }
+
+        Ok(token_data)
     }
 
-    async fn get_source_of_asset(&self, _: &Address) -> eyre::Result<Address> {
-        todo!()
+    async fn get_source_of_asset(&self, token_address: &Address) -> eyre::Result<Address> {
+        let (_, tokens) = generate_cache_and_tokens(0).await?;
+        let price_source = tokens
+            .get(token_address)
+            .map(|details| details.price_source.clone())
+            .ok_or_else(|| eyre!("Source not found for asset {:?}", token_address))?;
+
+        Ok(price_source)
     }
 
     async fn listen_events<F, Fut>(&self, _: F) -> eyre::Result<()>
@@ -1113,6 +1128,45 @@ async fn test_supply() -> eyre::Result<()> {
     assert_eq!(collateral, vec![0.0, 2.0, 0.0]);
     assert_eq!(reserve, vec![1.0, 0.0, 3.0]);
     assert_eq!(borrowed, vec![1.0, 2.0, 3.0]);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_setup() -> eyre::Result<()> {
+    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let (_, t) = generate_cache_and_tokens(0).await?;
+
+    let tokens = setup(dummy_data_provider).await?;
+
+    assert_eq!(tokens.len(), 3);
+
+    for (
+        token_address,
+        TokenDetails {
+            name, price_source, ..
+        },
+    ) in tokens
+    {
+        assert_eq!(t.contains_key(&token_address), true);
+
+        let TokenDetails {
+            name: n,
+            price_source: p_s,
+            ..
+        } = t
+            .get(&token_address)
+            .ok_or_else(|| eyre::eyre!("token address not found"))?;
+
+        assert_eq!(name, *n);
+        assert_eq!(price_source, *p_s);
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_listen_events() -> eyre::Result<()> {
 
     Ok(())
 }

@@ -17,11 +17,11 @@ test
 8. sync_borrowed - DONE
 9. sync_data - DONE
 10. calc_hf - DONE
-11. supply
-12. create_user
-13. handle_event 
+11. supply - DONE
+12. create_user - DONE
+13. handle_event - DONE
 14. start
-15. setup
+15. setup - DONE
 16. listen_events
 17. listen_price_update
 18. liquidation_threshold_update

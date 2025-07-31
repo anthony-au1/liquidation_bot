@@ -604,7 +604,7 @@ impl TokenDetails {
     }
 }
 
-async fn setup<P>(provider: Arc<P>) -> eyre::Result<Tokens>
+pub(in crate::arbitrum) async fn setup<P>(provider: Arc<P>) -> eyre::Result<Tokens>
 where
     P: DataProvider,
 {
