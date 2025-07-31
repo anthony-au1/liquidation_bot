@@ -62,14 +62,13 @@ where
     Ok(false)
 }
 
-async fn handle_event<F1, R1, F2, R2, F3, R3, F4, R4>(
+async fn handle_event<F1, R1, F2, R2, F3, R3>(
     rq_date: TimeStamp,
     last_sync: TimeStamp,
     last_modified: TimeStamp,
     new_event: F1,
     skip_event: F2,
     sync_user: F3,
-    unknown: F4,
 ) -> eyre::Result<()>
 where
     F1: FnOnce() -> R1,
@@ -78,8 +77,6 @@ where
     R2: Future<Output = eyre::Result<()>> + Send,
     F3: FnOnce() -> R3,
     R3: Future<Output = eyre::Result<()>> + Send,
-    F4: FnOnce() -> R4,
-    R4: Future<Output = eyre::Result<()>> + Send,
 {
     match rq_date {
         t if t > last_modified => {
@@ -91,11 +88,45 @@ where
             skip_event().await?;
         }
         t if t > last_sync && t <= last_modified => {
-            // remove user and add
-            sync_user().await?;
+            // sync user
+            // sync_user().await?;
+
+            // user, cache, tokens, provider, sync_tx, hf_tx
+
+
+            debug!("supply: sync_user user = {}", event.onBehalfOf);
+
+            c.sync_user(&event.onBehalfOf, &tokens, provider).await?;
+
+            sync_tx
+                .send(SyncRequest::Both(
+                    cache
+                        .users
+                        .get(&event.onBehalfOf)
+                        .ok_or_else(|| eyre!("user = {:?} not found", event.onBehalfOf))?
+                        .row_num,
+                    rq_date,
+                ))
+                .await?;
+            hf_tx.send(HFRequest::User(event.onBehalfOf.clone(), rq_date)).await?;
+
+            debug!("{}", {
+            let received = Utc::now().timestamp_micros();
+            format!(
+                "sync_user: cache = {:?}, rq_date = {}, \
+                             received = {}, delta = {} μs",
+                c,
+                rq_date,
+                received,
+                received - rq_date
+            )
+        });
         }
         _ => {
-            unknown().await?;
+            unreachable!(
+                "rq_date = {}, last_sync = {}, last_modified = {}",
+                rq_date, last_sync, last_modified
+            );
         }
     }
 
@@ -160,6 +191,18 @@ where
 
         c.sync_user(&event.onBehalfOf, &tokens, provider).await?;
 
+        sync_tx
+            .send(SyncRequest::Both(
+                cache
+                    .users
+                    .get(&event.onBehalfOf)
+                    .ok_or_else(|| eyre!("user = {:?} not found", event.onBehalfOf))?
+                    .row_num,
+                rq_date,
+            ))
+            .await?;
+        hf_tx.send(HFRequest::User(event.onBehalfOf.clone(), rq_date)).await?;
+
         debug!("{}", {
             let received = Utc::now().timestamp_micros();
             format!(
@@ -207,15 +250,6 @@ where
 
             Ok(())
         };
-        let unknown = async move || {
-            info!(
-                "detected unknown case:\
-                     event = supply, user = {}, rq_date = {}, collateral sync = {}, collateral rq_date = {}",
-                event.onBehalfOf, rq_date, last_sync, last_modified
-            );
-
-            Ok(())
-        };
 
         handle_event(
             rq_date,
@@ -223,8 +257,7 @@ where
             last_modified,
             new_event,
             skip_event,
-            sync_user,
-            unknown,
+            sync_user
         )
         .await?;
     } else {
@@ -253,15 +286,6 @@ where
 
             Ok(())
         };
-        let unknown = async move || {
-            info!(
-                "detected unknown case:\
-                     event = supply, user = {}, rq_date = {}, reserve sync = {}, reserve rq_date = {}",
-                event.onBehalfOf, rq_date, last_sync, last_modified
-            );
-
-            Ok(())
-        };
 
         handle_event(
             rq_date,
@@ -269,8 +293,7 @@ where
             last_modified,
             new_event,
             skip_event,
-            sync_user,
-            unknown,
+            sync_user
         )
         .await?;
     }

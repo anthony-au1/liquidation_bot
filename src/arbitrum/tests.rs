@@ -2,8 +2,7 @@ use crate::arbitrum::arbitrum::IAaveProtocolDataProvider::TokenData;
 use crate::arbitrum::arbitrum::IChainlinkAggregator::IChainlinkAggregatorEvents;
 use crate::arbitrum::arbitrum::IL2Pool::{IL2PoolEvents, Supply};
 use crate::arbitrum::arbitrum::{
-    Cache, DataProvider, HFRequest, SyncRequest, TokenDetails,
-    UserReserveData, UserSettings,
+    Cache, DataProvider, HFRequest, SyncRequest, TokenDetails, UserReserveData, UserSettings,
 };
 use crate::arbitrum::events::{create_user, supply};
 use alloy_primitives::Address;
@@ -17,8 +16,8 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc::channel;
 use tokio::sync::RwLock;
+use tokio::sync::mpsc::channel;
 use tokio::task;
 
 struct DummyDataProvider;
@@ -114,6 +113,7 @@ async fn generate_cache_and_tokens(
 
     if user_num > 0 {
         let mut user_addr = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
+        let now = Utc::now().timestamp_micros();
         for i in 0..user_num {
             cache.users.insert(
                 user_addr,
@@ -121,14 +121,17 @@ async fn generate_cache_and_tokens(
             );
             user_addr = user_addr.create((i + 1) as u64);
 
-            let (collaterals, _, _) = &mut *cache.collateral.write().await;
+            let (collaterals, sync_ts, modified_ts) = &mut *cache.collateral.write().await;
             collaterals.push(RwLock::new(Array1::from_vec(vec![0.0; 3])));
+            (*sync_ts, *modified_ts) = (now, now);
 
-            let (reserves, _, _) = &mut *cache.reserve.write().await;
+            let (reserves, sync_ts, modified_ts) = &mut *cache.reserve.write().await;
             reserves.push(RwLock::new(Array1::from_vec(vec![0.0; 3])));
+            (*sync_ts, *modified_ts) = (now, now);
 
-            let (borroweds, _, _) = &mut *cache.borrowed.write().await;
+            let (borroweds, sync_ts, modified_ts) = &mut *cache.borrowed.write().await;
             borroweds.push(RwLock::new(Array1::from_vec(vec![0.0; 3])));
+            (*sync_ts, *modified_ts) = (now, now);
         }
     }
 
@@ -317,269 +320,6 @@ async fn test_sync_borrowed() -> eyre::Result<()> {
         let borrowed_matrix = &*cache.borrowed_matrix.read().await;
         assert_eq!(borrowed_matrix, expected);
     }
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_supply() -> eyre::Result<()> {
-    let cache = Arc::new(Cache::default());
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
-    let token = Address::from_str("0x1Af54C263cefD1792CbFcF41B711834d657ea61D")?;
-    let user = Address::from_str("0x1Af54C263cefD1792CbFcF41B722834d657ea61D")?;
-
-    {
-        cache.users.insert(
-            user.clone(),
-            UserSettings::new(0, BitVec::<usize, Lsb0>::from_iter([true, false, false])),
-        );
-        let (collaterals, _, _) = &mut *cache.collateral.write().await;
-        collaterals.push(RwLock::new(Array1::from_vec(vec![0.0; 3])));
-    }
-
-    let mut tokens = HashMap::new();
-    tokens.insert(
-        token.clone(),
-        TokenDetails::new(
-            String::from("AAVE"),
-            Address::from_str("0xba5DdD1f9d7F570dc94a51479a000E3BCE967196")?,
-            0,
-        ),
-    );
-    tokens.insert(
-        Address::from_str("0x1Af54C113cefD1792CbFcF41B711834d657ea61D")?,
-        TokenDetails::new(
-            String::from("USDC"),
-            Address::from_str("0xaf88d065e77c8cC2239327C5EDb3A432268e5831")?,
-            1,
-        ),
-    );
-    tokens.insert(
-        Address::from_str("0x1Af54C113cefD1792CbFcF41B711824d657eb61D")?,
-        TokenDetails::new(
-            String::from("DAI"),
-            Address::from_str("0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1")?,
-            2,
-        ),
-    );
-    let tokens = Arc::new(tokens);
-
-    let event = Supply {
-        reserve: token.clone(),
-        user: user.clone(),
-        onBehalfOf: user.clone(),
-        amount: alloy_primitives::U256::from(10.0),
-        referralCode: 0,
-    };
-    let (sync_tx, mut sync_rc) = channel::<SyncRequest>(1);
-    let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
-    let rq_date = Utc::now().timestamp_micros();
-
-    let sync_handler = task::spawn(async move {
-        let msg = sync_rc
-            .recv()
-            .await
-            .ok_or_else(|| eyre!("sync channel closed"))?;
-        assert_eq!(SyncRequest::Collateral(0, rq_date), msg);
-
-        Ok::<_, eyre::Error>(())
-    });
-
-    let hf_handler = task::spawn(async move {
-        let msg = hf_rc
-            .recv()
-            .await
-            .ok_or_else(|| eyre!("hf channel closed"))?;
-        assert_eq!(HFRequest::User(user.clone(), rq_date), msg);
-
-        Ok::<_, eyre::Error>(())
-    });
-
-    // 1 case: new message containing collateral
-
-    supply(
-        cache.clone(),
-        dummy_data_provider.clone(),
-        tokens.clone(),
-        (event, sync_tx, hf_tx, rq_date),
-    )
-    .await?;
-    let _ = sync_handler.await?;
-    let _ = hf_handler.await?;
-
-    {
-        let (collaterals, _, _) = &*cache.collateral.read().await;
-        let collateral = &*collaterals
-            .get(0)
-            .ok_or_else(|| eyre!("row = 0 not found in collateral"))?
-            .read()
-            .await;
-
-        assert_eq!(collateral, Array1::from_vec(vec![10.0, 0.0, 0.0]));
-    }
-
-    // 2 case: new message containing reserve
-
-    let token = Address::from_str("0x1Af54C113cefD1792CbFcF41B711834d657ea61D")?;
-    let user = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
-
-    {
-        cache.users.insert(
-            user.clone(),
-            UserSettings::new(1, BitVec::<usize, Lsb0>::from_iter([false, false, false])),
-        );
-        let (reserves, _, _) = &mut *cache.reserve.write().await;
-        reserves.push(RwLock::new(Array1::from_vec(vec![0.0; 3])));
-        reserves.push(RwLock::new(Array1::from_vec(vec![0.0; 3])));
-    }
-
-    let event = Supply {
-        reserve: token.clone(),
-        user: user.clone(),
-        onBehalfOf: user.clone(),
-        amount: alloy_primitives::U256::from(3.0),
-        referralCode: 0,
-    };
-
-    let (sync_tx, _) = channel::<SyncRequest>(1);
-    let (hf_tx, _) = channel::<HFRequest>(1);
-
-    supply(
-        cache.clone(),
-        dummy_data_provider.clone(),
-        tokens.clone(),
-        (event, sync_tx, hf_tx, rq_date),
-    )
-    .await?;
-
-    {
-        let (reserves, _, _) = &*cache.reserve.read().await;
-        let reserve = &*reserves
-            .get(1)
-            .ok_or_else(|| eyre!("row = 1 not found in reserve"))?
-            .read()
-            .await;
-
-        assert_eq!(reserve, Array1::from_vec(vec![0.0, 3.0, 0.0]));
-    }
-
-    // 3 case: new message skip event
-
-    let token = Address::from_str("0x1Af54C113cefD1792CbFcF41B711824d657eb61D")?;
-    let user = Address::from_str("0x1Af54C263cefD1792CbFcF41B722834d611ea61D")?;
-
-    {
-        cache.users.insert(
-            user.clone(),
-            UserSettings::new(2, BitVec::<usize, Lsb0>::from_iter([false, false, true])),
-        );
-        let (collaterals, last_sync, _) = &mut *cache.collateral.write().await;
-        collaterals.push(RwLock::new(Array1::from_vec(vec![0.0; 3])));
-        collaterals.push(RwLock::new(Array1::from_vec(vec![0.0; 3])));
-
-        *last_sync = Utc::now().timestamp_micros();
-    }
-
-    let event = Supply {
-        reserve: token.clone(),
-        user: user.clone(),
-        onBehalfOf: user.clone(),
-        amount: alloy_primitives::U256::from(3.0),
-        referralCode: 0,
-    };
-
-    let (sync_tx, _) = channel::<SyncRequest>(1);
-    let (hf_tx, _) = channel::<HFRequest>(1);
-
-    supply(
-        cache.clone(),
-        dummy_data_provider.clone(),
-        tokens.clone(),
-        (event, sync_tx, hf_tx, rq_date),
-    )
-    .await?;
-
-    {
-        let (collaterals, _, _) = &*cache.collateral.read().await;
-        let collateral = &*collaterals
-            .get(1)
-            .ok_or_else(|| eyre!("row = 1 not found in collateral"))?
-            .read()
-            .await;
-
-        assert_eq!(collateral, Array1::from_vec(vec![0.0, 0.0, 0.0]));
-    }
-
-    // 4 case: new message sync user
-
-    let rq_date = Utc::now()
-        .checked_sub_days(Days::new(1))
-        .ok_or_else(|| eyre!("invalid date"))?
-        .timestamp_micros();
-    {
-        cache.users.insert(
-            user.clone(),
-            UserSettings::new(2, BitVec::<usize, Lsb0>::from_iter([false, false, true])),
-        );
-
-        let (reserves, _, _) = &mut *cache.reserve.write().await;
-        reserves.push(RwLock::new(Array1::from_vec(vec![0.0; 3])));
-
-        let (borrowed, _, _) = &mut *cache.borrowed.write().await;
-        borrowed.push(RwLock::new(Array1::from_vec(vec![0.0; 3])));
-        borrowed.push(RwLock::new(Array1::from_vec(vec![0.0; 3])));
-        borrowed.push(RwLock::new(Array1::from_vec(vec![0.0; 3])));
-
-        let (_, last_sync, last_modified) = &mut *cache.collateral.write().await;
-        *last_sync = Utc::now()
-            .checked_sub_days(Days::new(2))
-            .ok_or_else(|| eyre!("invalid date"))?
-            .timestamp_micros();
-        *last_modified = Utc::now().timestamp_micros();
-    }
-
-    let event = Supply {
-        reserve: token.clone(),
-        user: user.clone(),
-        onBehalfOf: user.clone(),
-        amount: alloy_primitives::U256::from(3.0),
-        referralCode: 0,
-    };
-
-    let (sync_tx, mut sync_rc) = channel::<SyncRequest>(1);
-    let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
-
-    let sync_handler = task::spawn(async move {
-        let msg = sync_rc
-            .recv()
-            .await
-            .ok_or_else(|| eyre!("sync channel closed"))?;
-        assert_eq!(SyncRequest::Both(2, rq_date), msg);
-
-        Ok::<_, eyre::Error>(())
-    });
-
-    let hf_handler = task::spawn(async move {
-        let msg = hf_rc
-            .recv()
-            .await
-            .ok_or_else(|| eyre!("hf channel closed"))?;
-        assert_eq!(HFRequest::User(user.clone(), rq_date), msg);
-
-        Ok::<_, eyre::Error>(())
-    });
-
-    supply(
-        cache.clone(),
-        dummy_data_provider.clone(),
-        tokens.clone(),
-        (event, sync_tx, hf_tx, rq_date),
-    )
-    .await?;
-    let _ = sync_handler.await?;
-    let _ = hf_handler.await?;
-
-    assert_eq!(cache.contains(&user), true);
 
     Ok(())
 }
@@ -1038,6 +778,341 @@ async fn test_create_user() -> eyre::Result<()> {
     let e = err.unwrap_err();
 
     assert_eq!(e.to_string(), "mock error");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_supply() -> eyre::Result<()> {
+    // 1 case - create new user
+
+    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let (cache, tokens) = generate_cache_and_tokens(0).await?;
+
+    let user = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
+    let rq_date = Utc::now().timestamp_micros();
+
+    let event = Supply {
+        reserve: tokens
+            .keys()
+            .next()
+            .ok_or_else(|| eyre!("no keys"))?
+            .clone(),
+        user: user.clone(),
+        onBehalfOf: user.clone(),
+        amount: alloy_primitives::U256::from(10.0),
+        referralCode: 0,
+    };
+
+    let (sync_tx, mut sync_rc) = channel::<SyncRequest>(1);
+    let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
+
+    let sync_handler = task::spawn(async move {
+        let msg = sync_rc
+            .recv()
+            .await
+            .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
+        assert_eq!(SyncRequest::Both(0, rq_date), msg);
+
+        Ok::<_, eyre::Error>(())
+    });
+
+    let hf_handler = task::spawn(async move {
+        let msg = hf_rc
+            .recv()
+            .await
+            .ok_or_else(|| eyre::eyre!("hf channel closed"))?;
+        assert_eq!(HFRequest::User(user.clone(), rq_date), msg);
+
+        Ok::<_, eyre::Error>(())
+    });
+
+    let cache = Arc::new(cache);
+    assert_eq!(cache.users.len(), 0);
+
+    supply(
+        cache.clone(),
+        dummy_data_provider,
+        Arc::new(tokens),
+        (event, sync_tx, hf_tx, rq_date),
+    )
+    .await?;
+    let _ = sync_handler.await?;
+    let _ = hf_handler.await?;
+
+    assert_eq!(cache.users.len(), 1);
+    assert_eq!(cache.users.contains_key(&user), true);
+
+    let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
+
+    assert_eq!(collateral, vec![0.0, 2.0, 0.0]);
+    assert_eq!(reserve, vec![1.0, 0.0, 3.0]);
+    assert_eq!(borrowed, vec![1.0, 2.0, 3.0]);
+
+    // 2 case - collateral new event
+
+    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let (cache, tokens) = generate_cache_and_tokens(1).await?;
+    let cache = Arc::new(cache);
+    let user = cache
+        .users
+        .iter()
+        .next()
+        .ok_or_else(|| eyre::eyre!("no users"))?
+        .key()
+        .clone();
+    let token = Address::from_str("0x1Ac54C113cefD1792CbFcF41B711824d657eb61D")?;
+
+    let rq_date = Utc::now().timestamp_micros();
+
+    let event = Supply {
+        reserve: token.clone(),
+        user: user.clone(),
+        onBehalfOf: user.clone(),
+        amount: alloy_primitives::U256::from(20.0),
+        referralCode: 0,
+    };
+
+    let (sync_tx, mut sync_rc) = channel::<SyncRequest>(1);
+    let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
+
+    let sync_handler = task::spawn(async move {
+        let msg = sync_rc
+            .recv()
+            .await
+            .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
+        assert_eq!(SyncRequest::Collateral(0, rq_date), msg);
+
+        Ok::<_, eyre::Error>(())
+    });
+
+    let hf_handler = task::spawn(async move {
+        let msg = hf_rc
+            .recv()
+            .await
+            .ok_or_else(|| eyre::eyre!("hf channel closed"))?;
+        assert_eq!(HFRequest::User(user.clone(), rq_date), msg);
+
+        Ok::<_, eyre::Error>(())
+    });
+
+    assert_eq!(cache.users.len(), 1);
+
+    supply(
+        cache.clone(),
+        dummy_data_provider,
+        Arc::new(tokens),
+        (event, sync_tx, hf_tx, rq_date),
+    )
+    .await?;
+    let _ = sync_handler.await?;
+    let _ = hf_handler.await?;
+
+    assert_eq!(cache.users.len(), 1);
+
+    let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
+
+    assert_eq!(collateral, vec![20.0, 0.0, 0.0]);
+    assert_eq!(reserve, vec![0.0, 0.0, 0.0]);
+    assert_eq!(borrowed, vec![0.0, 0.0, 0.0]);
+
+    // 3 case - reserve new event
+
+    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let (cache, tokens) = generate_cache_and_tokens(1).await?;
+    let cache = Arc::new(cache);
+    let user = cache
+        .users
+        .iter()
+        .next()
+        .ok_or_else(|| eyre::eyre!("no users"))?
+        .key()
+        .clone();
+    let token = Address::from_str("0x1Af54C113cefD1792CbFcF41B711834d657ea61D")?;
+
+    let rq_date = Utc::now().timestamp_micros();
+
+    let event = Supply {
+        reserve: token.clone(),
+        user: user.clone(),
+        onBehalfOf: user.clone(),
+        amount: alloy_primitives::U256::from(30.0),
+        referralCode: 0,
+    };
+
+    let (sync_tx, _) = channel::<SyncRequest>(1);
+    let (hf_tx, _) = channel::<HFRequest>(1);
+
+    assert_eq!(cache.users.len(), 1);
+
+    supply(
+        cache.clone(),
+        dummy_data_provider,
+        Arc::new(tokens),
+        (event, sync_tx, hf_tx, rq_date),
+    )
+    .await?;
+
+    assert_eq!(cache.users.len(), 1);
+
+    let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
+
+    assert_eq!(collateral, vec![0.0, 0.0, 0.0]);
+    assert_eq!(reserve, vec![0.0, 30.0, 0.0]);
+    assert_eq!(borrowed, vec![0.0, 0.0, 0.0]);
+
+    // 4 case - collateral skip event
+
+    let rq_date = Utc::now().timestamp_micros();
+    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let (cache, tokens) = generate_cache_and_tokens(1).await?;
+    let cache = Arc::new(cache);
+    let user = cache
+        .users
+        .iter()
+        .next()
+        .ok_or_else(|| eyre::eyre!("no users"))?
+        .key()
+        .clone();
+    let token = Address::from_str("0x1Ac54C113cefD1792CbFcF41B711824d657eb61D")?;
+
+    let event = Supply {
+        reserve: token.clone(),
+        user: user.clone(),
+        onBehalfOf: user.clone(),
+        amount: alloy_primitives::U256::from(40.0),
+        referralCode: 0,
+    };
+
+    let (sync_tx, _) = channel::<SyncRequest>(1);
+    let (hf_tx, _) = channel::<HFRequest>(1);
+
+    assert_eq!(cache.users.len(), 1);
+
+    supply(
+        cache.clone(),
+        dummy_data_provider,
+        Arc::new(tokens),
+        (event, sync_tx, hf_tx, rq_date),
+    )
+    .await?;
+
+    assert_eq!(cache.users.len(), 1);
+
+    let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
+
+    assert_eq!(collateral, vec![0.0, 0.0, 0.0]);
+    assert_eq!(reserve, vec![0.0, 0.0, 0.0]);
+    assert_eq!(borrowed, vec![0.0, 0.0, 0.0]);
+
+    // 5 case - reserve skip event
+
+    let rq_date = Utc::now().timestamp_micros();
+    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let (cache, tokens) = generate_cache_and_tokens(1).await?;
+    let cache = Arc::new(cache);
+    let user = cache
+        .users
+        .iter()
+        .next()
+        .ok_or_else(|| eyre::eyre!("no users"))?
+        .key()
+        .clone();
+    let token = Address::from_str("0x1Af54C113cefD1792CbFcF41B711834d657ea61D")?;
+
+    let event = Supply {
+        reserve: token.clone(),
+        user: user.clone(),
+        onBehalfOf: user.clone(),
+        amount: alloy_primitives::U256::from(50.0),
+        referralCode: 0,
+    };
+
+    let (sync_tx, _) = channel::<SyncRequest>(1);
+    let (hf_tx, _) = channel::<HFRequest>(1);
+
+    assert_eq!(cache.users.len(), 1);
+
+    supply(
+        cache.clone(),
+        dummy_data_provider,
+        Arc::new(tokens),
+        (event, sync_tx, hf_tx, rq_date),
+    )
+    .await?;
+
+    assert_eq!(cache.users.len(), 1);
+
+    let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
+
+    assert_eq!(collateral, vec![0.0, 0.0, 0.0]);
+    assert_eq!(reserve, vec![0.0, 0.0, 0.0]);
+    assert_eq!(borrowed, vec![0.0, 0.0, 0.0]);
+
+    // 6 case - skip event
+
+    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let (cache, tokens) = generate_cache_and_tokens(10).await?;
+    let cache = Arc::new(cache);
+    let rq_date = Utc::now().timestamp_micros();
+    let user = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
+    let token = Address::from_str("0x1Ac54C113cefD1792CbFcF41B711824d657eb61D")?;
+
+    let event = Supply {
+        reserve: token.clone(),
+        user: user.clone(),
+        onBehalfOf: user.clone(),
+        amount: alloy_primitives::U256::from(40.0),
+        referralCode: 0,
+    };
+
+    {
+        let (_, _, last_modified) = &mut *cache.collateral.write().await;
+        *last_modified = Utc::now().timestamp_micros();
+    }
+
+    let (sync_tx, mut sync_rc) = channel::<SyncRequest>(1);
+    let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
+
+    let sync_handler = task::spawn(async move {
+        let msg = sync_rc
+            .recv()
+            .await
+            .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
+        assert_eq!(SyncRequest::Both(0, _), msg);
+
+        Ok::<_, eyre::Error>(())
+    });
+
+    let hf_handler = task::spawn(async move {
+        let msg = hf_rc
+            .recv()
+            .await
+            .ok_or_else(|| eyre::eyre!("hf channel closed"))?;
+        assert_eq!(HFRequest::User(user.clone(), rq_date), msg);
+
+        Ok::<_, eyre::Error>(())
+    });
+
+    assert_eq!(cache.users.len(), 1);
+
+    supply(
+        cache.clone(),
+        dummy_data_provider,
+        Arc::new(tokens),
+        (event, sync_tx, hf_tx, rq_date),
+    )
+    .await?;
+
+    assert_eq!(cache.users.len(), 1);
+
+    let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
+
+    assert_eq!(collateral, vec![0.0, 0.0, 0.0]);
+    assert_eq!(reserve, vec![0.0, 0.0, 0.0]);
+    assert_eq!(borrowed, vec![0.0, 0.0, 0.0]);
+
+    // 7 case - reserve skip event
 
     Ok(())
 }
