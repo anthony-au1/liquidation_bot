@@ -1079,7 +1079,7 @@ async fn test_supply() -> eyre::Result<()> {
             .recv()
             .await
             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
-        assert_eq!(SyncRequest::Both(0, _), msg);
+        assert_eq!(SyncRequest::Both(0, rq_date), msg);
 
         Ok::<_, eyre::Error>(())
     });
@@ -1094,7 +1094,7 @@ async fn test_supply() -> eyre::Result<()> {
         Ok::<_, eyre::Error>(())
     });
 
-    assert_eq!(cache.users.len(), 1);
+    assert_eq!(cache.users.len(), 10);
 
     supply(
         cache.clone(),
@@ -1103,16 +1103,16 @@ async fn test_supply() -> eyre::Result<()> {
         (event, sync_tx, hf_tx, rq_date),
     )
     .await?;
+    let _ = sync_handler.await?;
+    let _ = hf_handler.await?;
 
-    assert_eq!(cache.users.len(), 1);
+    assert_eq!(cache.users.len(), 10);
 
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
 
-    assert_eq!(collateral, vec![0.0, 0.0, 0.0]);
-    assert_eq!(reserve, vec![0.0, 0.0, 0.0]);
-    assert_eq!(borrowed, vec![0.0, 0.0, 0.0]);
-
-    // 7 case - reserve skip event
+    assert_eq!(collateral, vec![0.0, 2.0, 0.0]);
+    assert_eq!(reserve, vec![1.0, 0.0, 3.0]);
+    assert_eq!(borrowed, vec![1.0, 2.0, 3.0]);
 
     Ok(())
 }

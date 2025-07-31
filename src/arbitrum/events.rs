@@ -62,21 +62,25 @@ where
     Ok(false)
 }
 
-async fn handle_event<F1, R1, F2, R2, F3, R3>(
+async fn handle_event<P, F1, R1, F2, R2>(
+    user: &Address,
+    cache: &Cache,
+    tokens: &Tokens,
+    provider: Arc<P>,
+    sync_tx: &Sender<SyncRequest>,
+    hf_tx: &Sender<HFRequest>,
     rq_date: TimeStamp,
     last_sync: TimeStamp,
     last_modified: TimeStamp,
     new_event: F1,
     skip_event: F2,
-    sync_user: F3,
 ) -> eyre::Result<()>
 where
+    P: DataProvider + 'static,
     F1: FnOnce() -> R1,
     R1: Future<Output = eyre::Result<()>> + Send,
     F2: FnOnce() -> R2,
-    R2: Future<Output = eyre::Result<()>> + Send,
-    F3: FnOnce() -> R3,
-    R3: Future<Output = eyre::Result<()>> + Send,
+    R2: Future<Output = eyre::Result<()>> + Send
 {
     match rq_date {
         t if t > last_modified => {
@@ -89,38 +93,31 @@ where
         }
         t if t > last_sync && t <= last_modified => {
             // sync user
-            // sync_user().await?;
-
-            // user, cache, tokens, provider, sync_tx, hf_tx
-
-
-            debug!("supply: sync_user user = {}", event.onBehalfOf);
-
-            c.sync_user(&event.onBehalfOf, &tokens, provider).await?;
-
+            debug!("supply: sync_user user = {:?}", user);
+            cache.sync_user(&user, &tokens, provider).await?;
             sync_tx
                 .send(SyncRequest::Both(
                     cache
                         .users
-                        .get(&event.onBehalfOf)
-                        .ok_or_else(|| eyre!("user = {:?} not found", event.onBehalfOf))?
+                        .get(user)
+                        .ok_or_else(|| eyre!("user = {:?} not found", user))?
                         .row_num,
                     rq_date,
                 ))
                 .await?;
-            hf_tx.send(HFRequest::User(event.onBehalfOf.clone(), rq_date)).await?;
+            hf_tx.send(HFRequest::User(user.clone(), rq_date)).await?;
 
             debug!("{}", {
-            let received = Utc::now().timestamp_micros();
-            format!(
-                "sync_user: cache = {:?}, rq_date = {}, \
+                let received = Utc::now().timestamp_micros();
+                format!(
+                    "sync_user: cache = {:?}, rq_date = {}, \
                              received = {}, delta = {} μs",
-                c,
-                rq_date,
-                received,
-                received - rq_date
-            )
-        });
+                    cache,
+                    rq_date,
+                    received,
+                    received - rq_date
+                )
+            });
         }
         _ => {
             unreachable!(
@@ -185,58 +182,22 @@ where
         .order;
     let now = Utc::now().timestamp_micros();
 
-    let c = cache.clone();
-    let sync_user = async move || {
-        debug!("supply: sync_user user = {}", event.onBehalfOf);
-
-        c.sync_user(&event.onBehalfOf, &tokens, provider).await?;
-
-        sync_tx
-            .send(SyncRequest::Both(
-                cache
-                    .users
-                    .get(&event.onBehalfOf)
-                    .ok_or_else(|| eyre!("user = {:?} not found", event.onBehalfOf))?
-                    .row_num,
-                rq_date,
-            ))
-            .await?;
-        hf_tx.send(HFRequest::User(event.onBehalfOf.clone(), rq_date)).await?;
-
-        debug!("{}", {
-            let received = Utc::now().timestamp_micros();
-            format!(
-                "sync_user: cache = {:?}, rq_date = {}, \
-                             received = {}, delta = {} μs",
-                c,
-                rq_date,
-                received,
-                received - rq_date
-            )
-        });
-
-        Ok(())
-    };
-
     if user_settings.use_as_collateral[idx] {
         let (last_sync, last_modified) = {
             let collateral_lock = cache.collateral.read().await;
             (collateral_lock.1, collateral_lock.2)
         };
 
-        let cache = cache.clone();
+        let (c, s_tx, h_tx) = (cache.clone(), sync_tx.clone(), hf_tx.clone());
         let new_event = async move || {
             debug!("supply: collateral new event user = {}", event.onBehalfOf);
 
-            let mut collateral_lock = cache.collateral.write().await;
+            let mut collateral_lock = c.collateral.write().await;
             (collateral_lock.1, collateral_lock.2) = (now, now);
             let mut row_lock = collateral_lock.0[row_num].write().await;
             row_lock[idx] += f64::from(event.amount);
-            sync_tx
-                .send(SyncRequest::Collateral(row_num, rq_date))
-                .await?;
-            hf_tx
-                .send(HFRequest::User(event.onBehalfOf, rq_date))
+            s_tx.send(SyncRequest::Collateral(row_num, rq_date)).await?;
+            h_tx.send(HFRequest::User(event.onBehalfOf, rq_date))
                 .await?;
 
             Ok(())
@@ -252,12 +213,17 @@ where
         };
 
         handle_event(
+            &event.onBehalfOf,
+            &cache,
+            &tokens,
+            provider.clone(),
+            &sync_tx,
+            &hf_tx,
             rq_date,
             last_sync,
             last_modified,
             new_event,
             skip_event,
-            sync_user
         )
         .await?;
     } else {
@@ -266,11 +232,11 @@ where
             (reserve_lock.1, reserve_lock.2)
         };
 
-        let cache = cache.clone();
+        let c = cache.clone();
         let new_event = async move || {
             debug!("supply: borrowed new event user = {}", event.onBehalfOf);
 
-            let mut reserve_lock = cache.reserve.write().await;
+            let mut reserve_lock = c.reserve.write().await;
             (reserve_lock.1, reserve_lock.2) = (now, now);
             let mut row_lock = reserve_lock.0[row_num].write().await;
             row_lock[idx] += f64::from(event.amount);
@@ -288,12 +254,17 @@ where
         };
 
         handle_event(
+            &event.onBehalfOf,
+            &cache,
+            &tokens,
+            provider.clone(),
+            &sync_tx,
+            &hf_tx,
             rq_date,
             last_sync,
             last_modified,
             new_event,
             skip_event,
-            sync_user
         )
         .await?;
     }
