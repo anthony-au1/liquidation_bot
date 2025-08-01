@@ -639,7 +639,7 @@ pub(in crate::arbitrum) enum AaveEvents {
     IChainlinkAggregatorEvents(IChainlinkAggregatorEvents, Address, TimeStamp),
 }
 
-async fn listen_events<P>(provider: Arc<P>, tx: Sender<AaveEvents>) -> eyre::Result<()>
+pub(in crate::arbitrum) async fn listen_events<P>(provider: Arc<P>, tx: Sender<AaveEvents>) -> eyre::Result<()>
 where
     P: DataProvider + 'static,
 {
@@ -691,7 +691,7 @@ where
     Ok(())
 }
 
-async fn listen_price_update<P>(
+pub(in crate::arbitrum) async fn listen_price_update<P>(
     provider: Arc<P>,
     tokens: &Tokens,
     tx: Sender<AaveEvents>,
@@ -743,7 +743,7 @@ where
     Ok(())
 }
 
-async fn liquidation_threshold_update<P>(
+pub(in crate::arbitrum) async fn liquidation_threshold_update<P>(
     cache: Arc<Cache>,
     tokens: Arc<Tokens>,
     provider: Arc<P>,

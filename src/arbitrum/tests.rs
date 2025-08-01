@@ -1,8 +1,9 @@
 use crate::arbitrum::arbitrum::IAaveProtocolDataProvider::TokenData;
-use crate::arbitrum::arbitrum::IChainlinkAggregator::IChainlinkAggregatorEvents;
+use crate::arbitrum::arbitrum::IChainlinkAggregator::{AnswerUpdated, IChainlinkAggregatorEvents};
 use crate::arbitrum::arbitrum::IL2Pool::{IL2PoolEvents, Supply};
 use crate::arbitrum::arbitrum::{
-    Cache, DataProvider, HFRequest, SyncRequest, TokenDetails, UserReserveData, UserSettings, setup,
+    AaveEvents, Cache, DataProvider, HFRequest, SyncRequest, TokenDetails, UserReserveData,
+    UserSettings, liquidation_threshold_update, listen_events, listen_price_update, setup,
 };
 use crate::arbitrum::events::{create_user, supply};
 use alloy_primitives::Address;
@@ -53,20 +54,61 @@ impl DataProvider for DummyDataProvider {
         Ok(price_source)
     }
 
-    async fn listen_events<F, Fut>(&self, _: F) -> eyre::Result<()>
+    async fn listen_events<F, Fut>(&self, callback: F) -> eyre::Result<()>
     where
         F: Fn(IL2PoolEvents) -> Fut + Send + 'static,
         Fut: Future<Output = eyre::Result<()>> + Send,
     {
-        todo!()
+        let user = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
+        let event = Supply {
+            reserve: Address::from_str("0x1Ac54C113cefD1792CbFcF41B711824d657eb61D")?,
+            user: user.clone(),
+            onBehalfOf: user,
+            amount: alloy_primitives::U256::from(6.0),
+            referralCode: 0,
+        };
+        callback(IL2PoolEvents::Supply(event)).await
     }
 
-    async fn listen_price_update<F, Fut>(&self, _: &Address, _: F) -> eyre::Result<()>
+    async fn listen_price_update<F, Fut>(
+        &self,
+        price_source: &Address,
+        callback: F,
+    ) -> eyre::Result<()>
     where
         F: Fn(IChainlinkAggregatorEvents) -> Fut + Send + 'static,
         Fut: Future<Output = eyre::Result<()>> + Send,
     {
-        todo!()
+        let (_, tokens) = generate_cache_and_tokens(0).await?;
+
+        let name = tokens
+            .iter()
+            .find(
+                |(
+                    _,
+                    TokenDetails {
+                        price_source: ps, ..
+                    },
+                )| ps == price_source,
+            )
+            .map(|(_, TokenDetails { name, .. })| name.clone())
+            .ok_or_else(|| eyre!("Price update not found for asset {:?}", price_source))?;
+
+        let current = match &name[..] {
+            "AAVE" => 161_230_000_000_i128,
+            "USDC" => 261_230_000_000_i128,
+            "DAI" => 361_230_000_000_i128,
+            _ => 561_230_000_000_i128,
+        };
+
+        let event = AnswerUpdated {
+            // 161230000000 / 10^8 = 1612.30 USD
+            current: alloy_primitives::I256::try_from(current)?,
+            roundId: alloy_primitives::U256::from(0),
+            timestamp: alloy_primitives::U256::from(Utc::now().timestamp()),
+        };
+
+        callback(IChainlinkAggregatorEvents::AnswerUpdated(event)).await
     }
 
     async fn get_reserve_configuration_data(&self, _: &Address) -> eyre::Result<f64> {
@@ -1167,6 +1209,130 @@ async fn test_setup() -> eyre::Result<()> {
 
 #[tokio::test]
 async fn test_listen_events() -> eyre::Result<()> {
+    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let (event_tx, mut event_rc) = channel::<AaveEvents>(1);
+
+    let user = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
+    let supply_event = Supply {
+        reserve: Address::from_str("0x1Ac54C113cefD1792CbFcF41B711824d657eb61D")?,
+        user: user.clone(),
+        onBehalfOf: user,
+        amount: alloy_primitives::U256::from(6.0),
+        referralCode: 0,
+    };
+
+    let event_handler = task::spawn(async move {
+        let event = event_rc
+            .recv()
+            .await
+            .ok_or_else(|| eyre::eyre!("event channel closed"))?;
+
+        let pool_events = {
+            if let AaveEvents::IL2PoolEvents(_, _) = event {
+                true
+            } else {
+                false
+            }
+        };
+
+        assert_eq!(pool_events, true);
+
+        if let AaveEvents::IL2PoolEvents(event, _) = event {
+            let supply = {
+                if let IL2PoolEvents::Supply(s) = event {
+                    assert_eq!(s.reserve, supply_event.reserve);
+                    assert_eq!(s.user, supply_event.user);
+                    assert_eq!(s.onBehalfOf, supply_event.onBehalfOf);
+                    assert_eq!(s.amount, supply_event.amount);
+
+                    true
+                } else {
+                    false
+                }
+            };
+
+            assert_eq!(supply, true);
+        }
+
+        Ok::<_, eyre::Error>(())
+    });
+
+    listen_events(dummy_data_provider, event_tx).await?;
+    let _ = event_handler.await?;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_listen_price_update() -> eyre::Result<()> {
+    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let (_, tokens) = generate_cache_and_tokens(0).await?;
+    let (event_tx, mut event_rc) = channel::<AaveEvents>(1);
+
+    let tokens = Arc::new(tokens);
+    let t = tokens.clone();
+    let event_handler = task::spawn(async move {
+        for _ in 0..3 {
+            let event = event_rc
+                .recv()
+                .await
+                .ok_or_else(|| eyre::eyre!("event channel closed"))?;
+
+            let agg_events = {
+                if let AaveEvents::IChainlinkAggregatorEvents(_, _, _) = event {
+                    true
+                } else {
+                    false
+                }
+            };
+
+            assert_eq!(agg_events, true);
+
+            if let AaveEvents::IChainlinkAggregatorEvents(
+                IChainlinkAggregatorEvents::AnswerUpdated(au),
+                token,
+                _,
+            ) = event
+            {
+                let name = t
+                    .get(&token)
+                    .ok_or_else(|| eyre::eyre!("token not found"))?
+                    .name
+                    .clone();
+
+                let new_price = match &name[..] {
+                    "AAVE" => 161_230_000_000_i128,
+                    "USDC" => 261_230_000_000_i128,
+                    "DAI" => 361_230_000_000_i128,
+                    _ => 561_230_000_000_i128,
+                };
+
+                assert_eq!(au.current, alloy_primitives::I256::try_from(new_price)?);
+            }
+        }
+
+        Ok::<_, eyre::Error>(())
+    });
+
+    listen_price_update(dummy_data_provider, &tokens, event_tx).await?;
+    let _ = event_handler.await?;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_liquidation_threshold_update() -> eyre::Result<()> {
+    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let (cache, tokens) = generate_cache_and_tokens(0).await?;
+    let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
+
+    liquidation_threshold_update(
+        Arc::new(cache),
+        Arc::new(tokens),
+        dummy_data_provider.clone(),
+        hf_tx,
+    )
+    .await?;
 
     Ok(())
 }
