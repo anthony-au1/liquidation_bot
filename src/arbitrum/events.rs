@@ -9,7 +9,7 @@ use chrono::Utc;
 use eyre::eyre;
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
-use tracing::{debug, info};
+use tracing::debug;
 
 pub(in crate::arbitrum) async fn create_user<P>(
     rq_date: TimeStamp,

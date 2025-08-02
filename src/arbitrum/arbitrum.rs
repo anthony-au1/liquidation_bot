@@ -1,6 +1,6 @@
 use crate::arbitrum::arbitrum::IAaveOracle::IAaveOracleInstance;
 use crate::arbitrum::arbitrum::IAaveProtocolDataProvider::{
-    getUserReserveDataReturn, IAaveProtocolDataProviderInstance, TokenData,
+    IAaveProtocolDataProviderInstance, TokenData, getUserReserveDataReturn,
 };
 use crate::arbitrum::arbitrum::IChainlinkAggregator::IChainlinkAggregatorEvents;
 use crate::arbitrum::arbitrum::IL2Pool::IL2PoolEvents;
@@ -19,13 +19,13 @@ use chrono::Utc;
 use dashmap::DashMap;
 use eyre::eyre;
 use futures::future::try_join_all;
-use ndarray::{concatenate, Array1, Array2, Axis};
+use ndarray::{Array1, Array2, Axis, concatenate};
 use std::collections::HashMap;
 use std::default::Default;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::RwLock;
+use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::{task, time};
 use tracing::{debug, error};
 
@@ -347,7 +347,7 @@ where
         let now = Utc::now().timestamp_micros();
         *cache.prices.write().await = (Array1::from_elem(tokens.len(), 0.0), now);
         *cache.liquidation_threshold.write().await = (Array1::from_elem(tokens.len(), 0.0), now);
-        *cache.health_factors.write().await = (Array1::from_elem(1, 0.), now);
+        *cache.health_factors.write().await = (Array1::from_elem(0, 0.0), now);
     }
 
     let (tx_events, mut rc_events) = channel::<AaveEvents>(1000_000);
@@ -878,7 +878,7 @@ pub(in crate::arbitrum) enum HFRequest {
     Full(TimeStamp),
 }
 
-async fn listen_hf_calc(
+pub(in crate::arbitrum) async fn listen_hf_calc(
     cache: Arc<Cache>,
     workers: usize,
     bound: usize,
@@ -1084,6 +1084,14 @@ impl Cache {
                 .0
                 .push(RwLock::new(Array1::from_vec(vec![0.0; tokens.len()])));
             (borroweds.1, borroweds.2) = (now, now);
+        }
+
+        {
+            let hf = &mut *self.health_factors.write().await;
+            let mut hf_vec = hf.0.to_vec();
+            hf_vec.push(0.0);
+            hf.0 = Array1::from_vec(hf_vec);
+            hf.1 = now;
         }
 
         self.sync_user(user, tokens, provider).await?;

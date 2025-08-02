@@ -2,9 +2,9 @@ use crate::arbitrum::arbitrum::IAaveProtocolDataProvider::TokenData;
 use crate::arbitrum::arbitrum::IChainlinkAggregator::{AnswerUpdated, IChainlinkAggregatorEvents};
 use crate::arbitrum::arbitrum::IL2Pool::{IL2PoolEvents, Supply};
 use crate::arbitrum::arbitrum::{
-    AaveEvents, Cache, DataProvider, HFRequest, SyncRequest, TokenDetails, UserReserveData,
-    UserSettings, liquidation_threshold_update, listen_events, listen_price_update, listen_sync,
-    setup,
+    liquidation_threshold_update, listen_events, listen_hf_calc, listen_price_update, listen_sync, setup, AaveEvents,
+    Cache, DataProvider, HFRequest, SyncRequest, TokenDetails,
+    UserReserveData, UserSettings,
 };
 use crate::arbitrum::events::{create_user, supply};
 use alloy_primitives::Address;
@@ -18,8 +18,8 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
 use tokio::sync::mpsc::channel;
+use tokio::sync::RwLock;
 use tokio::task;
 use tokio::time::sleep;
 
@@ -186,6 +186,8 @@ async fn generate_cache_and_tokens(
     if user_num > 0 {
         let mut user_addr = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
         let now = Utc::now().timestamp_micros();
+
+        *cache.health_factors.write().await = (Array1::from_elem(0, 0.0), now);
         for i in 0..user_num {
             cache.users.insert(
                 user_addr,
@@ -204,12 +206,18 @@ async fn generate_cache_and_tokens(
             let (borroweds, sync_ts, modified_ts) = &mut *cache.borrowed.write().await;
             borroweds.push(RwLock::new(Array1::from_vec(vec![0.0; 3])));
             (*sync_ts, *modified_ts) = (now, now);
-        }
 
-        *cache.liquidation_threshold.write().await = (Array1::from_vec(vec![0.0; 3]), now);
+            let (hf, _) = &mut *cache.health_factors.write().await;
+            let mut hf_vec = hf.to_vec();
+            hf_vec.push(0.0);
+            *hf = Array1::from_vec(hf_vec);
+        }
 
         *cache.collateral_matrix.write().await = Array2::from_elem((0, tokens.len()), 0.0);
         *cache.borrowed_matrix.write().await = Array2::from_elem((0, tokens.len()), 0.0);
+
+        *cache.prices.write().await = (Array1::from_elem(tokens.len(), 0.0), now);
+        *cache.liquidation_threshold.write().await = (Array1::from_elem(tokens.len(), 0.0), now);
     }
 
     Ok((cache, tokens))
@@ -1430,6 +1438,110 @@ async fn test_listen_sync() -> eyre::Result<()> {
         Array2::from_shape_vec((1, 3), vec![4.0, 5.0, 6.0])?
     );
     assert_eq!(bor_matrix.nrows(), 1);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_hf_calc() -> eyre::Result<()> {
+    let cache = generate_cache_and_tokens(2)
+        .await
+        .map(|(cache, _)| Arc::new(cache))?;
+    let user = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
+
+    {
+        let (prices, _) = &mut *cache.prices.write().await;
+        *prices = Array1::from_vec(vec![120_000.0, 4000.0, 200.0]);
+
+        let (lt, _) = &mut *cache.liquidation_threshold.write().await;
+        *lt = Array1::from_vec(vec![7800.0, 8000.0, 7500.0]);
+
+        let (collaterals, _, _) = &mut *cache.collateral.write().await;
+
+        let mut collateral = collaterals
+            .get(0)
+            .ok_or_else(|| eyre::eyre!("no collaterals"))?
+            .write()
+            .await;
+        *collateral = Array1::from_vec(vec![1.0, 2.0, 3.0]);
+
+        let mut collateral = collaterals
+            .get(1)
+            .ok_or_else(|| eyre::eyre!("no collaterals"))?
+            .write()
+            .await;
+        *collateral = Array1::from_vec(vec![4.0, 5.0, 6.0]);
+
+        let (borroweds, _, _) = &mut *cache.borrowed.write().await;
+
+        let mut borrowed = borroweds
+            .get(0)
+            .ok_or_else(|| eyre::eyre!("no borrowed"))?
+            .write()
+            .await;
+        *borrowed = Array1::from_vec(vec![4.0, 5.0, 6.0]);
+
+        let mut borrowed = borroweds
+            .get(1)
+            .ok_or_else(|| eyre::eyre!("no borrowed"))?
+            .write()
+            .await;
+        *borrowed = Array1::from_vec(vec![1.0, 2.0, 3.0]);
+    }
+
+    let senders = listen_hf_calc(cache.clone(), 1, 1).await?;
+    let sender = senders.get(0).ok_or_else(|| eyre::eyre!("senders empty"))?;
+    let rq_date = Utc::now().timestamp_micros();
+    sender.send(HFRequest::User(user.clone(), rq_date)).await?;
+
+    sleep(Duration::from_secs(1)).await;
+
+    {
+        let (hf, _) = &*cache.health_factors.read().await;
+        assert_eq!(hf, Array1::from_vec(vec![0.20041899441340782, 0.0]));
+    }
+
+    {
+        let (collaterals, _, _) = &*cache.collateral.read().await;
+        let col_matrix = &mut *cache.collateral_matrix.write().await;
+        let row_lock = collaterals
+            .get(0)
+            .ok_or_else(|| eyre!("row = 0 not found in collateral"))?
+            .read()
+            .await;
+        col_matrix.push_row(row_lock.view())?;
+        let row_lock = collaterals
+            .get(1)
+            .ok_or_else(|| eyre!("row = 1 not found in collateral"))?
+            .read()
+            .await;
+        col_matrix.push_row(row_lock.view())?;
+
+        let (borroweds, _, _) = &*cache.borrowed.read().await;
+        let bor_matrix = &mut *cache.borrowed_matrix.write().await;
+        let row_lock = borroweds
+            .get(0)
+            .ok_or_else(|| eyre!("row = 0 not found in borrowed"))?
+            .read()
+            .await;
+        bor_matrix.push_row(row_lock.view())?;
+        let row_lock = borroweds
+            .get(1)
+            .ok_or_else(|| eyre!("row = 1 not found in borrowed"))?
+            .read()
+            .await;
+        bor_matrix.push_row(row_lock.view())?;
+    }
+
+    sender.send(HFRequest::Full(rq_date)).await?;
+
+    sleep(Duration::from_secs(1)).await;
+
+    let (hf, _) = &*cache.health_factors.read().await;
+    assert_eq!(
+        hf,
+        Array1::from_vec(vec![0.20041899441340782, 3.042768273716952])
+    );
 
     Ok(())
 }
