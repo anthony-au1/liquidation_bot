@@ -341,13 +341,13 @@ where
     let cache = Arc::new(Cache::default());
 
     {
-        *cache.collateral_matrix.write().await = Array2::from_elem((0, tokens.len()), 0.);
-        *cache.borrowed_matrix.write().await = Array2::from_elem((0, tokens.len()), 0.);
+        *cache.collateral_matrix.write().await = Array2::from_elem((0, tokens.len()), 0.0);
+        *cache.borrowed_matrix.write().await = Array2::from_elem((0, tokens.len()), 0.0);
 
         let now = Utc::now().timestamp_micros();
-        *cache.prices.write().await = (Array1::from_elem(tokens.len(), 0.), now);
-        *cache.liquidation_threshold.write().await = (Array1::from_elem(tokens.len(), 0.), now);
-        *cache.health_factors.write().await = (Array1::from_elem(1, 0.), now);
+        *cache.prices.write().await = (Array1::from_elem(tokens.len(), 0.0), now);
+        *cache.liquidation_threshold.write().await = (Array1::from_elem(tokens.len(), 0.0), now);
+        *cache.health_factors.write().await = (Array1::from_elem(1, 0.0), now);
     }
 
     let (tx_events, mut rc_events) = channel::<AaveEvents>(1000_000);
@@ -639,7 +639,10 @@ pub(in crate::arbitrum) enum AaveEvents {
     IChainlinkAggregatorEvents(IChainlinkAggregatorEvents, Address, TimeStamp),
 }
 
-pub(in crate::arbitrum) async fn listen_events<P>(provider: Arc<P>, tx: Sender<AaveEvents>) -> eyre::Result<()>
+pub(in crate::arbitrum) async fn listen_events<P>(
+    provider: Arc<P>,
+    tx: Sender<AaveEvents>,
+) -> eyre::Result<()>
 where
     P: DataProvider + 'static,
 {
@@ -826,7 +829,7 @@ pub(in crate::arbitrum) enum SyncRequest {
     Both(usize, TimeStamp),
 }
 
-async fn listen_sync(
+pub(in crate::arbitrum) async fn listen_sync(
     cache: Arc<Cache>,
     workers: usize,
     bound: usize,

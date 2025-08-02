@@ -24,8 +24,8 @@ test
 15. setup - DONE
 16. listen_events - DONE
 17. listen_price_update - DONE
-18. liquidation_threshold_update
-19. liquidation_threshold_update_handler
+18. liquidation_threshold_update - DONE
+19. liquidation_threshold_update_handler - DONE
 20. listen_sync
 21. listen_sync_handler 
 22. listen_hf_calc

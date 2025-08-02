@@ -1,10 +1,7 @@
 use crate::arbitrum::arbitrum::IAaveProtocolDataProvider::TokenData;
 use crate::arbitrum::arbitrum::IChainlinkAggregator::{AnswerUpdated, IChainlinkAggregatorEvents};
 use crate::arbitrum::arbitrum::IL2Pool::{IL2PoolEvents, Supply};
-use crate::arbitrum::arbitrum::{
-    AaveEvents, Cache, DataProvider, HFRequest, SyncRequest, TokenDetails, UserReserveData,
-    UserSettings, liquidation_threshold_update, listen_events, listen_price_update, setup,
-};
+use crate::arbitrum::arbitrum::{AaveEvents, Cache, DataProvider, HFRequest, SyncRequest, TokenDetails, UserReserveData, UserSettings, liquidation_threshold_update, listen_events, listen_price_update, setup, listen_sync};
 use crate::arbitrum::events::{create_user, supply};
 use alloy_primitives::Address;
 use async_trait::async_trait;
@@ -111,8 +108,21 @@ impl DataProvider for DummyDataProvider {
         callback(IChainlinkAggregatorEvents::AnswerUpdated(event)).await
     }
 
-    async fn get_reserve_configuration_data(&self, _: &Address) -> eyre::Result<f64> {
-        todo!()
+    async fn get_reserve_configuration_data(&self, token_address: &Address) -> eyre::Result<f64> {
+        let lt = match token_address.clone() {
+            addr if addr == Address::from_str("0x1Ac54C113cefD1792CbFcF41B711824d657eb61D")? => {
+                7800.0
+            }
+            addr if addr == Address::from_str("0x1Af54C113cefD1792CbFcF41B711834d657ea61D")? => {
+                8000.0
+            }
+            addr if addr == Address::from_str("0x1Af54C113cefD1792CbFcF41B711824d657eb61D")? => {
+                7500.0
+            }
+            _ => return Err(eyre!("Invalid token address")),
+        };
+
+        Ok(lt)
     }
 
     async fn get_user_reserve_data(
@@ -190,6 +200,11 @@ async fn generate_cache_and_tokens(
             borroweds.push(RwLock::new(Array1::from_vec(vec![0.0; 3])));
             (*sync_ts, *modified_ts) = (now, now);
         }
+
+        *cache.liquidation_threshold.write().await = (Array1::from_vec(vec![0.0; 3]), now);
+
+        *cache.collateral_matrix.write().await = Array2::from_elem((0, tokens.len()), 0.0);
+        *cache.borrowed_matrix.write().await = Array2::from_elem((0, tokens.len()), 0.0);
     }
 
     Ok((cache, tokens))
@@ -1323,16 +1338,70 @@ async fn test_listen_price_update() -> eyre::Result<()> {
 #[tokio::test]
 async fn test_liquidation_threshold_update() -> eyre::Result<()> {
     let dummy_data_provider = Arc::new(DummyDataProvider::new());
-    let (cache, tokens) = generate_cache_and_tokens(0).await?;
+    let (cache, tokens) = generate_cache_and_tokens(1).await?;
     let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
+    let cache = Arc::new(cache);
+
+    {
+        let (lt, _) = &mut *cache.liquidation_threshold.write().await;
+        *lt = Array1::from_vec(vec![9000.0, 9000.0, 9000.0]);
+    }
+    let now = Utc::now().timestamp_micros();
+    let new_update = now;
+    let hf_handler = task::spawn(async move {
+        let msg = hf_rc
+            .recv()
+            .await
+            .ok_or_else(|| eyre::eyre!("hf channel closed"))?;
+
+        let rq_date = match msg {
+            HFRequest::User(_, last_modified) => last_modified,
+            HFRequest::Full(last_modified) => last_modified,
+        };
+
+        assert!(now < rq_date);
+        assert_eq!(HFRequest::Full(rq_date), msg);
+
+        Ok::<_, eyre::Error>(())
+    });
 
     liquidation_threshold_update(
-        Arc::new(cache),
+        cache.clone(),
         Arc::new(tokens),
         dummy_data_provider.clone(),
         hf_tx,
     )
     .await?;
+    let _ = hf_handler.await?;
+
+    let (lt, last_modified) = &*cache.liquidation_threshold.read().await;
+    assert_eq!(*lt, Array1::from_vec(vec![7800.0, 8000.0, 7500.0]));
+    assert!(*last_modified > new_update);
 
     Ok(())
 }
+
+// #[tokio::test]
+// async fn test_listen_sync() -> eyre::Result<()> {
+//     let dummy_data_provider = Arc::new(DummyDataProvider::new());
+//     let (cache, tokens) = generate_cache_and_tokens(1).await?;
+//     let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
+//     let cache = Arc::new(cache);
+//
+//     let (sync_tx, mut sync_rc) = channel::<SyncRequest>(1);
+//     let sync_handler = task::spawn(async move {
+//         let msg = sync_rc
+//             .recv()
+//             .await
+//             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
+//
+//
+//         Ok::<_, eyre::Error>(())
+//     });
+//
+//     listen_sync(cache.clone(), 1, 1).await?;
+//
+//
+//
+//     Ok(())
+// }
