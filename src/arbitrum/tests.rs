@@ -1,7 +1,11 @@
 use crate::arbitrum::arbitrum::IAaveProtocolDataProvider::TokenData;
 use crate::arbitrum::arbitrum::IChainlinkAggregator::{AnswerUpdated, IChainlinkAggregatorEvents};
 use crate::arbitrum::arbitrum::IL2Pool::{IL2PoolEvents, Supply};
-use crate::arbitrum::arbitrum::{AaveEvents, Cache, DataProvider, HFRequest, SyncRequest, TokenDetails, UserReserveData, UserSettings, liquidation_threshold_update, listen_events, listen_price_update, setup, listen_sync};
+use crate::arbitrum::arbitrum::{
+    AaveEvents, Cache, DataProvider, HFRequest, SyncRequest, TokenDetails, UserReserveData,
+    UserSettings, liquidation_threshold_update, listen_events, listen_price_update, listen_sync,
+    setup,
+};
 use crate::arbitrum::events::{create_user, supply};
 use alloy_primitives::Address;
 use async_trait::async_trait;
@@ -17,6 +21,7 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::sync::mpsc::channel;
 use tokio::task;
+use tokio::time::sleep;
 
 struct DummyDataProvider;
 
@@ -1381,27 +1386,50 @@ async fn test_liquidation_threshold_update() -> eyre::Result<()> {
     Ok(())
 }
 
-// #[tokio::test]
-// async fn test_listen_sync() -> eyre::Result<()> {
-//     let dummy_data_provider = Arc::new(DummyDataProvider::new());
-//     let (cache, tokens) = generate_cache_and_tokens(1).await?;
-//     let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
-//     let cache = Arc::new(cache);
-//
-//     let (sync_tx, mut sync_rc) = channel::<SyncRequest>(1);
-//     let sync_handler = task::spawn(async move {
-//         let msg = sync_rc
-//             .recv()
-//             .await
-//             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
-//
-//
-//         Ok::<_, eyre::Error>(())
-//     });
-//
-//     listen_sync(cache.clone(), 1, 1).await?;
-//
-//
-//
-//     Ok(())
-// }
+#[tokio::test]
+async fn test_listen_sync() -> eyre::Result<()> {
+    let cache = generate_cache_and_tokens(1)
+        .await
+        .map(|(cache, _)| Arc::new(cache))?;
+
+    {
+        let (collaterals, _, _) = &mut *cache.collateral.write().await;
+        let mut collateral = collaterals
+            .get(0)
+            .ok_or_else(|| eyre::eyre!("no collaterals"))?
+            .write()
+            .await;
+        *collateral = Array1::from_vec(vec![1.0, 2.0, 3.0]);
+
+        let (borroweds, _, _) = &mut *cache.borrowed.write().await;
+        let mut borrowed = borroweds
+            .get(0)
+            .ok_or_else(|| eyre::eyre!("no borrowed"))?
+            .write()
+            .await;
+        *borrowed = Array1::from_vec(vec![4.0, 5.0, 6.0]);
+    }
+
+    let senders = listen_sync(cache.clone(), 1, 1).await?;
+    let sender = senders.get(0).ok_or_else(|| eyre::eyre!("senders empty"))?;
+    let rq_date = Utc::now().timestamp_micros();
+    sender.send(SyncRequest::Both(0, rq_date)).await?;
+
+    sleep(Duration::from_secs(1)).await;
+
+    let col_matrix = &*cache.collateral_matrix.read().await;
+    assert_eq!(
+        col_matrix,
+        Array2::from_shape_vec((1, 3), vec![1.0, 2.0, 3.0])?
+    );
+    assert_eq!(col_matrix.nrows(), 1);
+
+    let bor_matrix = &*cache.borrowed_matrix.read().await;
+    assert_eq!(
+        bor_matrix,
+        Array2::from_shape_vec((1, 3), vec![4.0, 5.0, 6.0])?
+    );
+    assert_eq!(bor_matrix.nrows(), 1);
+
+    Ok(())
+}

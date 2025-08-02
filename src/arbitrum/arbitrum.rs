@@ -347,7 +347,7 @@ where
         let now = Utc::now().timestamp_micros();
         *cache.prices.write().await = (Array1::from_elem(tokens.len(), 0.0), now);
         *cache.liquidation_threshold.write().await = (Array1::from_elem(tokens.len(), 0.0), now);
-        *cache.health_factors.write().await = (Array1::from_elem(1, 0.0), now);
+        *cache.health_factors.write().await = (Array1::from_elem(1, 0.), now);
     }
 
     let (tx_events, mut rc_events) = channel::<AaveEvents>(1000_000);
@@ -1210,7 +1210,7 @@ impl Cache {
             row_num, col_lock
         );
 
-        let low_bound = col_matrix_lock.nrows() - 1;
+        let low_bound = col_matrix_lock.nrows().saturating_sub(1);
         while col_matrix_lock.nrows() < col_lock.0.len() {
             let row_lock = col_lock
                 .0
@@ -1276,7 +1276,7 @@ impl Cache {
             row_num, bor_lock
         );
 
-        let low_bound = bor_matrix_lock.nrows() - 1;
+        let low_bound = bor_matrix_lock.nrows().saturating_sub(1);
         while bor_matrix_lock.nrows() < bor_lock.0.len() {
             let row_lock = bor_lock
                 .0
