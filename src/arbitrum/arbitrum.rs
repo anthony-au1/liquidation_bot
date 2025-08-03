@@ -330,6 +330,25 @@ where
     }
 }
 
+pub(crate) type Tokens = HashMap<Address, TokenDetails>;
+
+#[derive(Debug)]
+pub(crate) struct TokenDetails {
+    pub(in crate::arbitrum) name: String,
+    pub(in crate::arbitrum) price_source: Address,
+    pub(in crate::arbitrum) order: usize,
+}
+
+impl TokenDetails {
+    pub(in crate::arbitrum) fn new(name: String, price_source: Address, order: usize) -> Self {
+        Self {
+            name,
+            price_source,
+            order,
+        }
+    }
+}
+
 pub async fn start<P>(provider: Arc<P>) -> eyre::Result<()>
 where
     P: DataProvider + 'static,
@@ -339,16 +358,7 @@ where
     debug!("start: tokens = {:?}", tokens);
 
     let cache = Arc::new(Cache::default());
-
-    {
-        *cache.collateral_matrix.write().await = Array2::from_elem((0, tokens.len()), 0.0);
-        *cache.borrowed_matrix.write().await = Array2::from_elem((0, tokens.len()), 0.0);
-
-        let now = Utc::now().timestamp_micros();
-        *cache.prices.write().await = (Array1::from_elem(tokens.len(), 0.0), now);
-        *cache.liquidation_threshold.write().await = (Array1::from_elem(tokens.len(), 0.0), now);
-        *cache.health_factors.write().await = (Array1::from_elem(0, 0.0), now);
-    }
+    cache.init(tokens.len()).await?;
 
     let (tx_events, mut rc_events) = channel::<AaveEvents>(1000_000);
     listen_events(provider.clone(), tx_events.clone()).await?;
@@ -585,26 +595,7 @@ where
     Ok(())
 }
 
-pub(in crate::arbitrum) type Tokens = HashMap<Address, TokenDetails>;
-
-#[derive(Debug)]
-pub(in crate::arbitrum) struct TokenDetails {
-    pub(in crate::arbitrum) name: String,
-    pub(in crate::arbitrum) price_source: Address,
-    pub(in crate::arbitrum) order: usize,
-}
-
-impl TokenDetails {
-    pub(in crate::arbitrum) fn new(name: String, price_source: Address, order: usize) -> Self {
-        Self {
-            name,
-            price_source,
-            order,
-        }
-    }
-}
-
-pub(in crate::arbitrum) async fn setup<P>(provider: Arc<P>) -> eyre::Result<Tokens>
+pub(crate) async fn setup<P>(provider: Arc<P>) -> eyre::Result<Tokens>
 where
     P: DataProvider,
 {
@@ -634,15 +625,12 @@ where
 
 pub(in crate::arbitrum) type TimeStamp = i64;
 
-pub(in crate::arbitrum) enum AaveEvents {
+pub(crate) enum AaveEvents {
     IL2PoolEvents(IL2PoolEvents, TimeStamp),
     IChainlinkAggregatorEvents(IChainlinkAggregatorEvents, Address, TimeStamp),
 }
 
-pub(in crate::arbitrum) async fn listen_events<P>(
-    provider: Arc<P>,
-    tx: Sender<AaveEvents>,
-) -> eyre::Result<()>
+pub(crate) async fn listen_events<P>(provider: Arc<P>, tx: Sender<AaveEvents>) -> eyre::Result<()>
 where
     P: DataProvider + 'static,
 {
@@ -694,7 +682,7 @@ where
     Ok(())
 }
 
-pub(in crate::arbitrum) async fn listen_price_update<P>(
+pub(crate) async fn listen_price_update<P>(
     provider: Arc<P>,
     tokens: &Tokens,
     tx: Sender<AaveEvents>,
@@ -746,7 +734,7 @@ where
     Ok(())
 }
 
-pub(in crate::arbitrum) async fn liquidation_threshold_update<P>(
+pub(crate) async fn liquidation_threshold_update<P>(
     cache: Arc<Cache>,
     tokens: Arc<Tokens>,
     provider: Arc<P>,
@@ -823,13 +811,13 @@ where
 }
 
 #[derive(Debug, PartialEq)]
-pub(in crate::arbitrum) enum SyncRequest {
+pub(crate) enum SyncRequest {
     Collateral(usize, TimeStamp),
     Borrowed(usize, TimeStamp),
     Both(usize, TimeStamp),
 }
 
-pub(in crate::arbitrum) async fn listen_sync(
+pub(crate) async fn listen_sync(
     cache: Arc<Cache>,
     workers: usize,
     bound: usize,
@@ -873,12 +861,12 @@ async fn listen_sync_handler(cache: &Cache, rc: &mut Receiver<SyncRequest>) -> e
 }
 
 #[derive(Debug, PartialEq)]
-pub(in crate::arbitrum) enum HFRequest {
+pub(crate) enum HFRequest {
     User(Address, TimeStamp),
     Full(TimeStamp),
 }
 
-pub(in crate::arbitrum) async fn listen_hf_calc(
+pub(crate) async fn listen_hf_calc(
     cache: Arc<Cache>,
     workers: usize,
     bound: usize,
@@ -949,7 +937,7 @@ impl UserSettings {
 }
 
 #[derive(Default, Debug)]
-pub(in crate::arbitrum) struct Cache {
+pub(crate) struct Cache {
     pub(in crate::arbitrum) users: UserDetails,
     pub(in crate::arbitrum) users_num: RwLock<usize>,
     pub(in crate::arbitrum) reserve: Arrays,
@@ -963,6 +951,18 @@ pub(in crate::arbitrum) struct Cache {
 }
 
 impl Cache {
+    pub(crate) async fn init(&self, token_num: usize) -> eyre::Result<()> {
+        *self.collateral_matrix.write().await = Array2::from_elem((0, token_num), 0.0);
+        *self.borrowed_matrix.write().await = Array2::from_elem((0, token_num), 0.0);
+
+        let now = Utc::now().timestamp_micros();
+        *self.prices.write().await = (Array1::from_elem(token_num, 0.0), now);
+        *self.liquidation_threshold.write().await = (Array1::from_elem(token_num, 0.0), now);
+        *self.health_factors.write().await = (Array1::from_elem(0, 0.0), now);
+
+        Ok(())
+    }
+
     pub(in crate::arbitrum) fn contains(&self, addr: &Address) -> bool {
         self.users.contains_key(addr)
     }
@@ -1161,7 +1161,7 @@ impl Cache {
         self.users.remove(addr);
     }
 
-    pub(in crate::arbitrum) async fn subscribe<P, T, F, Fut>(
+    pub(crate) async fn subscribe<P, T, F, Fut>(
         cache: Arc<Cache>,
         workers: usize,
         bound: usize,

@@ -80,7 +80,7 @@ where
     F1: FnOnce() -> R1,
     R1: Future<Output = eyre::Result<()>> + Send,
     F2: FnOnce() -> R2,
-    R2: Future<Output = eyre::Result<()>> + Send
+    R2: Future<Output = eyre::Result<()>> + Send,
 {
     match rq_date {
         t if t > last_modified => {
@@ -130,7 +130,7 @@ where
     Ok(())
 }
 
-pub(in crate::arbitrum) async fn supply<P>(
+pub(crate) async fn supply<P>(
     cache: Arc<Cache>,
     provider: Arc<P>,
     tokens: Arc<Tokens>,
@@ -284,7 +284,7 @@ where
     Ok(())
 }
 
-pub(in crate::arbitrum) async fn withdraw<P>(
+pub(crate) async fn withdraw<P>(
     cache: Arc<Cache>,
     provider: Arc<P>,
     tokens: Arc<Tokens>,
@@ -302,7 +302,7 @@ where
     Ok(())
 }
 
-pub(in crate::arbitrum) async fn borrow<P>(
+pub(crate) async fn borrow<P>(
     cache: Arc<Cache>,
     provider: Arc<P>,
     tokens: Arc<Tokens>,
@@ -320,7 +320,7 @@ where
     Ok(())
 }
 
-pub(in crate::arbitrum) async fn repay<P>(
+pub(crate) async fn repay<P>(
     cache: Arc<Cache>,
     provider: Arc<P>,
     tokens: Arc<Tokens>,
@@ -338,7 +338,7 @@ where
     Ok(())
 }
 
-pub(in crate::arbitrum) async fn reserve_used_as_collateral_enabled<P>(
+pub(crate) async fn reserve_used_as_collateral_enabled<P>(
     cache: Arc<Cache>,
     provider: Arc<P>,
     tokens: Arc<Tokens>,
@@ -361,7 +361,7 @@ where
     Ok(())
 }
 
-pub(in crate::arbitrum) async fn reserve_used_as_collateral_disabled<P>(
+pub(crate) async fn reserve_used_as_collateral_disabled<P>(
     cache: Arc<Cache>,
     provider: Arc<P>,
     tokens: Arc<Tokens>,
@@ -384,7 +384,7 @@ where
     Ok(())
 }
 
-pub(in crate::arbitrum) async fn liquidation_call<P>(
+pub(crate) async fn liquidation_call<P>(
     cache: Arc<Cache>,
     provider: Arc<P>,
     tokens: Arc<Tokens>,
@@ -407,7 +407,7 @@ where
     Ok(())
 }
 
-pub(in crate::arbitrum) async fn reserve_data_updated<P>(
+pub(crate) async fn reserve_data_updated<P>(
     cache: Arc<Cache>,
     provider: Arc<P>,
     tokens: Arc<Tokens>,
@@ -421,7 +421,7 @@ where
     Ok(())
 }
 
-pub(in crate::arbitrum) async fn answer_updated<P>(
+pub(crate) async fn answer_updated<P>(
     cache: Arc<Cache>,
     provider: Arc<P>,
     tokens: Arc<Tokens>,

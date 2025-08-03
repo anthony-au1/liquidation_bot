@@ -28,5 +28,5 @@ test
 19. liquidation_threshold_update_handler - DONE
 20. listen_sync - DONE
 21. listen_sync_handler - DONE
-22. listen_hf_calc
-23. listen_hf_calc_handler
+22. listen_hf_calc - DONE
+23. listen_hf_calc_handler - DONE

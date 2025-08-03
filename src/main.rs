@@ -1,9 +1,10 @@
-mod arbitrum;
+use liquidation_bot;
 
-use std::sync::Arc;
-use crate::arbitrum::arbitrum::{start, AaveDataProvider};
+use crate::liquidation_bot::arbitrum::arbitrum::AaveDataProvider;
 use alloy::providers::{ProviderBuilder, WsConnect};
 use clap::{Parser, Subcommand};
+use liquidation_bot::arbitrum::arbitrum::{start, WS_URL};
+use std::sync::Arc;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -40,7 +41,7 @@ async fn main() -> eyre::Result<()> {
             info!("starting liquidation bot");
 
             let provider = ProviderBuilder::new()
-                .connect_ws(WsConnect::new(arbitrum::arbitrum::WS_URL))
+                .connect_ws(WsConnect::new(WS_URL))
                 .await?;
             // let block_number = get_block_number(&provider).await?;
             // get_block(&provider, block_number).await?;
