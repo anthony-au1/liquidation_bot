@@ -190,7 +190,7 @@ pub struct UserReserveData {
 }
 
 impl UserReserveData {
-    pub(in crate::arbitrum) fn new(
+    pub fn new(
         current_atoken_balance: f64,
         current_variable_debt: f64,
         usage_as_collateral_enabled: bool,
