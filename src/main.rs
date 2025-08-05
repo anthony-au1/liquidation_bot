@@ -3,7 +3,7 @@ use liquidation_bot;
 use crate::liquidation_bot::arbitrum::arbitrum::AaveDataProvider;
 use alloy::providers::{ProviderBuilder, WsConnect};
 use clap::{Parser, Subcommand};
-use liquidation_bot::arbitrum::arbitrum::{start, WS_URL};
+use liquidation_bot::arbitrum::arbitrum::{start, Cache, WS_URL};
 use std::sync::Arc;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -49,9 +49,9 @@ async fn main() -> eyre::Result<()> {
             // get_headers(&provider).await?;
             // get_borrows(Box::new(provider)).await?;
 
+            let cache = Cache::default();
             let data_provider = AaveDataProvider::new(&provider)?;
-            start(Arc::new(data_provider)).await?;
-            // test_me().await?;
+            start(Arc::new(cache), Arc::new(data_provider)).await?;
         }
         Commands::Stop => {
             info!("stopping liquidation bot");

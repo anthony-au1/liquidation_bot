@@ -349,7 +349,7 @@ impl TokenDetails {
     }
 }
 
-pub async fn start<P>(provider: Arc<P>) -> eyre::Result<()>
+pub async fn start<P>(cache: Arc<Cache>, provider: Arc<P>) -> eyre::Result<()>
 where
     P: DataProvider + 'static,
 {
@@ -357,7 +357,6 @@ where
 
     debug!("start: tokens = {:?}", tokens);
 
-    let cache = Arc::new(Cache::default());
     cache.init(tokens.len()).await?;
 
     let (tx_events, mut rc_events) = channel::<AaveEvents>(1000_000);
@@ -623,7 +622,7 @@ where
     Ok(tokens)
 }
 
-pub(in crate::arbitrum) type TimeStamp = i64;
+pub type TimeStamp = i64;
 
 pub(crate) enum AaveEvents {
     IL2PoolEvents(IL2PoolEvents, TimeStamp),
@@ -916,19 +915,19 @@ async fn listen_hf_calc_handler(cache: &Cache, rc: &mut Receiver<HFRequest>) -> 
     Ok(())
 }
 
-pub(in crate::arbitrum) type UserDetails = DashMap<Address, UserSettings>;
-pub(in crate::arbitrum) type Array = RwLock<(Array1<f64>, TimeStamp)>;
-pub(in crate::arbitrum) type Arrays = RwLock<(Vec<RwLock<Array1<f64>>>, TimeStamp, TimeStamp)>;
-pub(in crate::arbitrum) type Matrix = RwLock<Array2<f64>>;
+pub type UserDetails = DashMap<Address, UserSettings>;
+pub type Array = RwLock<(Array1<f64>, TimeStamp)>;
+pub type Arrays = RwLock<(Vec<RwLock<Array1<f64>>>, TimeStamp, TimeStamp)>;
+pub type Matrix = RwLock<Array2<f64>>;
 
 #[derive(Default, Debug, Clone)]
-pub(in crate::arbitrum) struct UserSettings {
-    pub(in crate::arbitrum) row_num: usize,
-    pub(in crate::arbitrum) use_as_collateral: BitVec<usize, Lsb0>,
+pub struct UserSettings {
+    pub row_num: usize,
+    pub use_as_collateral: BitVec<usize, Lsb0>,
 }
 
 impl UserSettings {
-    pub(in crate::arbitrum) fn new(row_num: usize, use_as_collateral: BitVec<usize, Lsb0>) -> Self {
+    pub fn new(row_num: usize, use_as_collateral: BitVec<usize, Lsb0>) -> Self {
         Self {
             row_num,
             use_as_collateral,
@@ -937,17 +936,17 @@ impl UserSettings {
 }
 
 #[derive(Default, Debug)]
-pub(crate) struct Cache {
-    pub(in crate::arbitrum) users: UserDetails,
-    pub(in crate::arbitrum) users_num: RwLock<usize>,
-    pub(in crate::arbitrum) reserve: Arrays,
-    pub(in crate::arbitrum) collateral: Arrays,
-    pub(in crate::arbitrum) collateral_matrix: Matrix,
-    pub(in crate::arbitrum) borrowed: Arrays,
-    pub(in crate::arbitrum) borrowed_matrix: Matrix,
-    pub(in crate::arbitrum) liquidation_threshold: Array,
-    pub(in crate::arbitrum) prices: Array,
-    pub(in crate::arbitrum) health_factors: Array,
+pub struct Cache {
+    pub users: UserDetails,
+    pub users_num: RwLock<usize>,
+    pub reserve: Arrays,
+    pub collateral: Arrays,
+    pub collateral_matrix: Matrix,
+    pub borrowed: Arrays,
+    pub borrowed_matrix: Matrix,
+    pub liquidation_threshold: Array,
+    pub prices: Array,
+    pub health_factors: Array,
 }
 
 impl Cache {

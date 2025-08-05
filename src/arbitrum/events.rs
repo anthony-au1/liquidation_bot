@@ -78,9 +78,9 @@ async fn handle_event<P, F1, R1, F2, R2>(
 where
     P: DataProvider + 'static,
     F1: FnOnce() -> R1,
-    R1: Future<Output = eyre::Result<()>> + Send,
+    R1: Future<Output=eyre::Result<()>> + Send,
     F2: FnOnce() -> R2,
-    R2: Future<Output = eyre::Result<()>> + Send,
+    R2: Future<Output=eyre::Result<()>> + Send,
 {
     match rq_date {
         t if t > last_modified => {
@@ -160,7 +160,7 @@ where
         &sync_tx,
         &hf_tx,
     )
-    .await?
+        .await?
     {
         debug!(
             "supplied: new user created = {}, cache = {:?}",
@@ -225,7 +225,7 @@ where
             new_event,
             skip_event,
         )
-        .await?;
+            .await?;
     } else {
         let (last_sync, last_modified) = {
             let reserve_lock = cache.reserve.read().await;
@@ -266,7 +266,7 @@ where
             new_event,
             skip_event,
         )
-        .await?;
+            .await?;
     }
 
     debug!("{}", {
@@ -430,7 +430,35 @@ pub(crate) async fn answer_updated<P>(
 where
     P: DataProvider + 'static,
 {
-    debug!("answer_updated: called");
-    // let (event, token, sync_tx, rq_date) = event;
+    let (AnswerUpdated { current, .. }, token, hf_tx, rq_date) = event;
+    let token_details = tokens
+        .get(&token)
+        .ok_or_else(|| eyre::eyre!("token not found: {}", token))?;
+
+    debug!("{}", {
+        let received = Utc::now().timestamp_micros();
+        format!(
+            "answer_updated ({}): rq_date = {}, received = {}, delta = {} μs",
+            token_details.name.clone(),
+            rq_date,
+            received,
+            received - rq_date
+        )
+    });
+
+    {
+        let inx = tokens
+            .get(&token)
+            .ok_or_else(|| eyre::eyre!("token not found: {}", token))?;
+        let (prices, last_modified) = &mut *cache.prices.write().await;
+
+        let p = current.as_u64() / 10^8;
+
+        prices[token_details.order] = 1.0;
+    }
+
+    hf_tx.send(HFRequest::Full(rq_date)).await?;
+
+    // todo fix it. we can't use integration tests
     Ok(())
 }
