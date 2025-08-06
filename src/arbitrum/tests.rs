@@ -2,11 +2,11 @@ use crate::arbitrum::arbitrum::IAaveProtocolDataProvider::TokenData;
 use crate::arbitrum::arbitrum::IChainlinkAggregator::{AnswerUpdated, IChainlinkAggregatorEvents};
 use crate::arbitrum::arbitrum::IL2Pool::{IL2PoolEvents, Supply};
 use crate::arbitrum::arbitrum::{
-    liquidation_threshold_update, listen_events, listen_hf_calc, listen_price_update, listen_sync, setup, AaveEvents,
-    Cache, DataProvider, HFRequest, SyncRequest, TokenDetails,
-    UserReserveData, UserSettings,
+    AaveEvents, Cache, DataProvider, HFRequest, SyncRequest, TokenDetails, UserReserveData,
+    UserSettings, liquidation_threshold_update, listen_events, listen_hf_calc, listen_price_update,
+    listen_sync, setup,
 };
-use crate::arbitrum::events::{create_user, supply};
+use crate::arbitrum::events::{answer_updated, create_user, supply};
 use alloy_primitives::Address;
 use async_trait::async_trait;
 use bitvec::order::Lsb0;
@@ -18,8 +18,8 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc::channel;
 use tokio::sync::RwLock;
+use tokio::sync::mpsc::channel;
 use tokio::task;
 use tokio::time::sleep;
 
@@ -1542,6 +1542,56 @@ async fn test_hf_calc() -> eyre::Result<()> {
         hf,
         Array1::from_vec(vec![0.20041899441340782, 3.042768273716952])
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_answer_updated() -> eyre::Result<()> {
+    let (cache, tokens) = generate_cache_and_tokens(1)
+        .await
+        .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
+    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+
+    let token = tokens.keys().next().ok_or_else(|| eyre::eyre!("no data"))?;
+
+    let event = AnswerUpdated {
+        current: alloy_primitives::I256::try_from(999_001_61230_000_000_i128)?,
+        roundId: alloy_primitives::U256::from(0),
+        timestamp: alloy_primitives::U256::from(Utc::now().timestamp()),
+    };
+    let rq_date = Utc::now().timestamp_micros();
+
+    let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
+
+    let hf_handler = task::spawn(async move {
+        let msg = hf_rc
+            .recv()
+            .await
+            .ok_or_else(|| eyre::eyre!("hf channel closed"))?;
+        assert_eq!(HFRequest::Full(rq_date), msg);
+
+        Ok::<_, eyre::Error>(())
+    });
+
+    answer_updated(
+        cache.clone(),
+        dummy_data_provider,
+        tokens.clone(),
+        (event, token.clone(), hf_tx, rq_date),
+    )
+    .await?;
+    let _ = hf_handler.await?;
+
+    let idx = tokens
+        .get(token)
+        .ok_or_else(|| eyre::eyre!("no token = {:?}", token))?
+        .order;
+
+    let (prices, last_modified) = &*cache.prices.read().await;
+
+    assert_eq!(prices[idx], 999_001_612.30);
+    assert_eq!(*last_modified, rq_date);
 
     Ok(())
 }

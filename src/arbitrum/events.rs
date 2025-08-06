@@ -4,7 +4,7 @@ use crate::arbitrum::arbitrum::IL2Pool::{
     ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
 use crate::arbitrum::arbitrum::{Cache, DataProvider, HFRequest, SyncRequest, TimeStamp, Tokens};
-use alloy_primitives::Address;
+use alloy_primitives::{Address, I256};
 use chrono::Utc;
 use eyre::eyre;
 use std::sync::Arc;
@@ -78,9 +78,9 @@ async fn handle_event<P, F1, R1, F2, R2>(
 where
     P: DataProvider + 'static,
     F1: FnOnce() -> R1,
-    R1: Future<Output=eyre::Result<()>> + Send,
+    R1: Future<Output = eyre::Result<()>> + Send,
     F2: FnOnce() -> R2,
-    R2: Future<Output=eyre::Result<()>> + Send,
+    R2: Future<Output = eyre::Result<()>> + Send,
 {
     match rq_date {
         t if t > last_modified => {
@@ -160,7 +160,7 @@ where
         &sync_tx,
         &hf_tx,
     )
-        .await?
+    .await?
     {
         debug!(
             "supplied: new user created = {}, cache = {:?}",
@@ -225,7 +225,7 @@ where
             new_event,
             skip_event,
         )
-            .await?;
+        .await?;
     } else {
         let (last_sync, last_modified) = {
             let reserve_lock = cache.reserve.read().await;
@@ -266,7 +266,7 @@ where
             new_event,
             skip_event,
         )
-            .await?;
+        .await?;
     }
 
     debug!("{}", {
@@ -423,7 +423,7 @@ where
 
 pub(crate) async fn answer_updated<P>(
     cache: Arc<Cache>,
-    provider: Arc<P>,
+    _: Arc<P>,
     tokens: Arc<Tokens>,
     event: (AnswerUpdated, Address, Sender<HFRequest>, TimeStamp),
 ) -> eyre::Result<()>
@@ -447,18 +447,12 @@ where
     });
 
     {
-        let inx = tokens
-            .get(&token)
-            .ok_or_else(|| eyre::eyre!("token not found: {}", token))?;
         let (prices, last_modified) = &mut *cache.prices.write().await;
-
-        let p = current.as_u64() / 10^8;
-
-        prices[token_details.order] = 1.0;
+        prices[token_details.order] = current.as_u64() as f64 / 100_000_000.0;
+        *last_modified = rq_date;
     }
 
     hf_tx.send(HFRequest::Full(rq_date)).await?;
 
-    // todo fix it. we can't use integration tests
     Ok(())
 }

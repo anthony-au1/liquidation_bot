@@ -1,8 +1,8 @@
 use liquidation_bot;
 
-use crate::liquidation_bot::arbitrum::arbitrum::AaveDataProvider;
 use alloy::providers::{ProviderBuilder, WsConnect};
 use clap::{Parser, Subcommand};
+use liquidation_bot::arbitrum::arbitrum::AaveDataProvider;
 use liquidation_bot::arbitrum::arbitrum::{start, Cache, WS_URL};
 use std::sync::Arc;
 use tracing::info;
