@@ -3,7 +3,9 @@ use crate::arbitrum::arbitrum::IL2Pool::{
     Borrow, LiquidationCall, Repay, ReserveDataUpdated, ReserveUsedAsCollateralDisabled,
     ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
-use crate::arbitrum::arbitrum::{Cache, DataProvider, HFRequest, SyncRequest, TimeStamp, Tokens};
+use crate::arbitrum::arbitrum::{
+    Cache, DataProvider, HFRequest, RqDate, SyncRequest, TimeStamp, Token, Tokens,
+};
 use alloy_primitives::{Address, I256};
 use chrono::Utc;
 use eyre::eyre;
@@ -134,12 +136,12 @@ pub(crate) async fn supply<P>(
     cache: Arc<Cache>,
     provider: Arc<P>,
     tokens: Arc<Tokens>,
-    event: (Supply, Sender<SyncRequest>, Sender<HFRequest>, TimeStamp),
+    event: (Supply, Sender<SyncRequest>, Sender<HFRequest>, RqDate),
 ) -> eyre::Result<()>
 where
     P: DataProvider + 'static,
 {
-    let (event, sync_tx, hf_tx, rq_date) = event;
+    let (event, sync_tx, hf_tx, RqDate(rq_date)) = event;
 
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
@@ -288,7 +290,7 @@ pub(crate) async fn withdraw<P>(
     cache: Arc<Cache>,
     provider: Arc<P>,
     tokens: Arc<Tokens>,
-    event: (Withdraw, Sender<SyncRequest>, Sender<HFRequest>, TimeStamp),
+    event: (Withdraw, Sender<SyncRequest>, Sender<HFRequest>, RqDate),
 ) -> eyre::Result<()>
 where
     P: DataProvider + 'static,
@@ -306,7 +308,7 @@ pub(crate) async fn borrow<P>(
     cache: Arc<Cache>,
     provider: Arc<P>,
     tokens: Arc<Tokens>,
-    event: (Borrow, Sender<SyncRequest>, Sender<HFRequest>, TimeStamp),
+    event: (Borrow, Sender<SyncRequest>, Sender<HFRequest>, RqDate),
 ) -> eyre::Result<()>
 where
     P: DataProvider + 'static,
@@ -324,7 +326,7 @@ pub(crate) async fn repay<P>(
     cache: Arc<Cache>,
     provider: Arc<P>,
     tokens: Arc<Tokens>,
-    event: (Repay, Sender<SyncRequest>, Sender<HFRequest>, TimeStamp),
+    event: (Repay, Sender<SyncRequest>, Sender<HFRequest>, RqDate),
 ) -> eyre::Result<()>
 where
     P: DataProvider + 'static,
@@ -346,7 +348,7 @@ pub(crate) async fn reserve_used_as_collateral_enabled<P>(
         ReserveUsedAsCollateralEnabled,
         Sender<SyncRequest>,
         Sender<HFRequest>,
-        TimeStamp,
+        RqDate,
     ),
 ) -> eyre::Result<()>
 where
@@ -369,7 +371,7 @@ pub(crate) async fn reserve_used_as_collateral_disabled<P>(
         ReserveUsedAsCollateralDisabled,
         Sender<SyncRequest>,
         Sender<HFRequest>,
-        TimeStamp,
+        RqDate,
     ),
 ) -> eyre::Result<()>
 where
@@ -392,7 +394,7 @@ pub(crate) async fn liquidation_call<P>(
         LiquidationCall,
         Sender<SyncRequest>,
         Sender<HFRequest>,
-        TimeStamp,
+        RqDate,
     ),
 ) -> eyre::Result<()>
 where
@@ -411,7 +413,7 @@ pub(crate) async fn reserve_data_updated<P>(
     cache: Arc<Cache>,
     provider: Arc<P>,
     tokens: Arc<Tokens>,
-    event: (ReserveDataUpdated, Sender<HFRequest>, TimeStamp),
+    event: (ReserveDataUpdated, Sender<HFRequest>, RqDate),
 ) -> eyre::Result<()>
 where
     P: DataProvider + 'static,
@@ -425,12 +427,12 @@ pub(crate) async fn answer_updated<P>(
     cache: Arc<Cache>,
     _: Arc<P>,
     tokens: Arc<Tokens>,
-    event: (AnswerUpdated, Address, Sender<HFRequest>, TimeStamp),
+    event: (AnswerUpdated, Token, Sender<HFRequest>, RqDate),
 ) -> eyre::Result<()>
 where
     P: DataProvider + 'static,
 {
-    let (AnswerUpdated { current, .. }, token, hf_tx, rq_date) = event;
+    let (AnswerUpdated { current, .. }, Token(token), hf_tx, RqDate(rq_date)) = event;
     let token_details = tokens
         .get(&token)
         .ok_or_else(|| eyre::eyre!("token not found: {}", token))?;

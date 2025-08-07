@@ -349,6 +349,9 @@ impl TokenDetails {
     }
 }
 
+pub(crate) struct Token(pub(crate) Address);
+pub(crate) struct RqDate(pub(crate) TimeStamp);
+
 pub async fn start<P>(cache: Arc<Cache>, provider: Arc<P>) -> eyre::Result<()>
 where
     P: DataProvider + 'static,
@@ -482,7 +485,7 @@ where
                             ev,
                             sync_senders[sync_counter % w_num].clone(),
                             hf_senders[hf_counter % w_num].clone(),
-                            rq_date,
+                            RqDate(rq_date),
                         ))
                         .await?;
                     counters.supply = counters.supply.wrapping_add(1);
@@ -495,7 +498,7 @@ where
                             ev,
                             sync_senders[sync_counter % w_num].clone(),
                             hf_senders[hf_counter % w_num].clone(),
-                            rq_date,
+                            RqDate(rq_date),
                         ))
                         .await?;
                     counters.withdraw = counters.withdraw.wrapping_add(1);
@@ -508,7 +511,7 @@ where
                             ev,
                             sync_senders[sync_counter % w_num].clone(),
                             hf_senders[hf_counter % w_num].clone(),
-                            rq_date,
+                            RqDate(rq_date),
                         ))
                         .await?;
                     counters.borrow = counters.borrow.wrapping_add(1);
@@ -521,7 +524,7 @@ where
                             ev,
                             sync_senders[sync_counter % w_num].clone(),
                             hf_senders[hf_counter % w_num].clone(),
-                            rq_date,
+                            RqDate(rq_date),
                         ))
                         .await?;
                     counters.repay = counters.repay.wrapping_add(1);
@@ -535,7 +538,7 @@ where
                             ev,
                             sync_senders[sync_counter % w_num].clone(),
                             hf_senders[hf_counter % w_num].clone(),
-                            rq_date,
+                            RqDate(rq_date),
                         ))
                         .await?;
                     counters.reserve_used_as_collateral_enabled =
@@ -550,7 +553,7 @@ where
                             ev,
                             sync_senders[sync_counter % w_num].clone(),
                             hf_senders[hf_counter % w_num].clone(),
-                            rq_date,
+                            RqDate(rq_date),
                         ))
                         .await?;
                     counters.reserve_used_as_collateral_disabled =
@@ -564,7 +567,7 @@ where
                             ev,
                             sync_senders[sync_counter % w_num].clone(),
                             hf_senders[hf_counter % w_num].clone(),
-                            rq_date,
+                            RqDate(rq_date),
                         ))
                         .await?;
                     counters.liquidation_call = counters.liquidation_call.wrapping_add(1);
@@ -573,7 +576,7 @@ where
                 IL2PoolEvents::ReserveDataUpdated(ev) => {
                     debug!("start: reserve data updated");
                     reserve_data_updated_txs[counters.reserve_data_updated % w_num]
-                        .send((ev, hf_senders[hf_counter % w_num].clone(), rq_date))
+                        .send((ev, hf_senders[hf_counter % w_num].clone(), RqDate(rq_date)))
                         .await?;
                     counters.reserve_data_updated = counters.reserve_data_updated.wrapping_add(1);
                 }
@@ -582,7 +585,12 @@ where
                 IChainlinkAggregatorEvents::AnswerUpdated(ev) => {
                     debug!("start: answer updated");
                     answer_updated_txs[counters.answer_updated % w_num]
-                        .send((ev, token, hf_senders[hf_counter % w_num].clone(), rq_date))
+                        .send((
+                            ev,
+                            Token(token),
+                            hf_senders[hf_counter % w_num].clone(),
+                            RqDate(rq_date),
+                        ))
                         .await?;
                     counters.answer_updated = counters.answer_updated.wrapping_add(1);
                 }
