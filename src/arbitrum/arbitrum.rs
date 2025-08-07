@@ -1,6 +1,6 @@
 use crate::arbitrum::arbitrum::IAaveOracle::IAaveOracleInstance;
 use crate::arbitrum::arbitrum::IAaveProtocolDataProvider::{
-    IAaveProtocolDataProviderInstance, TokenData, getUserReserveDataReturn,
+    getUserReserveDataReturn, IAaveProtocolDataProviderInstance, TokenData,
 };
 use crate::arbitrum::arbitrum::IChainlinkAggregator::IChainlinkAggregatorEvents;
 use crate::arbitrum::arbitrum::IL2Pool::IL2PoolEvents;
@@ -19,13 +19,13 @@ use chrono::Utc;
 use dashmap::DashMap;
 use eyre::eyre;
 use futures::future::try_join_all;
-use ndarray::{Array1, Array2, Axis, concatenate};
+use ndarray::{concatenate, Array1, Array2, Axis};
 use std::collections::HashMap;
 use std::default::Default;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::RwLock;
-use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::{task, time};
 use tracing::{debug, error};
 

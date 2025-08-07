@@ -1,11 +1,7 @@
 use crate::arbitrum::arbitrum::IAaveProtocolDataProvider::TokenData;
 use crate::arbitrum::arbitrum::IChainlinkAggregator::{AnswerUpdated, IChainlinkAggregatorEvents};
 use crate::arbitrum::arbitrum::IL2Pool::{IL2PoolEvents, Supply};
-use crate::arbitrum::arbitrum::{
-    AaveEvents, Cache, DataProvider, HFRequest, SyncRequest, TokenDetails, UserReserveData,
-    UserSettings, liquidation_threshold_update, listen_events, listen_hf_calc, listen_price_update,
-    listen_sync, setup,
-};
+use crate::arbitrum::arbitrum::{AaveEvents, Cache, DataProvider, HFRequest, SyncRequest, TokenDetails, UserReserveData, UserSettings, liquidation_threshold_update, listen_events, listen_hf_calc, listen_price_update, listen_sync, setup, RqDate, Token};
 use crate::arbitrum::events::{answer_updated, create_user, supply};
 use alloy_primitives::Address;
 use async_trait::async_trait;
@@ -919,7 +915,7 @@ async fn test_supply() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         Arc::new(tokens),
-        (event, sync_tx, hf_tx, rq_date),
+        (event, sync_tx, hf_tx, RqDate(rq_date)),
     )
     .await?;
     let _ = sync_handler.await?;
@@ -987,7 +983,7 @@ async fn test_supply() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         Arc::new(tokens),
-        (event, sync_tx, hf_tx, rq_date),
+        (event, sync_tx, hf_tx, RqDate(rq_date)),
     )
     .await?;
     let _ = sync_handler.await?;
@@ -1034,7 +1030,7 @@ async fn test_supply() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         Arc::new(tokens),
-        (event, sync_tx, hf_tx, rq_date),
+        (event, sync_tx, hf_tx, RqDate(rq_date)),
     )
     .await?;
 
@@ -1078,7 +1074,7 @@ async fn test_supply() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         Arc::new(tokens),
-        (event, sync_tx, hf_tx, rq_date),
+        (event, sync_tx, hf_tx, RqDate(rq_date)),
     )
     .await?;
 
@@ -1122,7 +1118,7 @@ async fn test_supply() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         Arc::new(tokens),
-        (event, sync_tx, hf_tx, rq_date),
+        (event, sync_tx, hf_tx, RqDate(rq_date)),
     )
     .await?;
 
@@ -1185,7 +1181,7 @@ async fn test_supply() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         Arc::new(tokens),
-        (event, sync_tx, hf_tx, rq_date),
+        (event, sync_tx, hf_tx, RqDate(rq_date)),
     )
     .await?;
     let _ = sync_handler.await?;
@@ -1578,7 +1574,7 @@ async fn test_answer_updated() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         tokens.clone(),
-        (event, token.clone(), hf_tx, rq_date),
+        (event, Token(token.clone()), hf_tx, RqDate(rq_date)),
     )
     .await?;
     let _ = hf_handler.await?;

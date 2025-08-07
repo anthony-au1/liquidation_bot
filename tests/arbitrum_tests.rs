@@ -1,6 +1,5 @@
 #[cfg(test)]
 mod arbitrum_tests {
-    use alloy::eips::eip7002::SYSTEM_ADDRESS;
     use alloy_primitives::Address;
     use async_trait::async_trait;
     use bitvec::bitvec;
@@ -13,7 +12,7 @@ mod arbitrum_tests {
     };
     use liquidation_bot::arbitrum::arbitrum::IL2Pool::{IL2PoolEvents, Supply};
     use liquidation_bot::arbitrum::arbitrum::{
-        Cache, DataProvider, UserDetails, UserReserveData, UserSettings, start,
+        start, Cache, DataProvider, UserReserveData, UserSettings,
     };
     use ndarray::{Array1, Array2};
     use std::str::FromStr;
@@ -102,7 +101,7 @@ mod arbitrum_tests {
                 u if *u == Address::from_str(USER1)? => {
                     let urd = match token {
                         t if *t == Address::from_str(AAVE)? => {
-                            UserReserveData::new(1.0, 0.5, false)
+                            UserReserveData::new(1.1, 0.5, false)
                         }
                         t if *t == Address::from_str(USDC)? => UserReserveData::new(2.0, 1.0, true),
                         t if *t == Address::from_str(DAI)? => UserReserveData::new(3.0, 1.0, true),
@@ -113,7 +112,7 @@ mod arbitrum_tests {
                 _ => {
                     let urd = match token {
                         t if *t == Address::from_str(AAVE)? => {
-                            UserReserveData::new(1.0, 0.5, false)
+                            UserReserveData::new(1.1, 0.5, false)
                         }
                         t if *t == Address::from_str(USDC)? => UserReserveData::new(2.0, 1.0, true),
                         t if *t == Address::from_str(DAI)? => UserReserveData::new(3.0, 1.0, true),
@@ -270,40 +269,40 @@ mod arbitrum_tests {
             use_as_collateral.set(0, false);
             use_as_collateral.set(1, true);
             use_as_collateral.set(2, true);
-            cache
+            expected
                 .users
                 .insert(user, UserSettings::new(0, use_as_collateral));
 
             let now = Utc::now().timestamp_micros();
 
-            let (lt, last_modified) = &mut *cache.liquidation_threshold.write().await;
+            let (lt, last_modified) = &mut *expected.liquidation_threshold.write().await;
             *lt = Array1::from_vec(vec![7800.0, 8000.0, 7500.0]);
             *last_modified = now;
 
-            let (prices, last_modified) = &mut *cache.prices.write().await;
+            let (prices, last_modified) = &mut *expected.prices.write().await;
             *prices = Array1::from_vec(vec![1612.30, 2612.30, 3612.30]);
             *last_modified = now;
 
-            let (reserves, last_sync, last_modified) = &mut *cache.reserve.write().await;
+            let (reserves, last_sync, last_modified) = &mut *expected.reserve.write().await;
             reserves.push(RwLock::new(Array1::from_vec(vec![1.1, 0.0, 0.0])));
             (*last_sync, *last_modified) = (now, now);
 
-            let (collaterals, last_sync, last_modified) = &mut *cache.collateral.write().await;
+            let (collaterals, last_sync, last_modified) = &mut *expected.collateral.write().await;
             collaterals.push(RwLock::new(Array1::from_vec(vec![0.0, 4.0, 33.0])));
             (*last_sync, *last_modified) = (now, now);
 
-            let col_matrix = &mut *cache.collateral_matrix.write().await;
+            let col_matrix = &mut *expected.collateral_matrix.write().await;
             *col_matrix = Array2::from_shape_vec((1, 3), vec![0.0, 4.0, 33.0])?;
 
-            let (borroweds, last_sync, last_modified) = &mut *cache.borrowed.write().await;
+            let (borroweds, last_sync, last_modified) = &mut *expected.borrowed.write().await;
             borroweds.push(RwLock::new(Array1::from_vec(vec![0.5, 1.0, 1.0])));
             (*last_sync, *last_modified) = (now, now);
 
-            let bor_matrix = &mut *cache.borrowed_matrix.write().await;
+            let bor_matrix = &mut *expected.borrowed_matrix.write().await;
             *bor_matrix = Array2::from_shape_vec((1, 3), vec![0.5, 1.0, 1.0])?;
 
-            let (hf, last_modified) = &mut *cache.health_factors.write().await;
-            *hf = Array1::from_vec(vec![13.905]);
+            let (hf, last_modified) = &mut *expected.health_factors.write().await;
+            *hf = Array1::from_vec(vec![13.905171567755932]);
             *last_modified = now;
         }
 
