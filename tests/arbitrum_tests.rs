@@ -10,9 +10,9 @@ mod arbitrum_tests {
     use liquidation_bot::arbitrum::arbitrum::IChainlinkAggregator::{
         AnswerUpdated, IChainlinkAggregatorEvents,
     };
-    use liquidation_bot::arbitrum::arbitrum::IL2Pool::{IL2PoolEvents, Supply};
+    use liquidation_bot::arbitrum::arbitrum::IL2Pool::{IL2PoolEvents, Supply, Withdraw};
     use liquidation_bot::arbitrum::arbitrum::{
-        start, Cache, DataProvider, UserReserveData, UserSettings,
+        Cache, DataProvider, UserReserveData, UserSettings, start,
     };
     use ndarray::{Array1, Array2};
     use std::str::FromStr;
@@ -101,7 +101,7 @@ mod arbitrum_tests {
                 u if *u == Address::from_str(USER1)? => {
                     let urd = match token {
                         t if *t == Address::from_str(AAVE)? => {
-                            UserReserveData::new(1.1, 0.5, false)
+                            UserReserveData::new(2.0, 0.5, false)
                         }
                         t if *t == Address::from_str(USDC)? => UserReserveData::new(2.0, 1.0, true),
                         t if *t == Address::from_str(DAI)? => UserReserveData::new(3.0, 1.0, true),
@@ -165,32 +165,66 @@ mod arbitrum_tests {
                 *count
             };
 
-            let event = match count {
-                1 => Supply {
-                    reserve: Address::from_str(AAVE)?,
-                    user: user.clone(),
-                    onBehalfOf: user,
-                    amount: alloy_primitives::U256::from(0.1),
-                    referralCode: 0,
-                },
-                2 => Supply {
-                    reserve: Address::from_str(USDC)?,
-                    user: user.clone(),
-                    onBehalfOf: user,
-                    amount: alloy_primitives::U256::from(2.0),
-                    referralCode: 0,
-                },
-                3 => Supply {
-                    reserve: Address::from_str(DAI)?,
-                    user: user.clone(),
-                    onBehalfOf: user,
-                    amount: alloy_primitives::U256::from(30.0),
-                    referralCode: 0,
-                },
-                _ => return Err(eyre!("no listen_events events")),
-            };
-
-            callback(IL2PoolEvents::Supply(event)).await
+            match count {
+                1 => {
+                    callback(IL2PoolEvents::Supply(Supply {
+                        reserve: Address::from_str(AAVE)?,
+                        user,
+                        onBehalfOf: user,
+                        amount: alloy_primitives::U256::from(0.1),
+                        referralCode: 0,
+                    }))
+                    .await
+                }
+                2 => {
+                    callback(IL2PoolEvents::Supply(Supply {
+                        reserve: Address::from_str(USDC)?,
+                        user,
+                        onBehalfOf: user,
+                        amount: alloy_primitives::U256::from(2.0),
+                        referralCode: 0,
+                    }))
+                    .await
+                }
+                3 => {
+                    callback(IL2PoolEvents::Supply(Supply {
+                        reserve: Address::from_str(DAI)?,
+                        user,
+                        onBehalfOf: user,
+                        amount: alloy_primitives::U256::from(30.0),
+                        referralCode: 0,
+                    }))
+                    .await
+                }
+                4 => {
+                    callback(IL2PoolEvents::Withdraw(Withdraw {
+                        reserve: Address::from_str(AAVE)?,
+                        user,
+                        to: user,
+                        amount: alloy_primitives::U256::from(1.0),
+                    }))
+                    .await
+                }
+                5 => {
+                    callback(IL2PoolEvents::Withdraw(Withdraw {
+                        reserve: Address::from_str(USDC)?,
+                        user,
+                        to: user,
+                        amount: alloy_primitives::U256::from(1.0),
+                    }))
+                    .await
+                }
+                6 => {
+                    callback(IL2PoolEvents::Withdraw(Withdraw {
+                        reserve: Address::from_str(DAI)?,
+                        user,
+                        to: user,
+                        amount: alloy_primitives::U256::from(13.0),
+                    }))
+                    .await
+                }
+                _ => Err(eyre!("no listen_events events")),
+            }
         }
 
         async fn listen_price_update<F, Fut>(
@@ -247,7 +281,7 @@ mod arbitrum_tests {
     }
 
     #[tokio::test]
-    async fn test_supply() -> eyre::Result<()> {
+    async fn test_events() -> eyre::Result<()> {
         let cache = Arc::new(Cache::default());
         let provider = Arc::new(DummyDataProvider::new());
 
@@ -284,15 +318,15 @@ mod arbitrum_tests {
             *last_modified = now;
 
             let (reserves, last_sync, last_modified) = &mut *expected.reserve.write().await;
-            reserves.push(RwLock::new(Array1::from_vec(vec![1.1, 0.0, 0.0])));
+            reserves.push(RwLock::new(Array1::from_vec(vec![1.0, 0.0, 0.0])));
             (*last_sync, *last_modified) = (now, now);
 
             let (collaterals, last_sync, last_modified) = &mut *expected.collateral.write().await;
-            collaterals.push(RwLock::new(Array1::from_vec(vec![0.0, 4.0, 33.0])));
+            collaterals.push(RwLock::new(Array1::from_vec(vec![0.0, 3.0, 20.0])));
             (*last_sync, *last_modified) = (now, now);
 
             let col_matrix = &mut *expected.collateral_matrix.write().await;
-            *col_matrix = Array2::from_shape_vec((1, 3), vec![0.0, 4.0, 33.0])?;
+            *col_matrix = Array2::from_shape_vec((1, 3), vec![0.0, 3.0, 20.0])?;
 
             let (borroweds, last_sync, last_modified) = &mut *expected.borrowed.write().await;
             borroweds.push(RwLock::new(Array1::from_vec(vec![0.5, 1.0, 1.0])));
@@ -302,7 +336,7 @@ mod arbitrum_tests {
             *bor_matrix = Array2::from_shape_vec((1, 3), vec![0.5, 1.0, 1.0])?;
 
             let (hf, last_modified) = &mut *expected.health_factors.write().await;
-            *hf = Array1::from_vec(vec![13.905171567755932]);
+            *hf = Array1::from_vec(vec![8.59851651673008]);
             *last_modified = now;
         }
 

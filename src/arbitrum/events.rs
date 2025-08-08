@@ -236,7 +236,7 @@ where
 
         let c = cache.clone();
         let new_event = async move || {
-            debug!("supply: borrowed new event user = {}", event.onBehalfOf);
+            debug!("supply: reserve new event user = {}", event.onBehalfOf);
 
             let mut reserve_lock = c.reserve.write().await;
             (reserve_lock.1, reserve_lock.2) = (now, now);
@@ -295,11 +295,146 @@ pub(crate) async fn withdraw<P>(
 where
     P: DataProvider + 'static,
 {
-    debug!("withdraw: called");
-    // let (event, sync_tx, hf_tx, rq_date) = event;
-    // cache
-    //     .init_user(&event.user, &tokens, provider.clone())
-    //     .await?;
+    let (event, sync_tx, hf_tx, RqDate(rq_date)) = event;
+
+    debug!("{}", {
+        let received = Utc::now().timestamp_micros();
+        format!(
+            "withdraw: rq_date = {}, received = {}, delta = {} μs",
+            rq_date,
+            received,
+            received - rq_date
+        )
+    });
+
+    if create_user(
+        rq_date,
+        &cache,
+        provider.clone(),
+        &tokens,
+        &event.user,
+        &sync_tx,
+        &hf_tx,
+    )
+    .await?
+    {
+        debug!(
+            "withdraw: new user created = {}, cache = {:?}",
+            event.user, cache
+        );
+
+        return Ok(());
+    }
+
+    let user_settings = cache
+        .users
+        .get(&event.user)
+        .ok_or_else(|| eyre!("user = {:?} not found", event.user))?
+        .clone();
+    let row_num = user_settings.row_num;
+    let idx = tokens
+        .get(&event.reserve)
+        .ok_or_else(|| eyre!("token = {:?} not found", event.reserve))?
+        .order;
+    let now = Utc::now().timestamp_micros();
+
+    if user_settings.use_as_collateral[idx] {
+        let (last_sync, last_modified) = {
+            let collateral_lock = cache.collateral.read().await;
+            (collateral_lock.1, collateral_lock.2)
+        };
+
+        let (c, s_tx, h_tx) = (cache.clone(), sync_tx.clone(), hf_tx.clone());
+        let new_event = async move || {
+            debug!("withdraw: collateral new event user = {}", event.user);
+
+            let mut collateral_lock = c.collateral.write().await;
+            (collateral_lock.1, collateral_lock.2) = (now, now);
+            let mut row_lock = collateral_lock.0[row_num].write().await;
+            row_lock[idx] -= f64::from(event.amount);
+            s_tx.send(SyncRequest::Collateral(row_num, rq_date)).await?;
+            h_tx.send(HFRequest::User(event.user, rq_date)).await?;
+
+            Ok(())
+        };
+        let skip_event = async move || {
+            debug!(
+                "event dated before sync:\
+                     event = withdraw, user = {}, rq_date = {}, collateral sync = {}, collateral rq_date = {}",
+                event.user, rq_date, last_sync, last_modified,
+            );
+
+            Ok(())
+        };
+
+        handle_event(
+            &event.user,
+            &cache,
+            &tokens,
+            provider.clone(),
+            &sync_tx,
+            &hf_tx,
+            rq_date,
+            last_sync,
+            last_modified,
+            new_event,
+            skip_event,
+        )
+        .await?;
+    } else {
+        let (last_sync, last_modified) = {
+            let reserve_lock = cache.reserve.read().await;
+            (reserve_lock.1, reserve_lock.2)
+        };
+
+        let c = cache.clone();
+        let new_event = async move || {
+            debug!("withdraw: reserve new event user = {}", event.user);
+
+            let mut reserve_lock = c.reserve.write().await;
+            (reserve_lock.1, reserve_lock.2) = (now, now);
+            let mut row_lock = reserve_lock.0[row_num].write().await;
+            row_lock[idx] -= f64::from(event.amount);
+            
+            Ok(())
+        };
+        let skip_event = async move || {
+            debug!(
+                "event dated before sync:\
+                     event = withdraw, user = {}, rq_date = {}, reserve sync = {}, reserve rq_date = {}",
+                event.user, rq_date, last_sync, last_modified,
+            );
+
+            Ok(())
+        };
+
+        handle_event(
+            &event.user,
+            &cache,
+            &tokens,
+            provider.clone(),
+            &sync_tx,
+            &hf_tx,
+            rq_date,
+            last_sync,
+            last_modified,
+            new_event,
+            skip_event,
+        )
+        .await?;
+    }
+
+    debug!("{}", {
+        let received = Utc::now().timestamp_micros();
+        format!(
+            "withdraw: cache = {:?}, rq_date = {}, \
+                     received = {}, delta = {} μs",
+            cache,
+            rq_date,
+            received,
+            received - rq_date
+        )
+    });
 
     Ok(())
 }
