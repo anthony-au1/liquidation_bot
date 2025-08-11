@@ -1,6 +1,6 @@
 use crate::arbitrum::arbitrum::IAaveOracle::IAaveOracleInstance;
 use crate::arbitrum::arbitrum::IAaveProtocolDataProvider::{
-    getUserReserveDataReturn, IAaveProtocolDataProviderInstance, TokenData,
+    IAaveProtocolDataProviderInstance, TokenData, getUserReserveDataReturn,
 };
 use crate::arbitrum::arbitrum::IChainlinkAggregator::IChainlinkAggregatorEvents;
 use crate::arbitrum::arbitrum::IL2Pool::IL2PoolEvents;
@@ -13,19 +13,20 @@ use alloy::providers::Provider;
 use alloy::rpc::types::Filter;
 use alloy::sol;
 use alloy::sol_types::SolEventInterface;
+use alloy_primitives::U256;
 use async_trait::async_trait;
 use bitvec::prelude::*;
 use chrono::Utc;
 use dashmap::DashMap;
 use eyre::eyre;
 use futures::future::try_join_all;
-use ndarray::{concatenate, Array1, Array2, Axis};
+use ndarray::{Array1, Array2, Axis, concatenate};
 use std::collections::HashMap;
 use std::default::Default;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::RwLock;
+use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::{task, time};
 use tracing::{debug, error};
 
@@ -157,6 +158,11 @@ sol! {
     interface IChainlinkAggregator {
         event AnswerUpdated(int256 indexed current, uint256 indexed roundId, uint256 timestamp);
     }
+
+    #[sol(rpc)]
+    interface IERC20Metadata {
+        function decimals() external view returns (uint8);
+    }
 }
 
 #[async_trait]
@@ -181,18 +187,19 @@ pub trait DataProvider: Send + Sync {
         token: &Address,
         user: &Address,
     ) -> eyre::Result<UserReserveData>;
+    async fn get_decimal(&self, token: &Address) -> eyre::Result<f64>;
 }
 
 pub struct UserReserveData {
     pub usage_as_collateral_enabled: bool,
-    pub current_atoken_balance: f64,
-    pub current_variable_debt: f64,
+    pub current_atoken_balance: U256,
+    pub current_variable_debt: U256,
 }
 
 impl UserReserveData {
     pub fn new(
-        current_atoken_balance: f64,
-        current_variable_debt: f64,
+        current_atoken_balance: U256,
+        current_variable_debt: U256,
         usage_as_collateral_enabled: bool,
     ) -> Self {
         Self {
@@ -303,7 +310,7 @@ where
             .call()
             .await?;
 
-        Ok(f64::from(data.liquidationThreshold))
+        Ok(data.liquidationThreshold.as_f64(10_f64.powf(4_f64)))
     }
 
     async fn get_user_reserve_data(
@@ -323,10 +330,19 @@ where
             .await?;
 
         Ok(UserReserveData::new(
-            f64::from(current_atoken_balance),
-            f64::from(current_variable_debt),
+            current_atoken_balance,
+            current_variable_debt,
             bool::from(usage_as_collateral_enabled),
         ))
+    }
+
+    async fn get_decimal(&self, token: &Address) -> eyre::Result<f64> {
+        let decimals = IERC20Metadata::new(token.clone(), &self.provider)
+            .decimals()
+            .call()
+            .await?;
+
+        Ok(10_f64.powf(decimals as f64))
     }
 }
 
@@ -334,17 +350,24 @@ pub(crate) type Tokens = HashMap<Address, TokenDetails>;
 
 #[derive(Debug)]
 pub(crate) struct TokenDetails {
-    pub(in crate::arbitrum) name: String,
-    pub(in crate::arbitrum) price_source: Address,
-    pub(in crate::arbitrum) order: usize,
+    pub(crate) name: String,
+    pub(crate) price_source: Address,
+    pub(crate) order: usize,
+    pub(crate) decimal: f64,
 }
 
 impl TokenDetails {
-    pub(in crate::arbitrum) fn new(name: String, price_source: Address, order: usize) -> Self {
+    pub(in crate::arbitrum) fn new(
+        name: String,
+        price_source: Address,
+        order: usize,
+        decimal: f64,
+    ) -> Self {
         Self {
             name,
             price_source,
             order,
+            decimal,
         }
     }
 }
@@ -360,7 +383,7 @@ where
 
     debug!("start: tokens = {:?}", tokens);
 
-    cache.init(tokens.len()).await?;
+    cache.init(&tokens).await?;
 
     let (tx_events, mut rc_events) = channel::<AaveEvents>(1000_000);
     listen_events(provider.clone(), tx_events.clone()).await?;
@@ -617,12 +640,13 @@ where
         );
 
         let asset_source = provider.get_source_of_asset(&token.tokenAddress).await?;
+        let decimal = provider.get_decimal(&token.tokenAddress).await?;
 
         debug!("setup: token asset_address = {}", asset_source);
 
         tokens.insert(
             token.tokenAddress,
-            TokenDetails::new(token.symbol, asset_source, order),
+            TokenDetails::new(token.symbol, asset_source, order, decimal),
         );
         order += 1;
     }
@@ -925,7 +949,7 @@ async fn listen_hf_calc_handler(cache: &Cache, rc: &mut Receiver<HFRequest>) -> 
 
 pub type UserDetails = DashMap<Address, UserSettings>;
 pub type Array = RwLock<(Array1<f64>, TimeStamp)>;
-pub type Arrays = RwLock<(Vec<RwLock<Array1<f64>>>, TimeStamp, TimeStamp)>;
+pub type Arrays = RwLock<(Vec<RwLock<Array1<U256>>>, TimeStamp, TimeStamp)>;
 pub type Matrix = RwLock<Array2<f64>>;
 
 #[derive(Default, Debug, Clone)]
@@ -947,6 +971,7 @@ impl UserSettings {
 pub struct Cache {
     pub users: UserDetails,
     pub users_num: RwLock<usize>,
+    pub decimal: Array,
     pub reserve: Arrays,
     pub collateral: Arrays,
     pub collateral_matrix: Matrix,
@@ -958,11 +983,19 @@ pub struct Cache {
 }
 
 impl Cache {
-    pub(crate) async fn init(&self, token_num: usize) -> eyre::Result<()> {
+    pub(crate) async fn init(&self, tokens: &Tokens) -> eyre::Result<()> {
+        let token_num = tokens.len();
         *self.collateral_matrix.write().await = Array2::from_elem((0, token_num), 0.0);
         *self.borrowed_matrix.write().await = Array2::from_elem((0, token_num), 0.0);
 
         let now = Utc::now().timestamp_micros();
+
+        let mut decimals = vec![0.0; token_num];
+        for (_, TokenDetails { order, decimal, .. }) in tokens {
+            decimals[*order] = *decimal;
+        }
+        *self.decimal.write().await = (Array1::from_vec(decimals), now);
+
         *self.prices.write().await = (Array1::from_elem(token_num, 0.0), now);
         *self.liquidation_threshold.write().await = (Array1::from_elem(token_num, 0.0), now);
         *self.health_factors.write().await = (Array1::from_elem(0, 0.0), now);
@@ -1071,25 +1104,28 @@ impl Cache {
         let now = Utc::now().timestamp_micros();
         {
             let collaterals = &mut *self.collateral.write().await;
-            collaterals
-                .0
-                .push(RwLock::new(Array1::from_vec(vec![0.0; tokens.len()])));
+            collaterals.0.push(RwLock::new(Array1::from_vec(vec![
+                U256::default();
+                tokens.len()
+            ])));
             (collaterals.1, collaterals.2) = (now, now);
         }
 
         {
             let reserves = &mut *self.reserve.write().await;
-            reserves
-                .0
-                .push(RwLock::new(Array1::from_vec(vec![0.0; tokens.len()])));
+            reserves.0.push(RwLock::new(Array1::from_vec(vec![
+                U256::default();
+                tokens.len()
+            ])));
             (reserves.1, reserves.2) = (now, now);
         }
 
         {
             let borroweds = &mut *self.borrowed.write().await;
-            borroweds
-                .0
-                .push(RwLock::new(Array1::from_vec(vec![0.0; tokens.len()])));
+            borroweds.0.push(RwLock::new(Array1::from_vec(vec![
+                U256::default();
+                tokens.len()
+            ])));
             (borroweds.1, borroweds.2) = (now, now);
         }
 
@@ -1111,7 +1147,7 @@ impl Cache {
         provider: Arc<P>,
         tokens: &Tokens,
         user: &Address,
-    ) -> eyre::Result<(Vec<f64>, Vec<f64>, Vec<f64>)>
+    ) -> eyre::Result<(Vec<U256>, Vec<U256>, Vec<U256>)>
     where
         P: DataProvider + 'static,
     {
@@ -1127,14 +1163,14 @@ impl Cache {
 
         let user_reserve_data = try_join_all(tasks).await?;
 
-        let (mut collateral, mut reserve, mut user_settings, mut borrowed) = (
-            vec![0.0; tokens.len()],
-            vec![0.0; tokens.len()],
+        let (mut collateral, mut reserve, mut borrowed, mut user_settings) = (
+            vec![U256::default(); tokens.len()],
+            vec![U256::default(); tokens.len()],
+            vec![U256::default(); tokens.len()],
             self.users
                 .get(user)
                 .ok_or_else(|| eyre!("user = {:?} not found", user))?
                 .clone(),
-            vec![0.0; tokens.len()],
         );
 
         for (
@@ -1219,6 +1255,7 @@ impl Cache {
     ) -> eyre::Result<()> {
         let col_lock = self.collateral.read().await;
         let mut col_matrix_lock = self.collateral_matrix.write().await;
+        let (decimals, _) = &*self.decimal.read().await;
 
         debug!(
             "sync_collateral: row_num = {}, col_lock = {:?}",
@@ -1233,7 +1270,13 @@ impl Cache {
                 .ok_or_else(|| eyre!("row = {} not found in collateral", col_matrix_lock.nrows()))?
                 .read()
                 .await;
-            col_matrix_lock.push_row(row_lock.view())?;
+            let row = Array1::from_iter(
+                row_lock
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, v)| v.as_f64(decimals[idx])),
+            );
+            col_matrix_lock.push_row(row.view())?;
         }
 
         debug!(
@@ -1261,6 +1304,12 @@ impl Cache {
             .ok_or_else(|| eyre!("row = {} not found in collateral", row_num))?
             .read()
             .await;
+
+        let row = Array1::from_iter(
+            row.iter()
+                .enumerate()
+                .map(|(idx, v)| v.as_f64(decimals[idx])),
+        );
         col_matrix_lock.row_mut(row_num).assign(&row);
 
         debug!("{}", {
@@ -1285,6 +1334,7 @@ impl Cache {
     ) -> eyre::Result<()> {
         let bor_lock = self.borrowed.read().await;
         let mut bor_matrix_lock = self.borrowed_matrix.write().await;
+        let (decimals, _) = &*self.decimal.read().await;
 
         debug!(
             "sync_borrowed: row_num = {}, bor_lock = {:?}",
@@ -1299,7 +1349,14 @@ impl Cache {
                 .ok_or_else(|| eyre!("row = {} not found in borrowed", bor_matrix_lock.nrows()))?
                 .read()
                 .await;
-            bor_matrix_lock.push_row(row_lock.view())?;
+
+            let row = Array1::from_iter(
+                row_lock
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, v)| v.as_f64(decimals[idx])),
+            );
+            bor_matrix_lock.push_row(row.view())?;
         }
 
         debug!(
@@ -1327,6 +1384,12 @@ impl Cache {
             .ok_or_else(|| eyre!("row = {} not found in borrowed", row_num))?
             .read()
             .await;
+
+        let row = Array1::from_iter(
+            row.iter()
+                .enumerate()
+                .map(|(idx, v)| v.as_f64(decimals[idx])),
+        );
         bor_matrix_lock.row_mut(row_num).assign(&row);
 
         debug!("{}", {
@@ -1362,7 +1425,7 @@ impl Cache {
     ) -> eyre::Result<()> {
         let lt = {
             let (lt, _) = &*self.liquidation_threshold.read().await;
-            lt.view().to_owned() / 10_000.0
+            lt.view().to_owned()
         };
         let price = {
             let (price, _) = &*self.prices.read().await;
@@ -1376,24 +1439,35 @@ impl Cache {
                 .get(user)
                 .ok_or_else(|| eyre!("user = {:?} not found", user))?
                 .row_num;
+            let (decimals, _) = &*self.decimal.read().await;
 
             let col_eff = {
                 let (collateral, _, _) = &*self.collateral.read().await;
-                let col_row_lock = collateral
-                    .get(row_num)
-                    .ok_or_else(|| eyre!("row = {} not found in collateral", row_num))?
-                    .read()
-                    .await;
+                let col_row_lock = Array1::from_iter(
+                    collateral
+                        .get(row_num)
+                        .ok_or_else(|| eyre!("row = {} not found in collateral", row_num))?
+                        .read()
+                        .await
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, v)| v.as_f64(decimals[idx])),
+                );
                 col_row_lock.dot(&ltp)
             };
 
             let bor_eff = {
                 let (borrowed, _, _) = &*self.borrowed.read().await;
-                let bor_row_lock = borrowed
-                    .get(row_num)
-                    .ok_or_else(|| eyre!("row = {} not found in borrowed", row_num))?
-                    .read()
-                    .await;
+                let bor_row_lock = Array1::from_iter(
+                    borrowed
+                        .get(row_num)
+                        .ok_or_else(|| eyre!("row = {} not found in borrowed", row_num))?
+                        .read()
+                        .await
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, v)| v.as_f64(decimals[idx])),
+                );
                 bor_row_lock.dot(&price)
             };
 
@@ -1451,5 +1525,15 @@ impl Cache {
         });
 
         Ok(())
+    }
+}
+
+pub(crate) trait U256Converter {
+    fn as_f64(&self, decimal: f64) -> f64;
+}
+
+impl U256Converter for U256 {
+    fn as_f64(&self, decimal: f64) -> f64 {
+        self.saturating_to::<u128>() as f64 / decimal
     }
 }

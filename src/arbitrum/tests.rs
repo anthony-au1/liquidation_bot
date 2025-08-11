@@ -2,12 +2,12 @@ use crate::arbitrum::arbitrum::IAaveProtocolDataProvider::TokenData;
 use crate::arbitrum::arbitrum::IChainlinkAggregator::{AnswerUpdated, IChainlinkAggregatorEvents};
 use crate::arbitrum::arbitrum::IL2Pool::{IL2PoolEvents, Supply, Withdraw};
 use crate::arbitrum::arbitrum::{
-    AaveEvents, Cache, DataProvider, HFRequest, RqDate, SyncRequest, Token, TokenDetails,
-    UserReserveData, UserSettings, liquidation_threshold_update, listen_events, listen_hf_calc,
-    listen_price_update, listen_sync, setup,
+    liquidation_threshold_update, listen_events, listen_hf_calc, listen_price_update, listen_sync, setup, AaveEvents, Cache,
+    DataProvider, HFRequest, RqDate, SyncRequest, Token,
+    TokenDetails, U256Converter, UserReserveData, UserSettings,
 };
 use crate::arbitrum::events::{answer_updated, create_user, supply, withdraw};
-use alloy_primitives::Address;
+use alloy_primitives::{Address, I256, U256};
 use async_trait::async_trait;
 use bitvec::order::Lsb0;
 use bitvec::prelude::BitVec;
@@ -18,8 +18,8 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
 use tokio::sync::mpsc::channel;
+use tokio::sync::RwLock;
 use tokio::task;
 use tokio::time::sleep;
 
@@ -66,7 +66,7 @@ impl DataProvider for DummyDataProvider {
             reserve: Address::from_str("0x1Ac54C113cefD1792CbFcF41B711824d657eb61D")?,
             user: user.clone(),
             onBehalfOf: user,
-            amount: alloy_primitives::U256::from(6.0),
+            amount: U256::from(6.0),
             referralCode: 0,
         };
         callback(IL2PoolEvents::Supply(event)).await
@@ -105,9 +105,9 @@ impl DataProvider for DummyDataProvider {
 
         let event = AnswerUpdated {
             // 161230000000 / 10^8 = 1612.30 USD
-            current: alloy_primitives::I256::try_from(current)?,
-            roundId: alloy_primitives::U256::from(0),
-            timestamp: alloy_primitives::U256::from(Utc::now().timestamp()),
+            current: I256::try_from(current)?,
+            roundId: U256::from(0),
+            timestamp: U256::from(Utc::now().timestamp()),
         };
 
         callback(IChainlinkAggregatorEvents::AnswerUpdated(event)).await
@@ -116,13 +116,11 @@ impl DataProvider for DummyDataProvider {
     async fn get_reserve_configuration_data(&self, token_address: &Address) -> eyre::Result<f64> {
         let lt = match token_address.clone() {
             addr if addr == Address::from_str("0x1Ac54C113cefD1792CbFcF41B711824d657eb61D")? => {
-                7800.0
+                0.78
             }
-            addr if addr == Address::from_str("0x1Af54C113cefD1792CbFcF41B711834d657ea61D")? => {
-                8000.0
-            }
+            addr if addr == Address::from_str("0x1Af54C113cefD1792CbFcF41B711834d657ea61D")? => 0.8,
             addr if addr == Address::from_str("0x1Af54C113cefD1792CbFcF41B711824d657eb61D")? => {
-                7500.0
+                0.75
             }
             _ => return Err(eyre!("Invalid token address")),
         };
@@ -137,15 +135,48 @@ impl DataProvider for DummyDataProvider {
     ) -> eyre::Result<UserReserveData> {
         let urd = match token_address {
             t if *t == Address::from_str("0x1Ac54C113cefD1792CbFcF41B711824d657eb61D")? => {
-                UserReserveData::new(1.0, 1.0, false)
+                UserReserveData::new(
+                    U256::from(10.0 * 10_f64.powf(18_f64)),
+                    U256::from(10.0 * 10_f64.powf(18_f64)),
+                    false,
+                )
             }
             t if *t == Address::from_str("0x1Af54C113cefD1792CbFcF41B711834d657ea61D")? => {
-                UserReserveData::new(2.0, 2.0, true)
+                UserReserveData::new(
+                    U256::from(20.0 * 10_f64.powf(6_f64)),
+                    U256::from(20.0 * 10_f64.powf(6_f64)),
+                    true,
+                )
             }
             t if *t == Address::from_str("0x1Af54C113cefD1792CbFcF41B711824d657eb61D")? => {
-                UserReserveData::new(3.0, 3.0, false)
+                UserReserveData::new(
+                    U256::from(30.0 * 10_f64.powf(12_f64)),
+                    U256::from(30.0 * 10_f64.powf(12_f64)),
+                    false,
+                )
             }
-            _ => UserReserveData::new(4.0, 4.0, true),
+            _ => UserReserveData::new(
+                U256::from(40.0 * 10_f64.powf(18_f64)),
+                U256::from(40.0 * 10_f64.powf(18_f64)),
+                true,
+            ),
+        };
+
+        Ok(urd)
+    }
+
+    async fn get_decimal(&self, token: &Address) -> eyre::Result<f64> {
+        let urd = match token {
+            t if *t == Address::from_str("0x1Ac54C113cefD1792CbFcF41B711824d657eb61D")? => {
+                10_f64.powf(18_f64)
+            }
+            t if *t == Address::from_str("0x1Af54C113cefD1792CbFcF41B711834d657ea61D")? => {
+                10_f64.powf(6_f64)
+            }
+            t if *t == Address::from_str("0x1Af54C113cefD1792CbFcF41B711824d657eb61D")? => {
+                10_f64.powf(12_f64)
+            }
+            _ => 10_f64.powf(18_f64),
         };
 
         Ok(urd)
@@ -164,6 +195,7 @@ async fn generate_cache_and_tokens(
             String::from("AAVE"),
             Address::from_str("0xba5DdD1f9d7F570dc94a51479a000E3BCE967196")?,
             0,
+            10_f64.powf(18_f64),
         ),
     );
     tokens.insert(
@@ -172,6 +204,7 @@ async fn generate_cache_and_tokens(
             String::from("USDC"),
             Address::from_str("0xaf88d065e77c8cC2239327C5EDb3A432268e5831")?,
             1,
+            10_f64.powf(6_f64),
         ),
     );
     tokens.insert(
@@ -180,6 +213,7 @@ async fn generate_cache_and_tokens(
             String::from("DAI"),
             Address::from_str("0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1")?,
             2,
+            10_f64.powf(12_f64),
         ),
     );
 
@@ -196,15 +230,15 @@ async fn generate_cache_and_tokens(
             user_addr = user_addr.create((i + 1) as u64);
 
             let (collaterals, sync_ts, modified_ts) = &mut *cache.collateral.write().await;
-            collaterals.push(RwLock::new(Array1::from_vec(vec![0.0; 3])));
+            collaterals.push(RwLock::new(Array1::from_vec(vec![U256::default(); 3])));
             (*sync_ts, *modified_ts) = (now, now);
 
             let (reserves, sync_ts, modified_ts) = &mut *cache.reserve.write().await;
-            reserves.push(RwLock::new(Array1::from_vec(vec![0.0; 3])));
+            reserves.push(RwLock::new(Array1::from_vec(vec![U256::default(); 3])));
             (*sync_ts, *modified_ts) = (now, now);
 
             let (borroweds, sync_ts, modified_ts) = &mut *cache.borrowed.write().await;
-            borroweds.push(RwLock::new(Array1::from_vec(vec![0.0; 3])));
+            borroweds.push(RwLock::new(Array1::from_vec(vec![U256::default(); 3])));
             (*sync_ts, *modified_ts) = (now, now);
 
             let (hf, _) = &mut *cache.health_factors.write().await;
@@ -226,7 +260,7 @@ async fn generate_cache_and_tokens(
 async fn get_all_user_data(
     cache: &Cache,
     user_row_num: usize,
-) -> eyre::Result<(Vec<f64>, Vec<f64>, Vec<f64>)> {
+) -> eyre::Result<(Vec<U256>, Vec<U256>, Vec<U256>)> {
     let (collateral, reserve, borrowed) = {
         let (collaterals, _, _) = &*cache.collateral.read().await;
         let collateral = &*collaterals
@@ -263,24 +297,39 @@ async fn get_all_user_data(
 async fn test_sync_collateral() -> eyre::Result<()> {
     let rq_date = Utc::now().timestamp_micros();
     let cache = Cache::default();
-    let row = vec![1.0, 2.0, 3.0];
+    let row = vec![
+        U256::from(10.0 * 10_f64.powf(18_f64)),
+        U256::from(20.0 * 10_f64.powf(6_f64)),
+        U256::from(30.0 * 10_f64.powf(12_f64)),
+    ];
     let row_len = row.len();
     {
         let now = Utc::now().timestamp_micros();
         *cache.collateral.write().await =
             (vec![RwLock::new(Array1::from_vec(row.clone()))], now, now);
-        *cache.collateral_matrix.write().await = Array2::from_elem((1, row_len), 0.);
+        *cache.collateral_matrix.write().await = Array2::from_elem((1, row_len), 0.0);
     }
 
     cache.sync_collateral(0, rq_date).await?;
 
-    let mut expected = Array2::from_shape_vec((1, row_len), row)?;
+    let mut expected = Array2::from_shape_vec(
+        (1, row_len),
+        vec![
+            U256::from(10.0 * 10_f64.powf(18_f64)).as_f64(10_f64.powf(18_f64)),
+            U256::from(20.0 * 10_f64.powf(6_f64)).as_f64(10_f64.powf(6_f64)),
+            U256::from(30.0 * 10_f64.powf(12_f64)).as_f64(10_f64.powf(12_f64)),
+        ],
+    )?;
     {
         let collateral_matrix = &*cache.collateral_matrix.read().await;
         assert_eq!(collateral_matrix, expected);
     }
 
-    let row = vec![4.0, 5.0, 6.0];
+    let row = vec![
+        U256::from(40.0 * 10_f64.powf(18_f64)),
+        U256::from(50.0 * 10_f64.powf(6_f64)),
+        U256::from(60.0 * 10_f64.powf(12_f64)),
+    ];
     {
         let (collateral, _, _) = &mut *cache.collateral.write().await;
         collateral.push(RwLock::new(Array1::from_vec(row.clone())));
@@ -288,13 +337,24 @@ async fn test_sync_collateral() -> eyre::Result<()> {
 
     cache.sync_collateral(1, rq_date).await?;
 
-    expected.push_row(Array1::from(row).view())?;
+    expected.push_row(
+        Array1::from_vec(vec![
+            U256::from(40.0 * 10_f64.powf(18_f64)).as_f64(10_f64.powf(18_f64)),
+            U256::from(50.0 * 10_f64.powf(6_f64)).as_f64(10_f64.powf(6_f64)),
+            U256::from(60.0 * 10_f64.powf(12_f64)).as_f64(10_f64.powf(12_f64)),
+        ])
+        .view(),
+    )?;
     {
         let collateral_matrix = &*cache.collateral_matrix.read().await;
         assert_eq!(collateral_matrix, expected);
     }
 
-    let row = vec![7.0, 8.0, 9.0];
+    let row = vec![
+        U256::from(70.0 * 10_f64.powf(18_f64)),
+        U256::from(80.0 * 10_f64.powf(6_f64)),
+        U256::from(90.0 * 10_f64.powf(12_f64)),
+    ];
     {
         let (collateral, _, _) = &mut *cache.collateral.write().await;
         collateral.push(RwLock::new(Array1::from_vec(row.clone())));
@@ -302,7 +362,14 @@ async fn test_sync_collateral() -> eyre::Result<()> {
 
     cache.sync_collateral(2, rq_date).await?;
 
-    expected.push_row(Array1::from(row).view())?;
+    expected.push_row(
+        Array1::from_vec(vec![
+            U256::from(70.0 * 10_f64.powf(18_f64)).as_f64(10_f64.powf(18_f64)),
+            U256::from(80.0 * 10_f64.powf(6_f64)).as_f64(10_f64.powf(6_f64)),
+            U256::from(90.0 * 10_f64.powf(12_f64)).as_f64(10_f64.powf(12_f64)),
+        ])
+        .view(),
+    )?;
     {
         let collateral_matrix = &*cache.collateral_matrix.read().await;
         assert_eq!(collateral_matrix, expected);
@@ -315,16 +382,16 @@ async fn test_sync_collateral() -> eyre::Result<()> {
             .ok_or_else(|| eyre!("row = 1 not found in collateral"))?
             .write()
             .await;
-        col_row[0] = 40.0;
-        col_row[1] = 50.0;
-        col_row[2] = 60.0;
+        col_row[0] = U256::from(400.0 * 10_f64.powf(18_f64));
+        col_row[1] = U256::from(500.0 * 10_f64.powf(6_f64));
+        col_row[2] = U256::from(600.0 * 10_f64.powf(12_f64));
     }
 
     cache.sync_collateral(1, rq_date).await?;
 
-    expected[(1, 0)] = 40.0;
-    expected[(1, 1)] = 50.0;
-    expected[(1, 2)] = 60.0;
+    expected[(1, 0)] = 400.0;
+    expected[(1, 1)] = 500.0;
+    expected[(1, 2)] = 600.0;
 
     {
         let collateral_matrix = &*cache.collateral_matrix.read().await;
@@ -338,24 +405,39 @@ async fn test_sync_collateral() -> eyre::Result<()> {
 async fn test_sync_borrowed() -> eyre::Result<()> {
     let rq_date = Utc::now().timestamp_micros();
     let cache = Cache::default();
-    let row = vec![1.0, 2.0, 3.0];
+    let row = vec![
+        U256::from(10.0 * 10_f64.powf(18_f64)),
+        U256::from(20.0 * 10_f64.powf(6_f64)),
+        U256::from(30.0 * 10_f64.powf(12_f64)),
+    ];
     let row_len = row.len();
     {
         let now = Utc::now().timestamp_micros();
         *cache.borrowed.write().await =
             (vec![RwLock::new(Array1::from_vec(row.clone()))], now, now);
-        *cache.borrowed_matrix.write().await = Array2::from_elem((1, row_len), 0.);
+        *cache.borrowed_matrix.write().await = Array2::from_elem((1, row_len), 0.0);
     }
 
     cache.sync_borrowed(0, rq_date).await?;
 
-    let mut expected = Array2::from_shape_vec((1, row_len), row)?;
+    let mut expected = Array2::from_shape_vec(
+        (1, row_len),
+        vec![
+            U256::from(10.0 * 10_f64.powf(18_f64)).as_f64(10_f64.powf(18_f64)),
+            U256::from(20.0 * 10_f64.powf(6_f64)).as_f64(10_f64.powf(6_f64)),
+            U256::from(30.0 * 10_f64.powf(12_f64)).as_f64(10_f64.powf(12_f64)),
+        ],
+    )?;
     {
         let borrowed_matrix = &*cache.borrowed_matrix.read().await;
         assert_eq!(borrowed_matrix, expected);
     }
 
-    let row = vec![4.0, 5.0, 6.0];
+    let row = vec![
+        U256::from(40.0 * 10_f64.powf(18_f64)),
+        U256::from(50.0 * 10_f64.powf(6_f64)),
+        U256::from(60.0 * 10_f64.powf(12_f64)),
+    ];
     {
         let (borrowed, _, _) = &mut *cache.borrowed.write().await;
         borrowed.push(RwLock::new(Array1::from_vec(row.clone())));
@@ -363,13 +445,24 @@ async fn test_sync_borrowed() -> eyre::Result<()> {
 
     cache.sync_borrowed(1, rq_date).await?;
 
-    expected.push_row(Array1::from(row).view())?;
+    expected.push_row(
+        Array1::from_vec(vec![
+            U256::from(40.0 * 10_f64.powf(18_f64)).as_f64(10_f64.powf(18_f64)),
+            U256::from(50.0 * 10_f64.powf(6_f64)).as_f64(10_f64.powf(6_f64)),
+            U256::from(60.0 * 10_f64.powf(12_f64)).as_f64(10_f64.powf(12_f64)),
+        ])
+        .view(),
+    )?;
     {
         let borrowed_matrix = &*cache.borrowed_matrix.read().await;
         assert_eq!(borrowed_matrix, expected);
     }
 
-    let row = vec![7.0, 8.0, 9.0];
+    let row = vec![
+        U256::from(70.0 * 10_f64.powf(18_f64)),
+        U256::from(80.0 * 10_f64.powf(6_f64)),
+        U256::from(90.0 * 10_f64.powf(12_f64)),
+    ];
     {
         let (borrowed, _, _) = &mut *cache.borrowed.write().await;
         borrowed.push(RwLock::new(Array1::from_vec(row.clone())));
@@ -377,7 +470,14 @@ async fn test_sync_borrowed() -> eyre::Result<()> {
 
     cache.sync_borrowed(2, rq_date).await?;
 
-    expected.push_row(Array1::from(row).view())?;
+    expected.push_row(
+        Array1::from_vec(vec![
+            U256::from(70.0 * 10_f64.powf(18_f64)).as_f64(10_f64.powf(18_f64)),
+            U256::from(80.0 * 10_f64.powf(6_f64)).as_f64(10_f64.powf(6_f64)),
+            U256::from(90.0 * 10_f64.powf(12_f64)).as_f64(10_f64.powf(12_f64)),
+        ])
+        .view(),
+    )?;
     {
         let borrowed_matrix = &*cache.borrowed_matrix.read().await;
         assert_eq!(borrowed_matrix, expected);
@@ -390,16 +490,16 @@ async fn test_sync_borrowed() -> eyre::Result<()> {
             .ok_or_else(|| eyre!("row = 1 not found in borrowed"))?
             .write()
             .await;
-        bor_row[0] = 40.0;
-        bor_row[1] = 50.0;
-        bor_row[2] = 60.0;
+        bor_row[0] = U256::from(400.0 * 10_f64.powf(18_f64));
+        bor_row[1] = U256::from(500.0 * 10_f64.powf(6_f64));
+        bor_row[2] = U256::from(600.0 * 10_f64.powf(12_f64));
     }
 
     cache.sync_borrowed(1, rq_date).await?;
 
-    expected[(1, 0)] = 40.0;
-    expected[(1, 1)] = 50.0;
-    expected[(1, 2)] = 60.0;
+    expected[(1, 0)] = 400.0;
+    expected[(1, 1)] = 500.0;
+    expected[(1, 2)] = 600.0;
 
     {
         let borrowed_matrix = &*cache.borrowed_matrix.read().await;
@@ -429,9 +529,12 @@ async fn test_sync_user() -> eyre::Result<()> {
 
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
 
-    assert_eq!(collateral, vec![0.0, 2.0, 0.0]);
-    assert_eq!(reserve, vec![1.0, 0.0, 3.0]);
-    assert_eq!(borrowed, vec![1.0, 2.0, 3.0]);
+    assert_eq!(
+        collateral,
+        vec![U256::default(), U256::from(2), U256::default()]
+    );
+    assert_eq!(reserve, vec![U256::from(1), U256::default(), U256::from(3)]);
+    assert_eq!(borrowed, vec![U256::from(1), U256::from(2), U256::from(3)]);
 
     Ok(())
 }
@@ -468,9 +571,12 @@ async fn test_init_user() -> eyre::Result<()> {
 
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
 
-    assert_eq!(collateral, vec![0.0, 2.0, 0.0]);
-    assert_eq!(reserve, vec![1.0, 0.0, 3.0]);
-    assert_eq!(borrowed, vec![1.0, 2.0, 3.0]);
+    assert_eq!(
+        collateral,
+        vec![U256::default(), U256::from(2), U256::default()]
+    );
+    assert_eq!(reserve, vec![U256::from(1), U256::default(), U256::from(3)]);
+    assert_eq!(borrowed, vec![U256::from(1), U256::from(2), U256::from(3)]);
 
     Ok(())
 }
@@ -494,9 +600,12 @@ async fn test_get_user_data() -> eyre::Result<()> {
     assert_eq!(cache.contains(&user), true);
     assert_eq!(cache.users.len(), 1);
 
-    assert_eq!(collateral, vec![0.0, 2.0, 0.0]);
-    assert_eq!(reserve, vec![1.0, 0.0, 3.0]);
-    assert_eq!(borrowed, vec![1.0, 2.0, 3.0]);
+    assert_eq!(
+        collateral,
+        vec![U256::default(), U256::from(2), U256::default()]
+    );
+    assert_eq!(reserve, vec![U256::from(1), U256::default(), U256::from(3)]);
+    assert_eq!(borrowed, vec![U256::from(1), U256::from(2), U256::from(3)]);
 
     Ok(())
 }
@@ -553,7 +662,11 @@ async fn test_subscribe() -> eyre::Result<()> {
                 .ok_or_else(|| eyre!("row = 0 not found in collateral"))?
                 .write()
                 .await;
-            *col = Array1::from(vec![7.0, 7.0, 7.0]);
+            *col = Array1::from(vec![
+                U256::from(70.0 * 10_f64.powf(18_f64)),
+                U256::from(70.0 * 10_f64.powf(6_f64)),
+                U256::from(70.0 * 10_f64.powf(12_f64)),
+            ]);
 
             Ok(())
         }
@@ -584,7 +697,14 @@ async fn test_subscribe() -> eyre::Result<()> {
         .ok_or_else(|| eyre!("row = 0 not found in collateral"))?
         .write()
         .await;
-    assert_eq!(*col, Array1::from(vec![7.0, 7.0, 7.0]));
+    assert_eq!(
+        *col,
+        Array1::from(vec![
+            U256::from(70.0 * 10_f64.powf(18_f64)),
+            U256::from(70.0 * 10_f64.powf(6_f64)),
+            U256::from(70.0 * 10_f64.powf(12_f64)),
+        ])
+    );
 
     Ok(())
 }
@@ -604,7 +724,7 @@ async fn test_calc_hf() -> eyre::Result<()> {
 
     {
         let (lt, _) = &mut *cache.liquidation_threshold.write().await;
-        *lt = Array1::from_vec(vec![0.0, 7500.0, 8000.0]);
+        *lt = Array1::from_vec(vec![0.0, 0.75, 0.8]);
 
         let (price, _) = &mut *cache.prices.write().await;
         *price = Array1::from_vec(vec![120_000.0, 4000.0, 200.0]);
@@ -618,7 +738,11 @@ async fn test_calc_hf() -> eyre::Result<()> {
             .ok_or_else(|| eyre!("row = 0 not found in collateral"))?
             .write()
             .await;
-        *col_row = Array1::from_vec(vec![2.0, 10.0, 200.0]);
+        *col_row = Array1::from_vec(vec![
+            U256::from(2.0 * 10_f64.powf(18_f64)),
+            U256::from(10.0 * 10_f64.powf(6_f64)),
+            U256::from(200.0 * 10_f64.powf(12_f64)),
+        ]);
 
         let (borroweds, _, _) = &mut *cache.borrowed.write().await;
         let mut bor_row = borroweds
@@ -626,7 +750,11 @@ async fn test_calc_hf() -> eyre::Result<()> {
             .ok_or_else(|| eyre!("row = 0 not found in borrowed"))?
             .write()
             .await;
-        *bor_row = Array1::from_vec(vec![1.5, 15.0, 0.0]);
+        *bor_row = Array1::from_vec(vec![
+            U256::from(1.0 * 10_f64.powf(18_f64)),
+            U256::from(15.0 * 10_f64.powf(6_f64)),
+            U256::default(),
+        ]);
     }
 
     cache
@@ -646,7 +774,7 @@ async fn test_calc_hf() -> eyre::Result<()> {
 
     {
         let (lt, _) = &mut *cache.liquidation_threshold.write().await;
-        *lt = Array1::from_vec(vec![0.0, 7500.0, 8000.0]);
+        *lt = Array1::from_vec(vec![0.0, 0.75, 0.8]);
 
         let (price, _) = &mut *cache.prices.write().await;
         *price = Array1::from_vec(vec![120_000.0, 4000.0, 200.0]);
@@ -655,24 +783,48 @@ async fn test_calc_hf() -> eyre::Result<()> {
         *hf = Array1::from_vec(vec![0.0; 3]);
 
         let (collaterals, _, _) = &mut *cache.collateral.write().await;
-        collaterals.push(RwLock::new(Array1::from_vec(vec![2.0, 10.0, 200.0])));
-        collaterals.push(RwLock::new(Array1::from_vec(vec![2.0, 10.0, 200.0])));
+        collaterals.push(RwLock::new(Array1::from_vec(vec![
+            U256::from(2.0 * 10_f64.powf(18_f64)),
+            U256::from(10.0 * 10_f64.powf(6_f64)),
+            U256::from(200.0 * 10_f64.powf(12_f64)),
+        ])));
+        collaterals.push(RwLock::new(Array1::from_vec(vec![
+            U256::from(2.0 * 10_f64.powf(18_f64)),
+            U256::from(10.0 * 10_f64.powf(6_f64)),
+            U256::from(200.0 * 10_f64.powf(12_f64)),
+        ])));
         let mut col_row = collaterals
             .get(0)
             .ok_or_else(|| eyre!("row = 0 not found in collateral"))?
             .write()
             .await;
-        *col_row = Array1::from_vec(vec![2.0, 10.0, 200.0]);
+        *col_row = Array1::from_vec(vec![
+            U256::from(2.0 * 10_f64.powf(18_f64)),
+            U256::from(10.0 * 10_f64.powf(6_f64)),
+            U256::from(200.0 * 10_f64.powf(12_f64)),
+        ]);
 
         let (borroweds, _, _) = &mut *cache.borrowed.write().await;
-        borroweds.push(RwLock::new(Array1::from_vec(vec![1.5, 15.0, 0.0])));
-        borroweds.push(RwLock::new(Array1::from_vec(vec![1.5, 15.0, 0.0])));
+        borroweds.push(RwLock::new(Array1::from_vec(vec![
+            U256::from(1.0 * 10_f64.powf(18_f64)),
+            U256::from(15.0 * 10_f64.powf(6_f64)),
+            U256::default(),
+        ])));
+        borroweds.push(RwLock::new(Array1::from_vec(vec![
+            U256::from(1.0 * 10_f64.powf(18_f64)),
+            U256::from(15.0 * 10_f64.powf(6_f64)),
+            U256::default(),
+        ])));
         let mut bor_row = borroweds
             .get(0)
             .ok_or_else(|| eyre!("row = 0 not found in borrowed"))?
             .write()
             .await;
-        *bor_row = Array1::from_vec(vec![1.5, 15.0, 0.0]);
+        *bor_row = Array1::from_vec(vec![
+            U256::from(1.0 * 10_f64.powf(18_f64)),
+            U256::from(15.0 * 10_f64.powf(6_f64)),
+            U256::default(),
+        ]);
 
         *cache.collateral_matrix.write().await = Array2::from_elem((0, 3), 0.);
         let col_matrix = &mut *cache.collateral_matrix.write().await;
@@ -750,6 +902,10 @@ impl DataProvider for CreateUserDataProvider {
         _: &Address,
     ) -> eyre::Result<UserReserveData> {
         Err(eyre::eyre!("mock error"))
+    }
+
+    async fn get_decimal(&self, _: &Address) -> eyre::Result<f64> {
+        todo!()
     }
 }
 
@@ -839,9 +995,30 @@ async fn test_create_user() -> eyre::Result<()> {
     assert_eq!(cache.contains(&user), true);
     assert_eq!(cache.users.len(), 1);
 
-    assert_eq!(collateral, vec![0.0, 2.0, 0.0]);
-    assert_eq!(reserve, vec![1.0, 0.0, 3.0]);
-    assert_eq!(borrowed, vec![1.0, 2.0, 3.0]);
+    assert_eq!(
+        collateral,
+        vec![
+            U256::default(),
+            U256::from(2.0 * 10_f64.powf(6_f64)),
+            U256::default()
+        ]
+    );
+    assert_eq!(
+        reserve,
+        vec![
+            U256::from(1.0 * 10_f64.powf(18_f64)),
+            U256::default(),
+            U256::from(3.0 * 10_f64.powf(12_f64))
+        ]
+    );
+    assert_eq!(
+        borrowed,
+        vec![
+            U256::from(1.0 * 10_f64.powf(18_f64)),
+            U256::from(2.0 * 10_f64.powf(6_f64)),
+            U256::from(3.0 * 10_f64.powf(12_f64))
+        ]
+    );
 
     // 3 case - error
 
@@ -885,7 +1062,7 @@ async fn test_supply() -> eyre::Result<()> {
             .clone(),
         user: user.clone(),
         onBehalfOf: user.clone(),
-        amount: alloy_primitives::U256::from(10.0),
+        amount: U256::from(10.0 * 10_f64.powf(18_f64)),
         referralCode: 0,
     };
 
@@ -930,9 +1107,30 @@ async fn test_supply() -> eyre::Result<()> {
 
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
 
-    assert_eq!(collateral, vec![0.0, 2.0, 0.0]);
-    assert_eq!(reserve, vec![1.0, 0.0, 3.0]);
-    assert_eq!(borrowed, vec![1.0, 2.0, 3.0]);
+    assert_eq!(
+        collateral,
+        vec![
+            U256::default(),
+            U256::from(2.0 * 10_f64.powf(6_f64)),
+            U256::default()
+        ]
+    );
+    assert_eq!(
+        reserve,
+        vec![
+            U256::from(1.0 * 10_f64.powf(18_f64)),
+            U256::default(),
+            U256::from(3.0 * 10_f64.powf(12_f64))
+        ]
+    );
+    assert_eq!(
+        borrowed,
+        vec![
+            U256::from(1.0 * 10_f64.powf(18_f64)),
+            U256::from(2.0 * 10_f64.powf(6_f64)),
+            U256::from(3.0 * 10_f64.powf(12_f64))
+        ]
+    );
 
     // 2 case - collateral new event
 
@@ -954,7 +1152,7 @@ async fn test_supply() -> eyre::Result<()> {
         reserve: token.clone(),
         user: user.clone(),
         onBehalfOf: user.clone(),
-        amount: alloy_primitives::U256::from(20.0),
+        amount: U256::from(20.0 * 10_f64.powf(18_f64)),
         referralCode: 0,
     };
 
@@ -997,9 +1195,16 @@ async fn test_supply() -> eyre::Result<()> {
 
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
 
-    assert_eq!(collateral, vec![20.0, 0.0, 0.0]);
-    assert_eq!(reserve, vec![0.0, 0.0, 0.0]);
-    assert_eq!(borrowed, vec![0.0, 0.0, 0.0]);
+    assert_eq!(
+        collateral,
+        vec![
+            U256::from(20.0 * 10_f64.powf(18_f64)),
+            U256::default(),
+            U256::default()
+        ]
+    );
+    assert_eq!(reserve, vec![U256::default(); 3]);
+    assert_eq!(borrowed, vec![U256::default(); 3]);
 
     // 3 case - reserve new event
 
@@ -1021,7 +1226,7 @@ async fn test_supply() -> eyre::Result<()> {
         reserve: token.clone(),
         user: user.clone(),
         onBehalfOf: user.clone(),
-        amount: alloy_primitives::U256::from(30.0),
+        amount: U256::from(30.0 * 10_f64.powf(18_f64)),
         referralCode: 0,
     };
 
@@ -1042,9 +1247,16 @@ async fn test_supply() -> eyre::Result<()> {
 
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
 
-    assert_eq!(collateral, vec![0.0, 0.0, 0.0]);
-    assert_eq!(reserve, vec![0.0, 30.0, 0.0]);
-    assert_eq!(borrowed, vec![0.0, 0.0, 0.0]);
+    assert_eq!(collateral, vec![U256::default(); 3]);
+    assert_eq!(
+        reserve,
+        vec![
+            U256::default(),
+            U256::from(30.0 * 10_f64.powf(6_f64)),
+            U256::default()
+        ]
+    );
+    assert_eq!(borrowed, vec![U256::default(); 3]);
 
     // 4 case - collateral skip event
 
@@ -1065,7 +1277,7 @@ async fn test_supply() -> eyre::Result<()> {
         reserve: token.clone(),
         user: user.clone(),
         onBehalfOf: user.clone(),
-        amount: alloy_primitives::U256::from(40.0),
+        amount: U256::from(40.0 * 10_f64.powf(18_f64)),
         referralCode: 0,
     };
 
@@ -1086,9 +1298,9 @@ async fn test_supply() -> eyre::Result<()> {
 
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
 
-    assert_eq!(collateral, vec![0.0, 0.0, 0.0]);
-    assert_eq!(reserve, vec![0.0, 0.0, 0.0]);
-    assert_eq!(borrowed, vec![0.0, 0.0, 0.0]);
+    assert_eq!(collateral, vec![U256::default(); 3]);
+    assert_eq!(reserve, vec![U256::default(); 3]);
+    assert_eq!(borrowed, vec![U256::default(); 3]);
 
     // 5 case - reserve skip event
 
@@ -1109,7 +1321,7 @@ async fn test_supply() -> eyre::Result<()> {
         reserve: token.clone(),
         user: user.clone(),
         onBehalfOf: user.clone(),
-        amount: alloy_primitives::U256::from(50.0),
+        amount: U256::from(50.0 * 10_f64.powf(18_f64)),
         referralCode: 0,
     };
 
@@ -1130,9 +1342,9 @@ async fn test_supply() -> eyre::Result<()> {
 
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
 
-    assert_eq!(collateral, vec![0.0, 0.0, 0.0]);
-    assert_eq!(reserve, vec![0.0, 0.0, 0.0]);
-    assert_eq!(borrowed, vec![0.0, 0.0, 0.0]);
+    assert_eq!(collateral, vec![U256::default(); 3]);
+    assert_eq!(reserve, vec![U256::default(); 3]);
+    assert_eq!(borrowed, vec![U256::default(); 3]);
 
     // 6 case - skip event
 
@@ -1147,7 +1359,7 @@ async fn test_supply() -> eyre::Result<()> {
         reserve: token.clone(),
         user: user.clone(),
         onBehalfOf: user.clone(),
-        amount: alloy_primitives::U256::from(40.0),
+        amount: U256::from(40.0 * 10_f64.powf(18_f64)),
         referralCode: 0,
     };
 
@@ -1195,9 +1407,30 @@ async fn test_supply() -> eyre::Result<()> {
 
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
 
-    assert_eq!(collateral, vec![0.0, 2.0, 0.0]);
-    assert_eq!(reserve, vec![1.0, 0.0, 3.0]);
-    assert_eq!(borrowed, vec![1.0, 2.0, 3.0]);
+    assert_eq!(
+        collateral,
+        vec![
+            U256::default(),
+            U256::from(2.0 * 10_f64.powf(6_f64)),
+            U256::default()
+        ]
+    );
+    assert_eq!(
+        reserve,
+        vec![
+            U256::from(1.0 * 10_f64.powf(18_f64)),
+            U256::default(),
+            U256::from(3.0 * 10_f64.powf(12_f64))
+        ]
+    );
+    assert_eq!(
+        borrowed,
+        vec![
+            U256::from(1.0 * 10_f64.powf(18_f64)),
+            U256::from(2.0 * 10_f64.powf(6_f64)),
+            U256::from(3.0 * 10_f64.powf(12_f64))
+        ]
+    );
 
     Ok(())
 }
@@ -1245,7 +1478,7 @@ async fn test_listen_events() -> eyre::Result<()> {
         reserve: Address::from_str("0x1Ac54C113cefD1792CbFcF41B711824d657eb61D")?,
         user: user.clone(),
         onBehalfOf: user,
-        amount: alloy_primitives::U256::from(6.0),
+        amount: U256::from(6.0),
         referralCode: 0,
     };
 
@@ -1357,7 +1590,7 @@ async fn test_liquidation_threshold_update() -> eyre::Result<()> {
 
     {
         let (lt, _) = &mut *cache.liquidation_threshold.write().await;
-        *lt = Array1::from_vec(vec![9000.0, 9000.0, 9000.0]);
+        *lt = Array1::from_vec(vec![0.9, 0.9, 0.9]);
     }
     let now = Utc::now().timestamp_micros();
     let new_update = now;
@@ -1388,7 +1621,7 @@ async fn test_liquidation_threshold_update() -> eyre::Result<()> {
     let _ = hf_handler.await?;
 
     let (lt, last_modified) = &*cache.liquidation_threshold.read().await;
-    assert_eq!(*lt, Array1::from_vec(vec![7800.0, 8000.0, 7500.0]));
+    assert_eq!(*lt, Array1::from_vec(vec![0.78, 0.8, 0.75]));
     assert!(*last_modified > new_update);
 
     Ok(())
@@ -1407,7 +1640,11 @@ async fn test_listen_sync() -> eyre::Result<()> {
             .ok_or_else(|| eyre::eyre!("no collaterals"))?
             .write()
             .await;
-        *collateral = Array1::from_vec(vec![1.0, 2.0, 3.0]);
+        *collateral = Array1::from_vec(vec![
+            U256::from(1.0 * 10_f64.powf(18_f64)),
+            U256::from(2.0 * 10_f64.powf(6_f64)),
+            U256::from(3.0 * 10_f64.powf(12_f64)),
+        ]);
 
         let (borroweds, _, _) = &mut *cache.borrowed.write().await;
         let mut borrowed = borroweds
@@ -1415,7 +1652,11 @@ async fn test_listen_sync() -> eyre::Result<()> {
             .ok_or_else(|| eyre::eyre!("no borrowed"))?
             .write()
             .await;
-        *borrowed = Array1::from_vec(vec![4.0, 5.0, 6.0]);
+        *borrowed = Array1::from_vec(vec![
+            U256::from(4.0 * 10_f64.powf(18_f64)),
+            U256::from(5.0 * 10_f64.powf(6_f64)),
+            U256::from(6.0 * 10_f64.powf(12_f64)),
+        ]);
     }
 
     let senders = listen_sync(cache.clone(), 1, 1).await?;
@@ -1454,7 +1695,7 @@ async fn test_hf_calc() -> eyre::Result<()> {
         *prices = Array1::from_vec(vec![120_000.0, 4000.0, 200.0]);
 
         let (lt, _) = &mut *cache.liquidation_threshold.write().await;
-        *lt = Array1::from_vec(vec![7800.0, 8000.0, 7500.0]);
+        *lt = Array1::from_vec(vec![0.78, 0.8, 0.75]);
 
         let (collaterals, _, _) = &mut *cache.collateral.write().await;
 
@@ -1463,14 +1704,22 @@ async fn test_hf_calc() -> eyre::Result<()> {
             .ok_or_else(|| eyre::eyre!("no collaterals"))?
             .write()
             .await;
-        *collateral = Array1::from_vec(vec![1.0, 2.0, 3.0]);
+        *collateral = Array1::from_vec(vec![
+            U256::from(1.0 * 10_f64.powf(18_f64)),
+            U256::from(2.0 * 10_f64.powf(6_f64)),
+            U256::from(3.0 * 10_f64.powf(12_f64)),
+        ]);
 
         let mut collateral = collaterals
             .get(1)
             .ok_or_else(|| eyre::eyre!("no collaterals"))?
             .write()
             .await;
-        *collateral = Array1::from_vec(vec![4.0, 5.0, 6.0]);
+        *collateral = Array1::from_vec(vec![
+            U256::from(4.0 * 10_f64.powf(18_f64)),
+            U256::from(5.0 * 10_f64.powf(6_f64)),
+            U256::from(6.0 * 10_f64.powf(12_f64)),
+        ]);
 
         let (borroweds, _, _) = &mut *cache.borrowed.write().await;
 
@@ -1479,14 +1728,22 @@ async fn test_hf_calc() -> eyre::Result<()> {
             .ok_or_else(|| eyre::eyre!("no borrowed"))?
             .write()
             .await;
-        *borrowed = Array1::from_vec(vec![4.0, 5.0, 6.0]);
+        *borrowed = Array1::from_vec(vec![
+            U256::from(4.0 * 10_f64.powf(18_f64)),
+            U256::from(5.0 * 10_f64.powf(6_f64)),
+            U256::from(6.0 * 10_f64.powf(12_f64)),
+        ]);
 
         let mut borrowed = borroweds
             .get(1)
             .ok_or_else(|| eyre::eyre!("no borrowed"))?
             .write()
             .await;
-        *borrowed = Array1::from_vec(vec![1.0, 2.0, 3.0]);
+        *borrowed = Array1::from_vec(vec![
+            U256::from(1.0 * 10_f64.powf(18_f64)),
+            U256::from(2.0 * 10_f64.powf(6_f64)),
+            U256::from(3.0 * 10_f64.powf(12_f64)),
+        ]);
     }
 
     let senders = listen_hf_calc(cache.clone(), 1, 1).await?;
@@ -1502,35 +1759,43 @@ async fn test_hf_calc() -> eyre::Result<()> {
     }
 
     {
-        let (collaterals, _, _) = &*cache.collateral.read().await;
+        // let (collaterals, _, _) = &*cache.collateral.read().await;
         let col_matrix = &mut *cache.collateral_matrix.write().await;
-        let row_lock = collaterals
-            .get(0)
-            .ok_or_else(|| eyre!("row = 0 not found in collateral"))?
-            .read()
-            .await;
-        col_matrix.push_row(row_lock.view())?;
-        let row_lock = collaterals
-            .get(1)
-            .ok_or_else(|| eyre!("row = 1 not found in collateral"))?
-            .read()
-            .await;
-        col_matrix.push_row(row_lock.view())?;
+        col_matrix.push_row(
+            Array1::from_vec(vec![
+                U256::from(1.0 * 10_f64.powf(18_f64)).as_f64(10_f64.powf(18_f64)),
+                U256::from(2.0 * 10_f64.powf(6_f64)).as_f64(10_f64.powf(6_f64)),
+                U256::from(3.0 * 10_f64.powf(12_f64)).as_f64(10_f64.powf(12_f64)),
+            ])
+            .view(),
+        )?;
+        col_matrix.push_row(
+            Array1::from_vec(vec![
+                U256::from(4.0 * 10_f64.powf(18_f64)).as_f64(10_f64.powf(18_f64)),
+                U256::from(5.0 * 10_f64.powf(6_f64)).as_f64(10_f64.powf(6_f64)),
+                U256::from(6.0 * 10_f64.powf(12_f64)).as_f64(10_f64.powf(12_f64)),
+            ])
+            .view(),
+        )?;
 
-        let (borroweds, _, _) = &*cache.borrowed.read().await;
+        // let (borroweds, _, _) = &*cache.borrowed.read().await;
         let bor_matrix = &mut *cache.borrowed_matrix.write().await;
-        let row_lock = borroweds
-            .get(0)
-            .ok_or_else(|| eyre!("row = 0 not found in borrowed"))?
-            .read()
-            .await;
-        bor_matrix.push_row(row_lock.view())?;
-        let row_lock = borroweds
-            .get(1)
-            .ok_or_else(|| eyre!("row = 1 not found in borrowed"))?
-            .read()
-            .await;
-        bor_matrix.push_row(row_lock.view())?;
+        bor_matrix.push_row(
+            Array1::from_vec(vec![
+                U256::from(4.0 * 10_f64.powf(18_f64)).as_f64(10_f64.powf(18_f64)),
+                U256::from(5.0 * 10_f64.powf(6_f64)).as_f64(10_f64.powf(6_f64)),
+                U256::from(6.0 * 10_f64.powf(12_f64)).as_f64(10_f64.powf(12_f64)),
+            ])
+            .view(),
+        )?;
+        bor_matrix.push_row(
+            Array1::from_vec(vec![
+                U256::from(1.0 * 10_f64.powf(18_f64)).as_f64(10_f64.powf(18_f64)),
+                U256::from(2.0 * 10_f64.powf(6_f64)).as_f64(10_f64.powf(6_f64)),
+                U256::from(3.0 * 10_f64.powf(12_f64)).as_f64(10_f64.powf(12_f64)),
+            ])
+            .view(),
+        )?;
     }
 
     sender.send(HFRequest::Full(rq_date)).await?;
@@ -1557,8 +1822,8 @@ async fn test_answer_updated() -> eyre::Result<()> {
 
     let event = AnswerUpdated {
         current: alloy_primitives::I256::try_from(999_001_61230_000_000_i128)?,
-        roundId: alloy_primitives::U256::from(0),
-        timestamp: alloy_primitives::U256::from(Utc::now().timestamp()),
+        roundId: U256::from(0),
+        timestamp: U256::from(Utc::now().timestamp()),
     };
     let rq_date = Utc::now().timestamp_micros();
 
@@ -1616,7 +1881,7 @@ async fn test_withdraw() -> eyre::Result<()> {
             .clone(),
         user: user.clone(),
         to: user.clone(),
-        amount: alloy_primitives::U256::from(10.0),
+        amount: U256::from(10.0),
     };
 
     let (sync_tx, mut sync_rc) = channel::<SyncRequest>(1);
@@ -1659,9 +1924,30 @@ async fn test_withdraw() -> eyre::Result<()> {
 
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
 
-    assert_eq!(collateral, vec![0.0, 2.0, 0.0]);
-    assert_eq!(reserve, vec![1.0, 0.0, 3.0]);
-    assert_eq!(borrowed, vec![1.0, 2.0, 3.0]);
+    assert_eq!(
+        collateral,
+        vec![
+            U256::default(),
+            U256::from(2.0 * 10_f64.powf(6_f64)),
+            U256::default()
+        ]
+    );
+    assert_eq!(
+        reserve,
+        vec![
+            U256::from(1.0 * 10_f64.powf(18_f64)),
+            U256::default(),
+            U256::from(3.0 * 10_f64.powf(12_f64))
+        ]
+    );
+    assert_eq!(
+        borrowed,
+        vec![
+            U256::from(1.0 * 10_f64.powf(18_f64)),
+            U256::from(2.0 * 10_f64.powf(6_f64)),
+            U256::from(3.0 * 10_f64.powf(12_f64))
+        ]
+    );
 
     // 2 case - collateral new event
 
@@ -1684,7 +1970,7 @@ async fn test_withdraw() -> eyre::Result<()> {
         reserve: token.clone(),
         user: user.clone(),
         to: user.clone(),
-        amount: alloy_primitives::U256::from(20.0),
+        amount: U256::from(20.0 * 10_f64.powf(18_f64)),
     };
 
     let (sync_tx, mut sync_rc) = channel::<SyncRequest>(1);
@@ -1726,9 +2012,16 @@ async fn test_withdraw() -> eyre::Result<()> {
 
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
 
-    assert_eq!(collateral, vec![-20.0, 0.0, 0.0]);
-    assert_eq!(reserve, vec![0.0, 0.0, 0.0]);
-    assert_eq!(borrowed, vec![0.0, 0.0, 0.0]);
+    assert_eq!(
+        collateral,
+        vec![
+            U256::from(20.0 * 10_f64.powf(18_f64)),
+            U256::default(),
+            U256::default()
+        ]
+    );
+    assert_eq!(reserve, vec![U256::default(); 3]);
+    assert_eq!(borrowed, vec![U256::default(); 3]);
 
     // 3 case - reserve new event
 
@@ -1751,7 +2044,7 @@ async fn test_withdraw() -> eyre::Result<()> {
         reserve: token.clone(),
         user: user.clone(),
         to: user.clone(),
-        amount: alloy_primitives::U256::from(30.0),
+        amount: U256::from(30.0 * 10_f64.powf(18_f64)),
     };
 
     let (sync_tx, _) = channel::<SyncRequest>(1);
@@ -1771,9 +2064,16 @@ async fn test_withdraw() -> eyre::Result<()> {
 
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
 
-    assert_eq!(collateral, vec![0.0, 0.0, 0.0]);
-    assert_eq!(reserve, vec![0.0, -30.0, 0.0]);
-    assert_eq!(borrowed, vec![0.0, 0.0, 0.0]);
+    assert_eq!(collateral, vec![U256::default(); 3]);
+    assert_eq!(
+        reserve,
+        vec![
+            U256::default(),
+            U256::from(30.0 * 10_f64.powf(6_f64)),
+            U256::default()
+        ]
+    );
+    assert_eq!(borrowed, vec![U256::default(); 3]);
 
     // 4 case - collateral skip event
 
@@ -1795,7 +2095,7 @@ async fn test_withdraw() -> eyre::Result<()> {
         reserve: token.clone(),
         user: user.clone(),
         to: user.clone(),
-        amount: alloy_primitives::U256::from(40.0),
+        amount: U256::from(40.0 * 10_f64.powf(18_f64)),
     };
 
     let (sync_tx, _) = channel::<SyncRequest>(1);
@@ -1815,9 +2115,9 @@ async fn test_withdraw() -> eyre::Result<()> {
 
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
 
-    assert_eq!(collateral, vec![0.0, 0.0, 0.0]);
-    assert_eq!(reserve, vec![0.0, 0.0, 0.0]);
-    assert_eq!(borrowed, vec![0.0, 0.0, 0.0]);
+    assert_eq!(collateral, vec![U256::default(); 3]);
+    assert_eq!(reserve, vec![U256::default(); 3]);
+    assert_eq!(borrowed, vec![U256::default(); 3]);
 
     // 5 case - reserve skip event
 
@@ -1839,7 +2139,7 @@ async fn test_withdraw() -> eyre::Result<()> {
         reserve: token.clone(),
         user: user.clone(),
         to: user.clone(),
-        amount: alloy_primitives::U256::from(50.0),
+        amount: U256::from(50.0 * 10_f64.powf(18_f64)),
     };
 
     let (sync_tx, _) = channel::<SyncRequest>(1);
@@ -1859,9 +2159,9 @@ async fn test_withdraw() -> eyre::Result<()> {
 
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
 
-    assert_eq!(collateral, vec![0.0, 0.0, 0.0]);
-    assert_eq!(reserve, vec![0.0, 0.0, 0.0]);
-    assert_eq!(borrowed, vec![0.0, 0.0, 0.0]);
+    assert_eq!(collateral, vec![U256::default(); 3]);
+    assert_eq!(reserve, vec![U256::default(); 3]);
+    assert_eq!(borrowed, vec![U256::default(); 3]);
 
     // 6 case - skip event
 
@@ -1877,7 +2177,7 @@ async fn test_withdraw() -> eyre::Result<()> {
         reserve: token.clone(),
         user: user.clone(),
         to: user.clone(),
-        amount: alloy_primitives::U256::from(40.0),
+        amount: U256::from(40.0 * 10_f64.powf(18_f64)),
     };
 
     {
@@ -1924,9 +2224,30 @@ async fn test_withdraw() -> eyre::Result<()> {
 
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
 
-    assert_eq!(collateral, vec![0.0, 2.0, 0.0]);
-    assert_eq!(reserve, vec![1.0, 0.0, 3.0]);
-    assert_eq!(borrowed, vec![1.0, 2.0, 3.0]);
+    assert_eq!(
+        collateral,
+        vec![
+            U256::default(),
+            U256::from(2.0 * 10_f64.powf(6_f64)),
+            U256::default()
+        ]
+    );
+    assert_eq!(
+        reserve,
+        vec![
+            U256::from(1.0 * 10_f64.powf(18_f64)),
+            U256::default(),
+            U256::from(3.0 * 10_f64.powf(18_f64))
+        ]
+    );
+    assert_eq!(
+        borrowed,
+        vec![
+            U256::from(1.0 * 10_f64.powf(18_f64)),
+            U256::from(2.0 * 10_f64.powf(6_f64)),
+            U256::from(3.0 * 10_f64.powf(12_f64))
+        ]
+    );
 
     Ok(())
 }

@@ -6,7 +6,7 @@ use crate::arbitrum::arbitrum::IL2Pool::{
 use crate::arbitrum::arbitrum::{
     Cache, DataProvider, HFRequest, RqDate, SyncRequest, TimeStamp, Token, Tokens,
 };
-use alloy_primitives::{Address, I256};
+use alloy_primitives::Address;
 use chrono::Utc;
 use eyre::eyre;
 use std::sync::Arc;
@@ -197,7 +197,7 @@ where
             let mut collateral_lock = c.collateral.write().await;
             (collateral_lock.1, collateral_lock.2) = (now, now);
             let mut row_lock = collateral_lock.0[row_num].write().await;
-            row_lock[idx] += f64::from(event.amount);
+            row_lock[idx] += event.amount;
             s_tx.send(SyncRequest::Collateral(row_num, rq_date)).await?;
             h_tx.send(HFRequest::User(event.onBehalfOf, rq_date))
                 .await?;
@@ -241,7 +241,7 @@ where
             let mut reserve_lock = c.reserve.write().await;
             (reserve_lock.1, reserve_lock.2) = (now, now);
             let mut row_lock = reserve_lock.0[row_num].write().await;
-            row_lock[idx] += f64::from(event.amount);
+            row_lock[idx] += event.amount;
 
             Ok(())
         };
@@ -351,7 +351,7 @@ where
             let mut collateral_lock = c.collateral.write().await;
             (collateral_lock.1, collateral_lock.2) = (now, now);
             let mut row_lock = collateral_lock.0[row_num].write().await;
-            row_lock[idx] -= f64::from(event.amount);
+            row_lock[idx] -= event.amount;
             s_tx.send(SyncRequest::Collateral(row_num, rq_date)).await?;
             h_tx.send(HFRequest::User(event.user, rq_date)).await?;
 
@@ -394,8 +394,8 @@ where
             let mut reserve_lock = c.reserve.write().await;
             (reserve_lock.1, reserve_lock.2) = (now, now);
             let mut row_lock = reserve_lock.0[row_num].write().await;
-            row_lock[idx] -= f64::from(event.amount);
-            
+            row_lock[idx] -= event.amount;
+
             Ok(())
         };
         let skip_event = async move || {

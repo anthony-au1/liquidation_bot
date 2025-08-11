@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod arbitrum_tests {
-    use alloy_primitives::Address;
+    use alloy_primitives::{Address, U256};
     use async_trait::async_trait;
     use bitvec::bitvec;
     use bitvec::prelude::Lsb0;
@@ -12,7 +12,7 @@ mod arbitrum_tests {
     };
     use liquidation_bot::arbitrum::arbitrum::IL2Pool::{IL2PoolEvents, Supply, Withdraw};
     use liquidation_bot::arbitrum::arbitrum::{
-        Cache, DataProvider, UserReserveData, UserSettings, start,
+        start, Cache, DataProvider, UserReserveData, UserSettings,
     };
     use ndarray::{Array1, Array2};
     use std::str::FromStr;
@@ -101,10 +101,14 @@ mod arbitrum_tests {
                 u if *u == Address::from_str(USER1)? => {
                     let urd = match token {
                         t if *t == Address::from_str(AAVE)? => {
-                            UserReserveData::new(2.0, 0.5, false)
+                            UserReserveData::new(U256::from(2), U256::from(1), false)
                         }
-                        t if *t == Address::from_str(USDC)? => UserReserveData::new(2.0, 1.0, true),
-                        t if *t == Address::from_str(DAI)? => UserReserveData::new(3.0, 1.0, true),
+                        t if *t == Address::from_str(USDC)? => {
+                            UserReserveData::new(U256::from(2), U256::from(1), true)
+                        }
+                        t if *t == Address::from_str(DAI)? => {
+                            UserReserveData::new(U256::from(3), U256::from(1), true)
+                        }
                         _ => return Err(eyre!("token = {:?} not found", token)),
                     };
                     Ok(urd)
@@ -112,10 +116,14 @@ mod arbitrum_tests {
                 _ => {
                     let urd = match token {
                         t if *t == Address::from_str(AAVE)? => {
-                            UserReserveData::new(1.1, 0.5, false)
+                            UserReserveData::new(U256::from(2), U256::from(1), false)
                         }
-                        t if *t == Address::from_str(USDC)? => UserReserveData::new(2.0, 1.0, true),
-                        t if *t == Address::from_str(DAI)? => UserReserveData::new(3.0, 1.0, true),
+                        t if *t == Address::from_str(USDC)? => {
+                            UserReserveData::new(U256::from(2), U256::from(1), true)
+                        }
+                        t if *t == Address::from_str(DAI)? => {
+                            UserReserveData::new(U256::from(3), U256::from(1), true)
+                        }
                         _ => return Err(eyre!("token = {:?} not found", token)),
                     };
                     Ok(urd)
@@ -318,18 +326,30 @@ mod arbitrum_tests {
             *last_modified = now;
 
             let (reserves, last_sync, last_modified) = &mut *expected.reserve.write().await;
-            reserves.push(RwLock::new(Array1::from_vec(vec![1.0, 0.0, 0.0])));
+            reserves.push(RwLock::new(Array1::from_vec(vec![
+                U256::from(1),
+                U256::default(),
+                U256::default(),
+            ])));
             (*last_sync, *last_modified) = (now, now);
 
             let (collaterals, last_sync, last_modified) = &mut *expected.collateral.write().await;
-            collaterals.push(RwLock::new(Array1::from_vec(vec![0.0, 3.0, 20.0])));
+            collaterals.push(RwLock::new(Array1::from_vec(vec![
+                U256::default(),
+                U256::from(3),
+                U256::from(20),
+            ])));
             (*last_sync, *last_modified) = (now, now);
 
             let col_matrix = &mut *expected.collateral_matrix.write().await;
             *col_matrix = Array2::from_shape_vec((1, 3), vec![0.0, 3.0, 20.0])?;
 
             let (borroweds, last_sync, last_modified) = &mut *expected.borrowed.write().await;
-            borroweds.push(RwLock::new(Array1::from_vec(vec![0.5, 1.0, 1.0])));
+            borroweds.push(RwLock::new(Array1::from_vec(vec![
+                U256::from(1),
+                U256::from(1),
+                U256::from(1),
+            ])));
             (*last_sync, *last_modified) = (now, now);
 
             let bor_matrix = &mut *expected.borrowed_matrix.write().await;
