@@ -1528,11 +1528,11 @@ impl Cache {
     }
 }
 
-pub(crate) trait U256Converter {
+pub(crate) trait F64Converter {
     fn as_f64(&self, decimal: f64) -> f64;
 }
 
-impl U256Converter for U256 {
+impl F64Converter for U256 {
     fn as_f64(&self, decimal: f64) -> f64 {
         self.saturating_to::<u128>() as f64 / decimal
     }

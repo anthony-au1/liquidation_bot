@@ -12,9 +12,10 @@ mod arbitrum_tests {
     };
     use liquidation_bot::arbitrum::arbitrum::IL2Pool::{IL2PoolEvents, Supply, Withdraw};
     use liquidation_bot::arbitrum::arbitrum::{
-        start, Cache, DataProvider, UserReserveData, UserSettings,
+        Cache, DataProvider, UserReserveData, UserSettings, start,
     };
     use ndarray::{Array1, Array2};
+    use std::fmt::Debug;
     use std::str::FromStr;
     use std::sync::Arc;
     use std::time::Duration;
@@ -31,6 +32,50 @@ mod arbitrum_tests {
     const DAI_PRICE_SOURCE: &str = "0x1Af54C113cefD1792CbFcF41B711824d657eb61D";
 
     const USER1: &str = "0x1Af54C553cefD1792CbFcF41B711834d657ea61D";
+
+    trait F64Helper {
+        fn as_f64_decimal_18(&self) -> f64;
+        fn as_f64_decimal_6(&self) -> f64;
+        fn as_f64_decimal_12(&self) -> f64;
+    }
+
+    trait U256Helper {
+        fn as_u256_decimal_18(&self) -> U256;
+        fn as_u256_decimal_6(&self) -> U256;
+        fn as_u256_decimal_12(&self) -> U256;
+    }
+
+    impl<T> U256Helper for T
+    where
+        T: Copy + TryInto<u128>,
+        <T as TryInto<u128>>::Error: Debug,
+    {
+        fn as_u256_decimal_18(&self) -> U256 {
+            U256::from((*self).try_into().unwrap()) * U256::from(10).pow(U256::from(18))
+        }
+
+        fn as_u256_decimal_6(&self) -> U256 {
+            U256::from((*self).try_into().unwrap()) * U256::from(10).pow(U256::from(6))
+        }
+
+        fn as_u256_decimal_12(&self) -> U256 {
+            U256::from((*self).try_into().unwrap()) * U256::from(10).pow(U256::from(12))
+        }
+    }
+
+    impl F64Helper for U256 {
+        fn as_f64_decimal_18(&self) -> f64 {
+            self.saturating_to::<u128>() as f64 / 10_f64.powf(18_f64)
+        }
+
+        fn as_f64_decimal_6(&self) -> f64 {
+            self.saturating_to::<u128>() as f64 / 10_f64.powf(6_f64)
+        }
+
+        fn as_f64_decimal_12(&self) -> f64 {
+            self.saturating_to::<u128>() as f64 / 10_f64.powf(12_f64)
+        }
+    }
 
     struct SharedDataProvider;
 
@@ -129,6 +174,17 @@ mod arbitrum_tests {
                     Ok(urd)
                 }
             }
+        }
+
+        async fn get_decimal(&self, token: &Address) -> eyre::Result<f64> {
+            let decimal = match token {
+                addr if *addr == Address::from_str(AAVE)? => 10_f64.powf(18_f64),
+                addr if *addr == Address::from_str(USDC)? => 10_f64.powf(6_f64),
+                addr if *addr == Address::from_str(DAI)? => 10_f64.powf(12_f64),
+                _ => return Err(eyre!("decimal for token = {:?} not found", token)),
+            };
+
+            Ok(decimal)
         }
     }
 
@@ -285,6 +341,10 @@ mod arbitrum_tests {
             self.shared_data_provider
                 .get_user_reserve_data(token, user)
                 .await
+        }
+
+        async fn get_decimal(&self, token: &Address) -> eyre::Result<f64> {
+            self.shared_data_provider.get_decimal(token).await
         }
     }
 
