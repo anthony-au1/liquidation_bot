@@ -144,7 +144,7 @@ impl DataProvider for SharedDataProvider {
             u if *u == Address::from_str(USER1)? => {
                 let urd = match token {
                     t if *t == Address::from_str(AAVE)? => {
-                        UserReserveData::new(2.as_u256_decimal_18(), 1.as_u256_decimal_18(), false)
+                        UserReserveData::new(1.as_u256_decimal_18(), 1.as_u256_decimal_18(), false)
                     }
                     t if *t == Address::from_str(USDC)? => {
                         UserReserveData::new(2.as_u256_decimal_6(), 1.as_u256_decimal_6(), true)
@@ -159,7 +159,7 @@ impl DataProvider for SharedDataProvider {
             _ => {
                 let urd = match token {
                     t if *t == Address::from_str(AAVE)? => {
-                        UserReserveData::new(2.as_u256_decimal_18(), 1.as_u256_decimal_18(), false)
+                        UserReserveData::new(1.as_u256_decimal_18(), 1.as_u256_decimal_18(), false)
                     }
                     t if *t == Address::from_str(USDC)? => {
                         UserReserveData::new(2.as_u256_decimal_6(), 1.as_u256_decimal_6(), true)
