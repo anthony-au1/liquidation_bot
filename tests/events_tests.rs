@@ -385,7 +385,7 @@ async fn test_events() -> eyre::Result<()> {
 
         let (reserves, last_sync, last_modified) = &mut *expected.reserve.write().await;
         reserves.push(RwLock::new(Array1::from_vec(vec![
-            1.as_u256_decimal_18(),
+            U256::default(),
             U256::default(),
             U256::default(),
         ])));
@@ -414,7 +414,7 @@ async fn test_events() -> eyre::Result<()> {
         *bor_matrix = Array2::from_shape_vec((1, 3), vec![1.0, 1.0, 1.0])?;
 
         let (hf, last_modified) = &mut *expected.health_factors.write().await;
-        *hf = Array1::from_vec(vec![8.59851651673008]);
+        *hf = Array1::from_vec(vec![7.714022126095777]);
         *last_modified = now;
     }
 
