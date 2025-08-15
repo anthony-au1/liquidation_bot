@@ -8,7 +8,7 @@ use liquidation_bot::arbitrum::arbitrum::IAaveProtocolDataProvider::TokenData;
 use liquidation_bot::arbitrum::arbitrum::IChainlinkAggregator::{
     AnswerUpdated, IChainlinkAggregatorEvents,
 };
-use liquidation_bot::arbitrum::arbitrum::IL2Pool::{Borrow, IL2PoolEvents, Supply, Withdraw};
+use liquidation_bot::arbitrum::arbitrum::IL2Pool::{Borrow, IL2PoolEvents, Repay, Supply, Withdraw};
 use liquidation_bot::arbitrum::arbitrum::{
     Cache, DataProvider, UserReserveData, UserSettings, start,
 };
@@ -325,6 +325,36 @@ impl DataProvider for DummyDataProvider {
                 }))
                     .await
             }
+            10 => {
+                callback(IL2PoolEvents::Repay(Repay {
+                    reserve: Address::from_str(AAVE)?,
+                    user: user.clone(),
+                    repayer: user,
+                    amount: 10.as_u256_decimal_18(),
+                    useATokens: false,
+                }))
+                    .await
+            }
+            11 => {
+                callback(IL2PoolEvents::Repay(Repay {
+                    reserve: Address::from_str(USDC)?,
+                    user: user.clone(),
+                    repayer: user,
+                    amount: 20.as_u256_decimal_6(),
+                    useATokens: false,
+                }))
+                    .await
+            }
+            12 => {
+                callback(IL2PoolEvents::Repay(Repay {
+                    reserve: Address::from_str(DAI)?,
+                    user: user.clone(),
+                    repayer: user,
+                    amount: 30.as_u256_decimal_12(),
+                    useATokens: false,
+                }))
+                    .await
+            }
             _ => Err(eyre!("no listen_events events")),
         }
     }
@@ -472,17 +502,17 @@ async fn test_events() -> eyre::Result<()> {
 
         let (borroweds, last_sync, last_modified) = &mut *expected.borrowed.write().await;
         borroweds.push(RwLock::new(Array1::from_vec(vec![
-            11.as_u256_decimal_18(),
-            21.as_u256_decimal_6(),
-            31.as_u256_decimal_12(),
+            1.as_u256_decimal_18(),
+            1.as_u256_decimal_6(),
+            1.as_u256_decimal_12(),
         ])));
         (*last_sync, *last_modified) = (now, now);
 
         let bor_matrix = &mut *expected.borrowed_matrix.write().await;
-        *bor_matrix = Array2::from_shape_vec((1, 3), vec![11.0, 21.0, 31.0])?;
+        *bor_matrix = Array2::from_shape_vec((1, 3), vec![1.0, 1.0, 1.0])?;
 
         let (hf, last_modified) = &mut *expected.health_factors.write().await;
-        *hf = Array1::from_vec(vec![0.3309062073445593]);
+        *hf = Array1::from_vec(vec![7.840553362461782]);
         *last_modified = now;
     }
 
