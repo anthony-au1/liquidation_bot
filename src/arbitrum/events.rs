@@ -207,7 +207,7 @@ where
         let skip_event = async move || {
             debug!(
                 "event dated before sync:\
-                     event = supply, user = {}, rq_date = {}, collateral sync = {}, collateral rq_date = {}",
+                     event = supply, user = {}, rq_date = {}, collateral sync = {}, collateral modified = {}",
                 event.onBehalfOf, rq_date, last_sync, last_modified,
             );
 
@@ -248,7 +248,7 @@ where
         let skip_event = async move || {
             debug!(
                 "event dated before sync:\
-                     event = supply, user = {}, rq_date = {}, reserve sync = {}, reserve rq_date = {}",
+                     event = supply, user = {}, rq_date = {}, reserve sync = {}, reserve modified = {}",
                 event.onBehalfOf, rq_date, last_sync, last_modified,
             );
 
@@ -360,7 +360,7 @@ where
         let skip_event = async move || {
             debug!(
                 "event dated before sync:\
-                     event = withdraw, user = {}, rq_date = {}, collateral sync = {}, collateral rq_date = {}",
+                     event = withdraw, user = {}, rq_date = {}, collateral sync = {}, collateral modified = {}",
                 event.user, rq_date, last_sync, last_modified,
             );
 
@@ -401,7 +401,7 @@ where
         let skip_event = async move || {
             debug!(
                 "event dated before sync:\
-                     event = withdraw, user = {}, rq_date = {}, reserve sync = {}, reserve rq_date = {}",
+                     event = withdraw, user = {}, rq_date = {}, reserve sync = {}, reserve modified = {}",
                 event.user, rq_date, last_sync, last_modified,
             );
 
@@ -448,11 +448,103 @@ pub(crate) async fn borrow<P>(
 where
     P: DataProvider + 'static,
 {
-    debug!("borrow: called");
-    // let (event, sync_tx, hf_tx, rq_date) = event;
-    // cache
-    //     .init_user(&event.user, &tokens, provider.clone())
-    //     .await?;
+    let (event, sync_tx, hf_tx, RqDate(rq_date)) = event;
+
+    debug!("{}", {
+        let received = Utc::now().timestamp_micros();
+        format!(
+            "borrow: rq_date = {}, received = {}, delta = {} μs",
+            rq_date,
+            received,
+            received - rq_date
+        )
+    });
+
+    if create_user(
+        rq_date,
+        &cache,
+        provider.clone(),
+        &tokens,
+        &event.user,
+        &sync_tx,
+        &hf_tx,
+    )
+    .await?
+    {
+        debug!(
+            "borrow: new user created = {}, cache = {:?}",
+            event.user, cache
+        );
+
+        return Ok(());
+    }
+
+    let user_settings = cache
+        .users
+        .get(&event.user)
+        .ok_or_else(|| eyre!("user = {:?} not found", event.user))?
+        .clone();
+    let row_num = user_settings.row_num;
+    let idx = tokens
+        .get(&event.reserve)
+        .ok_or_else(|| eyre!("token = {:?} not found", event.reserve))?
+        .order;
+    let now = Utc::now().timestamp_micros();
+
+    let (last_sync, last_modified) = {
+        let borrowed_lock = cache.borrowed.read().await;
+        (borrowed_lock.1, borrowed_lock.2)
+    };
+
+    let (c, s_tx, h_tx) = (cache.clone(), sync_tx.clone(), hf_tx.clone());
+    let new_event = async move || {
+        debug!("borrow: new event user = {}", event.user);
+
+        let mut borrowed_lock = c.borrowed.write().await;
+        (borrowed_lock.1, borrowed_lock.2) = (now, now);
+        let mut row_lock = borrowed_lock.0[row_num].write().await;
+        row_lock[idx] += event.amount;
+        s_tx.send(SyncRequest::Borrowed(row_num, rq_date)).await?;
+        h_tx.send(HFRequest::User(event.user, rq_date)).await?;
+
+        Ok(())
+    };
+    let skip_event = async move || {
+        debug!(
+            "event dated before sync:\
+                     event = borrow, user = {}, rq_date = {}, borrowed sync = {}, borrowed modified = {}",
+            event.user, rq_date, last_sync, last_modified,
+        );
+
+        Ok(())
+    };
+
+    handle_event(
+        &event.user,
+        &cache,
+        &tokens,
+        provider.clone(),
+        &sync_tx,
+        &hf_tx,
+        rq_date,
+        last_sync,
+        last_modified,
+        new_event,
+        skip_event,
+    )
+    .await?;
+
+    debug!("{}", {
+        let received = Utc::now().timestamp_micros();
+        format!(
+            "borrow: cache = {:?}, rq_date = {}, \
+                     received = {}, delta = {} μs",
+            cache,
+            rq_date,
+            received,
+            received - rq_date
+        )
+    });
 
     Ok(())
 }

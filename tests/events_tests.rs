@@ -190,6 +190,8 @@ struct DummyDataProvider {
     shared_data_provider: SharedDataProvider,
     listen_events_call_counter: Mutex<usize>,
     listen_price_update_call_counter: Mutex<usize>,
+    listen_price_update_call_counter2: Mutex<usize>,
+    listen_price_update_call_counter3: Mutex<usize>,
 }
 
 impl DummyDataProvider {
@@ -198,6 +200,8 @@ impl DummyDataProvider {
             shared_data_provider: SharedDataProvider {},
             listen_events_call_counter: Mutex::new(0),
             listen_price_update_call_counter: Mutex::new(0),
+            listen_price_update_call_counter2: Mutex::new(0),
+            listen_price_update_call_counter3: Mutex::new(0),
         }
     }
 }
@@ -298,28 +302,56 @@ impl DataProvider for DummyDataProvider {
         F: Fn(IChainlinkAggregatorEvents) -> Fut + Send + 'static,
         Fut: Future<Output = eyre::Result<()>> + Send,
     {
-        sleep(Duration::from_secs(1)).await;
-
-        let count = {
-            let mut count = self.listen_price_update_call_counter.lock().await;
-            *count += 1;
-            *count
-        };
+        sleep(Duration::from_secs(3)).await;
 
         let current = match price_source {
-            ps if *ps == Address::from_str(AAVE_PRICE_SOURCE)? => 161_230_000_000_i128,
-            ps if *ps == Address::from_str(USDC_PRICE_SOURCE)? => 261_230_000_000_i128,
-            ps if *ps == Address::from_str(DAI_PRICE_SOURCE)? => 361_230_000_000_i128,
+            ps if *ps == Address::from_str(AAVE_PRICE_SOURCE)? => {
+                let count = {
+                    let mut count = self.listen_price_update_call_counter.lock().await;
+                    *count += 1;
+                    *count
+                };
+
+                match count {
+                    1 => 161_230_000_000_i128,
+                    2 => 131_230_000_000_i128,
+                    _ => 171_230_000_000_i128,
+                }
+            }
+            ps if *ps == Address::from_str(USDC_PRICE_SOURCE)? => {
+                let count = {
+                    let mut count = self.listen_price_update_call_counter2.lock().await;
+                    *count += 1;
+                    *count
+                };
+
+                match count {
+                    1 => 261_230_000_000_i128,
+                    2 => 231_230_000_000_i128,
+                    _ => 281_230_000_000_i128,
+                }
+            }
+            ps if *ps == Address::from_str(DAI_PRICE_SOURCE)? => {
+                let count = {
+                    let mut count = self.listen_price_update_call_counter3.lock().await;
+                    *count += 1;
+                    *count
+                };
+
+                match count {
+                    1 => 361_230_000_000_i128,
+                    2 => 311_230_000_000_i128,
+                    _ => 401_230_000_000_i128,
+                }
+            }
             _ => return Err(eyre!("price_source = {:?} not found", price_source)),
         };
 
-        let event = match count {
-            _ => AnswerUpdated {
-                // 161230000000 / 10^8 = 1612.30 USD
-                current: I256::try_from(current)?,
-                roundId: U256::default(),
-                timestamp: U256::from(Utc::now().timestamp()),
-            },
+        let event = AnswerUpdated {
+            // 161230000000 / 10^8 = 1612.30 USD
+            current: I256::try_from(current)?,
+            roundId: U256::default(),
+            timestamp: U256::from(Utc::now().timestamp()),
         };
 
         callback(IChainlinkAggregatorEvents::AnswerUpdated(event)).await
@@ -356,7 +388,7 @@ async fn test_events() -> eyre::Result<()> {
         let _ = start(c, provider).await;
     });
 
-    sleep(Duration::from_secs(10)).await;
+    sleep(Duration::from_secs(20)).await;
 
     let user = Address::from_str(USER1)?;
 
@@ -380,7 +412,7 @@ async fn test_events() -> eyre::Result<()> {
         *last_modified = now;
 
         let (prices, last_modified) = &mut *expected.prices.write().await;
-        *prices = Array1::from_vec(vec![1612.30, 2612.30, 3612.30]);
+        *prices = Array1::from_vec(vec![1712.30, 2812.30, 4012.30]);
         *last_modified = now;
 
         let (reserves, last_sync, last_modified) = &mut *expected.reserve.write().await;
@@ -414,7 +446,7 @@ async fn test_events() -> eyre::Result<()> {
         *bor_matrix = Array2::from_shape_vec((1, 3), vec![1.0, 1.0, 1.0])?;
 
         let (hf, last_modified) = &mut *expected.health_factors.write().await;
-        *hf = Array1::from_vec(vec![7.714022126095777]);
+        *hf = Array1::from_vec(vec![7.840553362461782]);
         *last_modified = now;
     }
 
