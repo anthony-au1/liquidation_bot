@@ -8,7 +8,9 @@ use liquidation_bot::arbitrum::arbitrum::IAaveProtocolDataProvider::TokenData;
 use liquidation_bot::arbitrum::arbitrum::IChainlinkAggregator::{
     AnswerUpdated, IChainlinkAggregatorEvents,
 };
-use liquidation_bot::arbitrum::arbitrum::IL2Pool::{Borrow, IL2PoolEvents, Repay, Supply, Withdraw};
+use liquidation_bot::arbitrum::arbitrum::IL2Pool::{
+    Borrow, IL2PoolEvents, Repay, ReserveUsedAsCollateralEnabled, Supply, Withdraw,
+};
 use liquidation_bot::arbitrum::arbitrum::{
     Cache, DataProvider, UserReserveData, UserSettings, start,
 };
@@ -299,7 +301,7 @@ impl DataProvider for DummyDataProvider {
                     borrowRate: U256::from(5_000_000_000_000_000_000_000_0000u128),
                     referralCode: 0,
                 }))
-                    .await
+                .await
             }
             8 => {
                 callback(IL2PoolEvents::Borrow(Borrow {
@@ -311,7 +313,7 @@ impl DataProvider for DummyDataProvider {
                     borrowRate: U256::from(5_000_000_000_000_000_000_000_0000u128),
                     referralCode: 0,
                 }))
-                    .await
+                .await
             }
             9 => {
                 callback(IL2PoolEvents::Borrow(Borrow {
@@ -323,7 +325,7 @@ impl DataProvider for DummyDataProvider {
                     borrowRate: U256::from(5_000_000_000_000_000_000_000_0000u128),
                     referralCode: 0,
                 }))
-                    .await
+                .await
             }
             10 => {
                 callback(IL2PoolEvents::Repay(Repay {
@@ -333,7 +335,7 @@ impl DataProvider for DummyDataProvider {
                     amount: 10.as_u256_decimal_18(),
                     useATokens: false,
                 }))
-                    .await
+                .await
             }
             11 => {
                 callback(IL2PoolEvents::Repay(Repay {
@@ -343,7 +345,7 @@ impl DataProvider for DummyDataProvider {
                     amount: 20.as_u256_decimal_6(),
                     useATokens: false,
                 }))
-                    .await
+                .await
             }
             12 => {
                 callback(IL2PoolEvents::Repay(Repay {
@@ -353,7 +355,26 @@ impl DataProvider for DummyDataProvider {
                     amount: 30.as_u256_decimal_12(),
                     useATokens: false,
                 }))
-                    .await
+                .await
+            }
+            13 => {
+                callback(IL2PoolEvents::Supply(Supply {
+                    reserve: Address::from_str(AAVE)?,
+                    user,
+                    onBehalfOf: user,
+                    amount: 10.as_u256_decimal_18(),
+                    referralCode: 0,
+                }))
+                .await
+            }
+            14 => {
+                callback(IL2PoolEvents::ReserveUsedAsCollateralEnabled(
+                    ReserveUsedAsCollateralEnabled {
+                        reserve: Address::from_str(AAVE)?,
+                        user,
+                    },
+                ))
+                .await
             }
             _ => Err(eyre!("no listen_events events")),
         }
@@ -464,7 +485,7 @@ async fn test_events() -> eyre::Result<()> {
         *user_num = 1;
 
         let mut use_as_collateral = bitvec![usize, Lsb0; 0; 3];
-        use_as_collateral.set(0, false);
+        use_as_collateral.set(0, true);
         use_as_collateral.set(1, true);
         use_as_collateral.set(2, true);
         expected
@@ -491,14 +512,14 @@ async fn test_events() -> eyre::Result<()> {
 
         let (collaterals, last_sync, last_modified) = &mut *expected.collateral.write().await;
         collaterals.push(RwLock::new(Array1::from_vec(vec![
-            U256::default(),
+            10.as_u256_decimal_18(),
             3.as_u256_decimal_6(),
             20.as_u256_decimal_12(),
         ])));
         (*last_sync, *last_modified) = (now, now);
 
         let col_matrix = &mut *expected.collateral_matrix.write().await;
-        *col_matrix = Array2::from_shape_vec((1, 3), vec![0.0, 3.0, 20.0])?;
+        *col_matrix = Array2::from_shape_vec((1, 3), vec![10.0, 3.0, 20.0])?;
 
         let (borroweds, last_sync, last_modified) = &mut *expected.borrowed.write().await;
         borroweds.push(RwLock::new(Array1::from_vec(vec![
@@ -512,7 +533,7 @@ async fn test_events() -> eyre::Result<()> {
         *bor_matrix = Array2::from_shape_vec((1, 3), vec![1.0, 1.0, 1.0])?;
 
         let (hf, last_modified) = &mut *expected.health_factors.write().await;
-        *hf = Array1::from_vec(vec![7.840553362461782]);
+        *hf = Array1::from_vec(vec![9.405048671063266]);
         *last_modified = now;
     }
 

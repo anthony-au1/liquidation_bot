@@ -1,12 +1,12 @@
 use crate::arbitrum::arbitrum::IAaveProtocolDataProvider::TokenData;
 use crate::arbitrum::arbitrum::IChainlinkAggregator::{AnswerUpdated, IChainlinkAggregatorEvents};
-use crate::arbitrum::arbitrum::IL2Pool::{Borrow, IL2PoolEvents, Repay, Supply, Withdraw};
+use crate::arbitrum::arbitrum::IL2Pool::{Borrow, IL2PoolEvents, Repay, ReserveUsedAsCollateralEnabled, Supply, Withdraw};
 use crate::arbitrum::arbitrum::{
     liquidation_threshold_update, listen_events, listen_hf_calc, listen_price_update, listen_sync, setup, AaveEvents, Cache,
     DataProvider, F64Converter, HFRequest, RqDate, SyncRequest,
     Token, TokenDetails, UserReserveData, UserSettings,
 };
-use crate::arbitrum::events::{answer_updated, borrow, create_user, repay, supply, withdraw};
+use crate::arbitrum::events::{answer_updated, borrow, create_user, repay, reserve_used_as_collateral_enabled, supply, withdraw};
 use alloy_primitives::{Address, I256, U256};
 use async_trait::async_trait;
 use bitvec::order::Lsb0;
@@ -2929,6 +2929,289 @@ async fn test_repay() -> eyre::Result<()> {
         (event, sync_tx, hf_tx, RqDate(rq_date)),
     )
     .await?;
+    let _ = sync_handler.await?;
+    let _ = hf_handler.await?;
+
+    assert_eq!(cache.users.len(), 10);
+
+    let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
+
+    assert_eq!(
+        collateral,
+        vec![U256::default(), 20.as_u256_decimal_6(), U256::default()]
+    );
+    assert_eq!(
+        reserve,
+        vec![
+            10.as_u256_decimal_18(),
+            U256::default(),
+            30.as_u256_decimal_12()
+        ]
+    );
+    assert_eq!(
+        borrowed,
+        vec![
+            10.as_u256_decimal_18(),
+            20.as_u256_decimal_6(),
+            30.as_u256_decimal_12()
+        ]
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
+    // 1 case - create new user
+
+    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let (cache, tokens) = generate_cache_and_tokens(0)
+        .await
+        .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
+
+    let user = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
+    let rq_date = Utc::now().timestamp_micros();
+
+    let event = ReserveUsedAsCollateralEnabled {
+        reserve: tokens
+            .keys()
+            .next()
+            .ok_or_else(|| eyre!("no keys"))?
+            .clone(),
+        user,
+    };
+
+    let (sync_tx, mut sync_rc) = channel::<SyncRequest>(1);
+    let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
+
+    let sync_handler = task::spawn(async move {
+        let msg = sync_rc
+            .recv()
+            .await
+            .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
+        assert_eq!(SyncRequest::Both(0, rq_date), msg);
+
+        Ok::<_, eyre::Error>(())
+    });
+
+    let hf_handler = task::spawn(async move {
+        let msg = hf_rc
+            .recv()
+            .await
+            .ok_or_else(|| eyre::eyre!("hf channel closed"))?;
+        assert_eq!(HFRequest::User(user.clone(), rq_date), msg);
+
+        Ok::<_, eyre::Error>(())
+    });
+
+    assert_eq!(cache.users.len(), 0);
+
+    reserve_used_as_collateral_enabled(
+        cache.clone(),
+        dummy_data_provider,
+        tokens,
+        (event, sync_tx, hf_tx, RqDate(rq_date)),
+    )
+        .await?;
+    let _ = sync_handler.await?;
+    let _ = hf_handler.await?;
+
+    assert_eq!(cache.users.len(), 1);
+    assert_eq!(cache.users.contains_key(&user), true);
+
+    let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
+
+    assert_eq!(
+        collateral,
+        vec![U256::default(), 20.as_u256_decimal_6(), U256::default()]
+    );
+    assert_eq!(
+        reserve,
+        vec![
+            10.as_u256_decimal_18(),
+            U256::default(),
+            30.as_u256_decimal_12()
+        ]
+    );
+    assert_eq!(
+        borrowed,
+        vec![
+            10.as_u256_decimal_18(),
+            20.as_u256_decimal_6(),
+            30.as_u256_decimal_12()
+        ]
+    );
+
+    // 2 case - reserve_used_as_collateral_enabled new event
+
+    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let (cache, tokens) = generate_cache_and_tokens(1)
+        .await
+        .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
+
+    {
+        let (reserve, _, _) = &mut *cache.reserve.write().await;
+        let row = &mut reserve[0];
+        *row = RwLock::new(Array1::from_vec(vec![
+            U256::default(),
+            U256::default(),
+            30.as_u256_decimal_12(),
+        ]));
+    }
+
+    let user = cache
+        .users
+        .iter()
+        .next()
+        .ok_or_else(|| eyre::eyre!("no users"))?
+        .key()
+        .clone();
+    let token = Address::from_str("0x1Af54C113cefD1792CbFcF41B711824d657eb61D")?;
+
+    let rq_date = Utc::now().timestamp_micros();
+
+    let event = ReserveUsedAsCollateralEnabled {
+        reserve: token,
+        user,
+    };
+
+    let (sync_tx, mut sync_rc) = channel::<SyncRequest>(1);
+    let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
+
+    let sync_handler = task::spawn(async move {
+        let msg = sync_rc
+            .recv()
+            .await
+            .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
+        assert_eq!(SyncRequest::Collateral(0, rq_date), msg);
+
+        Ok::<_, eyre::Error>(())
+    });
+
+    let hf_handler = task::spawn(async move {
+        let msg = hf_rc
+            .recv()
+            .await
+            .ok_or_else(|| eyre::eyre!("hf channel closed"))?;
+        assert_eq!(HFRequest::User(user.clone(), rq_date), msg);
+
+        Ok::<_, eyre::Error>(())
+    });
+
+    assert_eq!(cache.users.len(), 1);
+
+    reserve_used_as_collateral_enabled(
+        cache.clone(),
+        dummy_data_provider,
+        tokens,
+        (event, sync_tx, hf_tx, RqDate(rq_date)),
+    )
+        .await?;
+    let _ = sync_handler.await?;
+    let _ = hf_handler.await?;
+
+    assert_eq!(cache.users.len(), 1);
+
+    let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
+
+    assert_eq!(collateral, vec![U256::default(), U256::default(), 30.as_u256_decimal_12()]);
+    assert_eq!(reserve, vec![U256::default(); 3]);
+    assert_eq!(borrowed, vec![U256::default(); 3]);
+
+    // 3 case - reserve_used_as_collateral_enabled skip event
+
+    let rq_date = Utc::now().timestamp_micros();
+    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let (cache, tokens) = generate_cache_and_tokens(1)
+        .await
+        .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
+    let user = cache
+        .users
+        .iter()
+        .next()
+        .ok_or_else(|| eyre::eyre!("no users"))?
+        .key()
+        .clone();
+    let token = Address::from_str("0x1Ac54C113cefD1792CbFcF41B711824d657eb61D")?;
+
+    let event = ReserveUsedAsCollateralEnabled {
+        reserve: token,
+        user,
+    };
+
+    let (sync_tx, _) = channel::<SyncRequest>(1);
+    let (hf_tx, _) = channel::<HFRequest>(1);
+
+    assert_eq!(cache.users.len(), 1);
+
+    reserve_used_as_collateral_enabled(
+        cache.clone(),
+        dummy_data_provider,
+        tokens,
+        (event, sync_tx, hf_tx, RqDate(rq_date)),
+    )
+        .await?;
+
+    assert_eq!(cache.users.len(), 1);
+
+    let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
+
+    assert_eq!(collateral, vec![U256::default(); 3]);
+    assert_eq!(reserve, vec![U256::default(); 3]);
+    assert_eq!(borrowed, vec![U256::default(); 3]);
+
+    // 4 case - reserve_used_as_collateral_enabled sync event
+
+    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let (cache, tokens) = generate_cache_and_tokens(10)
+        .await
+        .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
+    let rq_date = Utc::now().timestamp_micros();
+    let user = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
+    let token = Address::from_str("0x1Ac54C113cefD1792CbFcF41B711824d657eb61D")?;
+
+    let event = ReserveUsedAsCollateralEnabled {
+        reserve: token,
+        user,
+    };
+
+    {
+        let (_, _, last_modified) = &mut *cache.reserve.write().await;
+        *last_modified = Utc::now().timestamp_micros();
+    }
+
+    let (sync_tx, mut sync_rc) = channel::<SyncRequest>(1);
+    let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
+
+    let sync_handler = task::spawn(async move {
+        let msg = sync_rc
+            .recv()
+            .await
+            .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
+        assert_eq!(SyncRequest::Both(0, rq_date), msg);
+
+        Ok::<_, eyre::Error>(())
+    });
+
+    let hf_handler = task::spawn(async move {
+        let msg = hf_rc
+            .recv()
+            .await
+            .ok_or_else(|| eyre::eyre!("hf channel closed"))?;
+        assert_eq!(HFRequest::User(user.clone(), rq_date), msg);
+
+        Ok::<_, eyre::Error>(())
+    });
+
+    assert_eq!(cache.users.len(), 10);
+
+    reserve_used_as_collateral_enabled(
+        cache.clone(),
+        dummy_data_provider,
+        tokens,
+        (event, sync_tx, hf_tx, RqDate(rq_date)),
+    )
+        .await?;
     let _ = sync_handler.await?;
     let _ = hf_handler.await?;
 
