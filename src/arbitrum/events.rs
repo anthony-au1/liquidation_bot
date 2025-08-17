@@ -704,9 +704,9 @@ where
         return Ok(());
     }
 
-    let mut user_settings = cache
+    let user_settings = cache
         .users
-        .get_mut(&event.user)
+        .get(&event.user)
         .ok_or_else(|| eyre!("user = {:?} not found", event.user))?
         .clone();
     let row_num = user_settings.row_num;
@@ -804,11 +804,119 @@ pub(crate) async fn reserve_used_as_collateral_disabled<P>(
 where
     P: DataProvider + 'static,
 {
-    debug!("reserve_used_as_collateral_disabled: called");
-    // let (event, sync_tx, hf_tx, rq_date) = event;
-    // cache
-    //     .init_user(&event.user, &tokens, provider.clone())
-    //     .await?;
+    let (event, sync_tx, hf_tx, RqDate(rq_date)) = event;
+
+    debug!("{}", {
+        let received = Utc::now().timestamp_micros();
+        format!(
+            "reserve_used_as_collateral_disabled: rq_date = {}, received = {}, delta = {} μs",
+            rq_date,
+            received,
+            received - rq_date
+        )
+    });
+
+    if create_user(
+        rq_date,
+        &cache,
+        provider.clone(),
+        &tokens,
+        &event.user,
+        &sync_tx,
+        &hf_tx,
+    )
+    .await?
+    {
+        debug!(
+            "reserve_used_as_collateral_disabled: new user created = {}, cache = {:?}",
+            event.user, cache
+        );
+
+        return Ok(());
+    }
+
+    let user_settings = cache
+        .users
+        .get(&event.user)
+        .ok_or_else(|| eyre!("user = {:?} not found", event.user))?
+        .clone();
+    let row_num = user_settings.row_num;
+    let idx = tokens
+        .get(&event.reserve)
+        .ok_or_else(|| eyre!("token = {:?} not found", event.reserve))?
+        .order;
+    let now = Utc::now().timestamp_micros();
+
+    let (last_sync, last_modified) = {
+        let reserve_lock = cache.reserve.read().await;
+        (reserve_lock.1, reserve_lock.2)
+    };
+
+    let (c, s_tx, h_tx) = (cache.clone(), sync_tx.clone(), hf_tx.clone());
+    let new_event = async move || {
+        debug!(
+            "reserve_used_as_collateral_disabled: new event user = {}",
+            event.user
+        );
+
+        c.users
+            .get_mut(&event.user)
+            .ok_or_else(|| eyre!("user = {:?} not found", event.user))?
+            .use_as_collateral
+            .set(idx, false);
+
+        let mut reserve_lock = c.reserve.write().await;
+        (reserve_lock.1, reserve_lock.2) = (now, now);
+        let mut reserve_row_lock = reserve_lock.0[row_num].write().await;
+
+        let mut collateral_lock = c.collateral.write().await;
+        (collateral_lock.1, collateral_lock.2) = (now, now);
+        let mut collateral_row_lock = collateral_lock.0[row_num].write().await;
+
+        reserve_row_lock[idx] = collateral_row_lock[idx];
+        collateral_row_lock[idx] = U256::default();
+
+        s_tx.send(SyncRequest::Collateral(row_num, rq_date)).await?;
+        h_tx.send(HFRequest::User(event.user, rq_date)).await?;
+
+        Ok(())
+    };
+    let skip_event = async move || {
+        debug!(
+            "event dated before sync:\
+                     event = reserve_used_as_collateral_disabled, user = {}, rq_date = {}, reserve sync = {}, reserve modified = {}",
+            event.user, rq_date, last_sync, last_modified,
+        );
+
+        Ok(())
+    };
+
+    handle_event(
+        &event.user,
+        &cache,
+        &tokens,
+        provider.clone(),
+        &sync_tx,
+        &hf_tx,
+        rq_date,
+        last_sync,
+        last_modified,
+        new_event,
+        skip_event,
+    )
+    .await?;
+
+    debug!("{}", {
+        let received = Utc::now().timestamp_micros();
+        format!(
+            "reserve_used_as_collateral_disabled: cache = {:?}, rq_date = {}, \
+                     received = {}, delta = {} μs",
+            cache,
+            rq_date,
+            received,
+            received - rq_date
+        )
+    });
 
     Ok(())
 }
