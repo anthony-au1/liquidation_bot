@@ -8,7 +8,7 @@ use liquidation_bot::arbitrum::arbitrum::IAaveProtocolDataProvider::TokenData;
 use liquidation_bot::arbitrum::arbitrum::IChainlinkAggregator::{
     AnswerUpdated, IChainlinkAggregatorEvents,
 };
-use liquidation_bot::arbitrum::arbitrum::IL2Pool::{Borrow, IL2PoolEvents, Repay, ReserveUsedAsCollateralDisabled, ReserveUsedAsCollateralEnabled, Supply, Withdraw};
+use liquidation_bot::arbitrum::arbitrum::IL2Pool::{Borrow, IL2PoolEvents, LiquidationCall, Repay, ReserveUsedAsCollateralDisabled, ReserveUsedAsCollateralEnabled, Supply, Withdraw};
 use liquidation_bot::arbitrum::arbitrum::{
     Cache, DataProvider, UserReserveData, UserSettings, start,
 };
@@ -383,6 +383,20 @@ impl DataProvider for DummyDataProvider {
                 ))
                     .await
             }
+            16 => {
+                callback(IL2PoolEvents::LiquidationCall(
+                    LiquidationCall {
+                        collateralAsset: Address::from_str(DAI)?,
+                        debtAsset: Address::from_str(AAVE)?,
+                        user: user.clone(),
+                        debtToCover: 1.as_u256_decimal_18(),
+                        liquidatedCollateralAmount: 10.as_u256_decimal_12(),
+                        liquidator: user,
+                        receiveAToken: false,
+                    },
+                ))
+                    .await
+            }
             _ => Err(eyre!("no listen_events events")),
         }
     }
@@ -521,26 +535,26 @@ async fn test_events() -> eyre::Result<()> {
         collaterals.push(RwLock::new(Array1::from_vec(vec![
             U256::default(),
             3.as_u256_decimal_6(),
-            20.as_u256_decimal_12(),
+            10.as_u256_decimal_12(),
         ])));
         (*last_sync, *last_modified) = (now, now);
 
         let col_matrix = &mut *expected.collateral_matrix.write().await;
-        *col_matrix = Array2::from_shape_vec((1, 3), vec![0.0, 3.0, 20.0])?;
+        *col_matrix = Array2::from_shape_vec((1, 3), vec![0.0, 3.0, 10.0])?;
 
         let (borroweds, last_sync, last_modified) = &mut *expected.borrowed.write().await;
         borroweds.push(RwLock::new(Array1::from_vec(vec![
-            1.as_u256_decimal_18(),
+            U256::default(),
             1.as_u256_decimal_6(),
             1.as_u256_decimal_12(),
         ])));
         (*last_sync, *last_modified) = (now, now);
 
         let bor_matrix = &mut *expected.borrowed_matrix.write().await;
-        *bor_matrix = Array2::from_shape_vec((1, 3), vec![1.0, 1.0, 1.0])?;
+        *bor_matrix = Array2::from_shape_vec((1, 3), vec![0.0, 1.0, 1.0])?;
 
         let (hf, last_modified) = &mut *expected.health_factors.write().await;
-        *hf = Array1::from_vec(vec![7.840553362461782]);
+        *hf = Array1::from_vec(vec![5.398377926911468]);
         *last_modified = now;
     }
 
