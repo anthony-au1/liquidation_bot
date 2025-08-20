@@ -186,18 +186,29 @@ where
 
     if user_settings.use_as_collateral[idx] {
         let (last_sync, last_modified) = {
-            let collateral_lock = cache.collateral.read().await;
-            (collateral_lock.1, collateral_lock.2)
+            let collateral = &*cache.collateral.read().await;
+            let (_, last_sync, last_modified) = &*collateral
+                .get(row_num)
+                .ok_or_else(|| eyre!("can't get row = {} from collateral", row_num))?
+                .read()
+                .await;
+
+            (*last_sync, *last_modified)
         };
 
         let (c, s_tx, h_tx) = (cache.clone(), sync_tx.clone(), hf_tx.clone());
         let new_event = async move || {
             debug!("supply: collateral new event user = {}", event.onBehalfOf);
 
-            let mut collateral_lock = c.collateral.write().await;
-            (collateral_lock.1, collateral_lock.2) = (now, now);
-            let mut row_lock = collateral_lock.0[row_num].write().await;
-            row_lock[idx] += event.amount;
+            let collateral = &*c.collateral.read().await;
+            let (col, _, last_modified) = &mut *collateral
+                .get(row_num)
+                .ok_or_else(|| eyre!("can't get row = {} from collateral", row_num))?
+                .write()
+                .await;
+            col[idx] += event.amount;
+            *last_modified = now;
+
             s_tx.send(SyncRequest::Collateral(row_num, rq_date)).await?;
             h_tx.send(HFRequest::User(event.onBehalfOf, rq_date))
                 .await?;
@@ -230,18 +241,28 @@ where
         .await?;
     } else {
         let (last_sync, last_modified) = {
-            let reserve_lock = cache.reserve.read().await;
-            (reserve_lock.1, reserve_lock.2)
+            let reserve = &*cache.reserve.read().await;
+            let (_, last_sync, last_modified) = &*reserve
+                .get(row_num)
+                .ok_or_else(|| eyre!("can't get row = {} from reserve", row_num))?
+                .read()
+                .await;
+
+            (*last_sync, *last_modified)
         };
 
         let c = cache.clone();
         let new_event = async move || {
             debug!("supply: reserve new event user = {}", event.onBehalfOf);
 
-            let mut reserve_lock = c.reserve.write().await;
-            (reserve_lock.1, reserve_lock.2) = (now, now);
-            let mut row_lock = reserve_lock.0[row_num].write().await;
-            row_lock[idx] += event.amount;
+            let reserve = &*c.reserve.read().await;
+            let (res, _, last_modified) = &mut *reserve
+                .get(row_num)
+                .ok_or_else(|| eyre!("can't get row = {} from reserve", row_num))?
+                .write()
+                .await;
+            res[idx] += event.amount;
+            *last_modified = now;
 
             Ok(())
         };
@@ -340,18 +361,29 @@ where
 
     if user_settings.use_as_collateral[idx] {
         let (last_sync, last_modified) = {
-            let collateral_lock = cache.collateral.read().await;
-            (collateral_lock.1, collateral_lock.2)
+            let collateral = &*cache.collateral.read().await;
+            let (_, last_sync, last_modified) = &*collateral
+                .get(row_num)
+                .ok_or_else(|| eyre!("can't get row = {} from collateral", row_num))?
+                .read()
+                .await;
+
+            (*last_sync, *last_modified)
         };
 
         let (c, s_tx, h_tx) = (cache.clone(), sync_tx.clone(), hf_tx.clone());
         let new_event = async move || {
             debug!("withdraw: collateral new event user = {}", event.user);
 
-            let mut collateral_lock = c.collateral.write().await;
-            (collateral_lock.1, collateral_lock.2) = (now, now);
-            let mut row_lock = collateral_lock.0[row_num].write().await;
-            row_lock[idx] -= event.amount;
+            let collateral = &*c.collateral.read().await;
+            let (col, _, last_modified) = &mut *collateral
+                .get(row_num)
+                .ok_or_else(|| eyre!("can't get row = {} from collateral", row_num))?
+                .write()
+                .await;
+            col[idx] -= event.amount;
+            *last_modified = now;
+
             s_tx.send(SyncRequest::Collateral(row_num, rq_date)).await?;
             h_tx.send(HFRequest::User(event.user, rq_date)).await?;
 
@@ -383,18 +415,28 @@ where
         .await?;
     } else {
         let (last_sync, last_modified) = {
-            let reserve_lock = cache.reserve.read().await;
-            (reserve_lock.1, reserve_lock.2)
+            let reserve = &*cache.reserve.read().await;
+            let (_, last_sync, last_modified) = &*reserve
+                .get(row_num)
+                .ok_or_else(|| eyre!("can't get row = {} from reserve", row_num))?
+                .read()
+                .await;
+
+            (*last_sync, *last_modified)
         };
 
         let c = cache.clone();
         let new_event = async move || {
             debug!("withdraw: reserve new event user = {}", event.user);
 
-            let mut reserve_lock = c.reserve.write().await;
-            (reserve_lock.1, reserve_lock.2) = (now, now);
-            let mut row_lock = reserve_lock.0[row_num].write().await;
-            row_lock[idx] -= event.amount;
+            let reserve = &*c.reserve.read().await;
+            let (res, _, last_modified) = &mut *reserve
+                .get(row_num)
+                .ok_or_else(|| eyre!("can't get row = {} from reserve", row_num))?
+                .write()
+                .await;
+            res[idx] -= event.amount;
+            *last_modified = now;
 
             Ok(())
         };
@@ -492,18 +534,29 @@ where
     let now = Utc::now().timestamp_micros();
 
     let (last_sync, last_modified) = {
-        let borrowed_lock = cache.borrowed.read().await;
-        (borrowed_lock.1, borrowed_lock.2)
+        let borrowed = &*cache.borrowed.read().await;
+        let (_, last_sync, last_modified) = &*borrowed
+            .get(row_num)
+            .ok_or_else(|| eyre!("can't get row = {} from borrowed", row_num))?
+            .read()
+            .await;
+
+        (*last_sync, *last_modified)
     };
 
     let (c, s_tx, h_tx) = (cache.clone(), sync_tx.clone(), hf_tx.clone());
     let new_event = async move || {
         debug!("borrow: new event user = {}", event.user);
 
-        let mut borrowed_lock = c.borrowed.write().await;
-        (borrowed_lock.1, borrowed_lock.2) = (now, now);
-        let mut row_lock = borrowed_lock.0[row_num].write().await;
-        row_lock[idx] += event.amount;
+        let borrowed = &*c.borrowed.read().await;
+        let (bor, _, last_modified) = &mut *borrowed
+            .get(row_num)
+            .ok_or_else(|| eyre!("can't get row = {} from borrowed", row_num))?
+            .write()
+            .await;
+        bor[idx] += event.amount;
+        *last_modified = now;
+
         s_tx.send(SyncRequest::Borrowed(row_num, rq_date)).await?;
         h_tx.send(HFRequest::User(event.user, rq_date)).await?;
 
@@ -602,18 +655,29 @@ where
     let now = Utc::now().timestamp_micros();
 
     let (last_sync, last_modified) = {
-        let borrowed_lock = cache.borrowed.read().await;
-        (borrowed_lock.1, borrowed_lock.2)
+        let borrowed = &*cache.borrowed.read().await;
+        let (_, last_sync, last_modified) = &*borrowed
+            .get(row_num)
+            .ok_or_else(|| eyre!("can't get row = {} from borrowed", row_num))?
+            .read()
+            .await;
+
+        (*last_sync, *last_modified)
     };
 
     let (c, s_tx, h_tx) = (cache.clone(), sync_tx.clone(), hf_tx.clone());
     let new_event = async move || {
         debug!("repay: new event user = {}", event.user);
 
-        let mut borrowed_lock = c.borrowed.write().await;
-        (borrowed_lock.1, borrowed_lock.2) = (now, now);
-        let mut row_lock = borrowed_lock.0[row_num].write().await;
-        row_lock[idx] -= event.amount;
+        let borrowed = &*c.borrowed.read().await;
+        let (bor, _, last_modified) = &mut *borrowed
+            .get(row_num)
+            .ok_or_else(|| eyre!("can't get row = {} from borrowed", row_num))?
+            .write()
+            .await;
+        bor[idx] -= event.amount;
+        *last_modified = now;
+
         s_tx.send(SyncRequest::Borrowed(row_num, rq_date)).await?;
         h_tx.send(HFRequest::User(event.user, rq_date)).await?;
 
@@ -717,8 +781,14 @@ where
     let now = Utc::now().timestamp_micros();
 
     let (last_sync, last_modified) = {
-        let reserve_lock = cache.reserve.read().await;
-        (reserve_lock.1, reserve_lock.2)
+        let reserve = &*cache.reserve.read().await;
+        let (_, last_sync, last_modified) = &*reserve
+            .get(row_num)
+            .ok_or_else(|| eyre!("can't get row = {} from reserve", row_num))?
+            .read()
+            .await;
+
+        (*last_sync, *last_modified)
     };
 
     let (c, s_tx, h_tx) = (cache.clone(), sync_tx.clone(), hf_tx.clone());
@@ -734,16 +804,24 @@ where
             .use_as_collateral
             .set(idx, true);
 
-        let mut reserve_lock = c.reserve.write().await;
-        (reserve_lock.1, reserve_lock.2) = (now, now);
-        let mut reserve_row_lock = reserve_lock.0[row_num].write().await;
+        let reserve = &*c.reserve.read().await;
+        let (res, _, last_modified) = &mut *reserve
+            .get(row_num)
+            .ok_or_else(|| eyre!("can't get row = {} from reserve", row_num))?
+            .write()
+            .await;
+        *last_modified = now;
 
-        let mut collateral_lock = c.collateral.write().await;
-        (collateral_lock.1, collateral_lock.2) = (now, now);
-        let mut collateral_row_lock = collateral_lock.0[row_num].write().await;
+        let collateral = &*c.collateral.read().await;
+        let (col, _, last_modified) = &mut *collateral
+            .get(row_num)
+            .ok_or_else(|| eyre!("can't get row = {} from collateral", row_num))?
+            .write()
+            .await;
+        *last_modified = now;
 
-        collateral_row_lock[idx] = reserve_row_lock[idx];
-        reserve_row_lock[idx] = U256::default();
+        col[idx] = res[idx];
+        res[idx] = U256::default();
 
         s_tx.send(SyncRequest::Collateral(row_num, rq_date)).await?;
         h_tx.send(HFRequest::User(event.user, rq_date)).await?;
@@ -848,8 +926,14 @@ where
     let now = Utc::now().timestamp_micros();
 
     let (last_sync, last_modified) = {
-        let reserve_lock = cache.reserve.read().await;
-        (reserve_lock.1, reserve_lock.2)
+        let reserve = &*cache.reserve.read().await;
+        let (_, last_sync, last_modified) = &*reserve
+            .get(row_num)
+            .ok_or_else(|| eyre!("can't get row = {} from reserve", row_num))?
+            .read()
+            .await;
+
+        (*last_sync, *last_modified)
     };
 
     let (c, s_tx, h_tx) = (cache.clone(), sync_tx.clone(), hf_tx.clone());
@@ -865,16 +949,24 @@ where
             .use_as_collateral
             .set(idx, false);
 
-        let mut reserve_lock = c.reserve.write().await;
-        (reserve_lock.1, reserve_lock.2) = (now, now);
-        let mut reserve_row_lock = reserve_lock.0[row_num].write().await;
+        let reserve = &*c.reserve.read().await;
+        let (res, _, last_modified) = &mut *reserve
+            .get(row_num)
+            .ok_or_else(|| eyre!("can't get row = {} from reserve", row_num))?
+            .write()
+            .await;
+        *last_modified = now;
 
-        let mut collateral_lock = c.collateral.write().await;
-        (collateral_lock.1, collateral_lock.2) = (now, now);
-        let mut collateral_row_lock = collateral_lock.0[row_num].write().await;
+        let collateral = &*c.collateral.read().await;
+        let (col, _, last_modified) = &mut *collateral
+            .get(row_num)
+            .ok_or_else(|| eyre!("can't get row = {} from collateral", row_num))?
+            .write()
+            .await;
+        *last_modified = now;
 
-        reserve_row_lock[idx] = collateral_row_lock[idx];
-        collateral_row_lock[idx] = U256::default();
+        res[idx] = col[idx];
+        col[idx] = U256::default();
 
         s_tx.send(SyncRequest::Collateral(row_num, rq_date)).await?;
         h_tx.send(HFRequest::User(event.user, rq_date)).await?;
@@ -956,7 +1048,7 @@ where
         &sync_tx,
         &hf_tx,
     )
-        .await?
+    .await?
     {
         debug!(
             "liquidation_call: new user created = {}, cache = {:?}",
@@ -985,28 +1077,38 @@ where
         .order;
 
     let (last_sync, last_modified) = {
-        let borrowed_lock = cache.borrowed.read().await;
-        (borrowed_lock.1, borrowed_lock.2)
+        let borrowed = &*cache.borrowed.read().await;
+        let (_, last_sync, last_modified) = &*borrowed
+            .get(row_num)
+            .ok_or_else(|| eyre!("can't get row = {} from borrowed", row_num))?
+            .read()
+            .await;
+
+        (*last_sync, *last_modified)
     };
 
     let (c, s_tx, h_tx) = (cache.clone(), sync_tx.clone(), hf_tx.clone());
     let new_event = async move || {
+        debug!("liquidation_call: new event user = {}", event.user);
 
-        debug!(
-            "liquidation_call: new event user = {}",
-            event.user
-        );
+        let collateral = &*c.collateral.read().await;
+        let (col, _, last_modified) = &mut *collateral
+            .get(row_num)
+            .ok_or_else(|| eyre!("can't get row = {} from collateral", row_num))?
+            .write()
+            .await;
+        *last_modified = now;
 
-        let mut collateral_lock = c.collateral.write().await;
-        (collateral_lock.1, collateral_lock.2) = (now, now);
-        let mut collateral_row_lock = collateral_lock.0[row_num].write().await;
+        let borrowed = &*c.borrowed.read().await;
+        let (bor, _, last_modified) = &mut *borrowed
+            .get(row_num)
+            .ok_or_else(|| eyre!("can't get row = {} from borrowed", row_num))?
+            .write()
+            .await;
+        *last_modified = now;
 
-        let mut borrowed_lock = c.borrowed.write().await;
-        (borrowed_lock.1, borrowed_lock.2) = (now, now);
-        let mut borrowed_row_lock = borrowed_lock.0[row_num].write().await;
-
-        borrowed_row_lock[bor_idx] -= event.debtToCover;
-        collateral_row_lock[col_idx] -= event.liquidatedCollateralAmount;
+        bor[bor_idx] -= event.debtToCover;
+        col[col_idx] -= event.liquidatedCollateralAmount;
 
         s_tx.send(SyncRequest::Both(row_num, rq_date)).await?;
         h_tx.send(HFRequest::User(event.user, rq_date)).await?;
@@ -1036,7 +1138,7 @@ where
         new_event,
         skip_event,
     )
-        .await?;
+    .await?;
 
     debug!("{}", {
         let received = Utc::now().timestamp_micros();

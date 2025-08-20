@@ -1,6 +1,6 @@
 use crate::arbitrum::arbitrum::IAaveOracle::IAaveOracleInstance;
 use crate::arbitrum::arbitrum::IAaveProtocolDataProvider::{
-    IAaveProtocolDataProviderInstance, TokenData, getUserReserveDataReturn,
+    getUserReserveDataReturn, IAaveProtocolDataProviderInstance, TokenData,
 };
 use crate::arbitrum::arbitrum::IChainlinkAggregator::IChainlinkAggregatorEvents;
 use crate::arbitrum::arbitrum::IL2Pool::IL2PoolEvents;
@@ -20,13 +20,13 @@ use chrono::Utc;
 use dashmap::DashMap;
 use eyre::eyre;
 use futures::future::try_join_all;
-use ndarray::{Array1, Array2, Axis, concatenate};
+use ndarray::{concatenate, Array1, Array2, Axis};
 use std::collections::HashMap;
 use std::default::Default;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::RwLock;
-use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::{task, time};
 use tracing::{debug, error};
 
@@ -949,7 +949,7 @@ async fn listen_hf_calc_handler(cache: &Cache, rc: &mut Receiver<HFRequest>) -> 
 
 pub type UserDetails = DashMap<Address, UserSettings>;
 pub type Array = RwLock<(Array1<f64>, TimeStamp)>;
-pub type Arrays = RwLock<(Vec<RwLock<Array1<U256>>>, TimeStamp, TimeStamp)>;
+pub type Arrays = RwLock<Vec<RwLock<(Array1<U256>, TimeStamp, TimeStamp)>>>;
 pub type Matrix = RwLock<Array2<f64>>;
 
 #[derive(Default, Debug, Clone)]
@@ -1025,44 +1025,35 @@ impl Cache {
         let now = Utc::now().timestamp_micros();
 
         {
-            let collaterals = &mut *self.collateral.write().await;
-            let mut col = collaterals
-                .0
+            let collaterals = &*self.collateral.read().await;
+            let (col, last_sync, last_modified) = &mut *collaterals
                 .get(row_num)
                 .ok_or_else(|| eyre!("can't get row = {} from collateral", row_num))?
                 .write()
                 .await;
-            *col = Array1::from(collateral);
-            (collaterals.1, collaterals.2) = (now, now);
-
+            (*col, *last_sync, *last_modified) = (Array1::from(collateral), now, now);
             debug!("sync_user: new collateral = {:?}", col);
         }
 
         {
-            let reserves = &mut *self.reserve.write().await;
-            let mut res = reserves
-                .0
+            let reserves = &*self.reserve.read().await;
+            let (res, last_sync, last_modified) = &mut *reserves
                 .get(row_num)
                 .ok_or_else(|| eyre!("can't get row = {} from reserve", row_num))?
                 .write()
                 .await;
-            *res = Array1::from(reserve);
-            (reserves.1, reserves.2) = (now, now);
-
+            (*res, *last_sync, *last_modified) = (Array1::from(reserve), now, now);
             debug!("sync_user: new reserve = {:?}", res);
         }
 
         {
-            let borroweds = &mut *self.borrowed.write().await;
-            let mut bor = borroweds
-                .0
+            let debt = &*self.borrowed.read().await;
+            let (bor, last_sync, last_modified) = &mut *debt
                 .get(row_num)
                 .ok_or_else(|| eyre!("can't get row = {} from borrowed", row_num))?
                 .write()
                 .await;
-            *bor = Array1::from(borrowed);
-            (borroweds.1, borroweds.2) = (now, now);
-
+            (*bor, *last_sync, *last_modified) = (Array1::from(borrowed), now, now);
             debug!("sync_user: new borrowed = {:?}", bor);
         }
 
@@ -1101,40 +1092,38 @@ impl Cache {
             *user_num_lock += 1;
         }
 
-        let now = Utc::now().timestamp_micros();
         {
             let collaterals = &mut *self.collateral.write().await;
-            collaterals.0.push(RwLock::new(Array1::from_vec(vec![
-                U256::default();
-                tokens.len()
-            ])));
-            (collaterals.1, collaterals.2) = (now, now);
+            collaterals.push(RwLock::new((
+                Array1::from_vec(vec![U256::default(); tokens.len()]),
+                0,
+                0,
+            )));
         }
 
         {
             let reserves = &mut *self.reserve.write().await;
-            reserves.0.push(RwLock::new(Array1::from_vec(vec![
-                U256::default();
-                tokens.len()
-            ])));
-            (reserves.1, reserves.2) = (now, now);
+            reserves.push(RwLock::new((
+                Array1::from_vec(vec![U256::default(); tokens.len()]),
+                0,
+                0,
+            )));
         }
 
         {
-            let borroweds = &mut *self.borrowed.write().await;
-            borroweds.0.push(RwLock::new(Array1::from_vec(vec![
-                U256::default();
-                tokens.len()
-            ])));
-            (borroweds.1, borroweds.2) = (now, now);
+            let borrowed = &mut *self.borrowed.write().await;
+            borrowed.push(RwLock::new((
+                Array1::from_vec(vec![U256::default(); tokens.len()]),
+                0,
+                0,
+            )));
         }
 
         {
-            let hf = &mut *self.health_factors.write().await;
-            let mut hf_vec = hf.0.to_vec();
+            let (hf, last_modified) = &mut *self.health_factors.write().await;
+            let mut hf_vec = hf.to_vec();
             hf_vec.push(0.0);
-            hf.0 = Array1::from_vec(hf_vec);
-            hf.1 = now;
+            (*hf, *last_modified) = (Array1::from_vec(hf_vec), 0);
         }
 
         self.sync_user(user, tokens, provider).await?;
@@ -1263,15 +1252,15 @@ impl Cache {
         );
 
         let low_bound = col_matrix_lock.nrows().saturating_sub(1);
-        while col_matrix_lock.nrows() < col_lock.0.len() {
+        while col_matrix_lock.nrows() < col_lock.len() {
             let row_lock = col_lock
-                .0
                 .get(col_matrix_lock.nrows())
                 .ok_or_else(|| eyre!("row = {} not found in collateral", col_matrix_lock.nrows()))?
                 .read()
                 .await;
             let row = Array1::from_iter(
                 row_lock
+                    .0
                     .iter()
                     .enumerate()
                     .map(|(idx, v)| v.as_f64(decimals[idx])),
@@ -1298,15 +1287,16 @@ impl Cache {
             return Ok(());
         }
 
-        let row = col_lock
-            .0
+        let row_lock = col_lock
             .get(row_num)
             .ok_or_else(|| eyre!("row = {} not found in collateral", row_num))?
             .read()
             .await;
 
         let row = Array1::from_iter(
-            row.iter()
+            row_lock
+                .0
+                .iter()
                 .enumerate()
                 .map(|(idx, v)| v.as_f64(decimals[idx])),
         );
@@ -1342,9 +1332,8 @@ impl Cache {
         );
 
         let low_bound = bor_matrix_lock.nrows().saturating_sub(1);
-        while bor_matrix_lock.nrows() < bor_lock.0.len() {
+        while bor_matrix_lock.nrows() < bor_lock.len() {
             let row_lock = bor_lock
-                .0
                 .get(bor_matrix_lock.nrows())
                 .ok_or_else(|| eyre!("row = {} not found in borrowed", bor_matrix_lock.nrows()))?
                 .read()
@@ -1352,6 +1341,7 @@ impl Cache {
 
             let row = Array1::from_iter(
                 row_lock
+                    .0
                     .iter()
                     .enumerate()
                     .map(|(idx, v)| v.as_f64(decimals[idx])),
@@ -1378,15 +1368,16 @@ impl Cache {
             return Ok(());
         }
 
-        let row = bor_lock
-            .0
+        let row_lock = bor_lock
             .get(row_num)
             .ok_or_else(|| eyre!("row = {} not found in borrowed", row_num))?
             .read()
             .await;
 
         let row = Array1::from_iter(
-            row.iter()
+            row_lock
+                .0
+                .iter()
                 .enumerate()
                 .map(|(idx, v)| v.as_f64(decimals[idx])),
         );
@@ -1442,13 +1433,14 @@ impl Cache {
             let (decimals, _) = &*self.decimal.read().await;
 
             let col_eff = {
-                let (collateral, _, _) = &*self.collateral.read().await;
+                let collateral = &*self.collateral.read().await;
                 let col_row_lock = Array1::from_iter(
                     collateral
                         .get(row_num)
                         .ok_or_else(|| eyre!("row = {} not found in collateral", row_num))?
                         .read()
                         .await
+                        .0
                         .iter()
                         .enumerate()
                         .map(|(idx, v)| v.as_f64(decimals[idx])),
@@ -1457,13 +1449,14 @@ impl Cache {
             };
 
             let bor_eff = {
-                let (borrowed, _, _) = &*self.borrowed.read().await;
+                let borrowed = &*self.borrowed.read().await;
                 let bor_row_lock = Array1::from_iter(
                     borrowed
                         .get(row_num)
                         .ok_or_else(|| eyre!("row = {} not found in borrowed", row_num))?
                         .read()
                         .await
+                        .0
                         .iter()
                         .enumerate()
                         .map(|(idx, v)| v.as_f64(decimals[idx])),

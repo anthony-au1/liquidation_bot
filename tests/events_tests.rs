@@ -8,9 +8,12 @@ use liquidation_bot::arbitrum::arbitrum::IAaveProtocolDataProvider::TokenData;
 use liquidation_bot::arbitrum::arbitrum::IChainlinkAggregator::{
     AnswerUpdated, IChainlinkAggregatorEvents,
 };
-use liquidation_bot::arbitrum::arbitrum::IL2Pool::{Borrow, IL2PoolEvents, LiquidationCall, Repay, ReserveUsedAsCollateralDisabled, ReserveUsedAsCollateralEnabled, Supply, Withdraw};
+use liquidation_bot::arbitrum::arbitrum::IL2Pool::{
+    Borrow, IL2PoolEvents, LiquidationCall, Repay, ReserveUsedAsCollateralDisabled,
+    ReserveUsedAsCollateralEnabled, Supply, Withdraw,
+};
 use liquidation_bot::arbitrum::arbitrum::{
-    Cache, DataProvider, UserReserveData, UserSettings, start,
+    start, Cache, DataProvider, UserReserveData, UserSettings,
 };
 use ndarray::{Array1, Array2};
 use std::fmt::Debug;
@@ -381,21 +384,19 @@ impl DataProvider for DummyDataProvider {
                         user,
                     },
                 ))
-                    .await
+                .await
             }
             16 => {
-                callback(IL2PoolEvents::LiquidationCall(
-                    LiquidationCall {
-                        collateralAsset: Address::from_str(DAI)?,
-                        debtAsset: Address::from_str(AAVE)?,
-                        user: user.clone(),
-                        debtToCover: 1.as_u256_decimal_18(),
-                        liquidatedCollateralAmount: 10.as_u256_decimal_12(),
-                        liquidator: user,
-                        receiveAToken: false,
-                    },
-                ))
-                    .await
+                callback(IL2PoolEvents::LiquidationCall(LiquidationCall {
+                    collateralAsset: Address::from_str(DAI)?,
+                    debtAsset: Address::from_str(AAVE)?,
+                    user: user.clone(),
+                    debtToCover: 1.as_u256_decimal_18(),
+                    liquidatedCollateralAmount: 10.as_u256_decimal_12(),
+                    liquidator: user,
+                    receiveAToken: false,
+                }))
+                .await
             }
             _ => Err(eyre!("no listen_events events")),
         }
@@ -523,32 +524,41 @@ async fn test_events() -> eyre::Result<()> {
         *prices = Array1::from_vec(vec![1712.30, 2812.30, 4012.30]);
         *last_modified = now;
 
-        let (reserves, last_sync, last_modified) = &mut *expected.reserve.write().await;
-        reserves.push(RwLock::new(Array1::from_vec(vec![
-            10.as_u256_decimal_18(),
-            U256::default(),
-            U256::default(),
-        ])));
-        (*last_sync, *last_modified) = (now, now);
+        let reserves = &mut *expected.reserve.write().await;
+        reserves.push(RwLock::new((
+            Array1::from_vec(vec![
+                10.as_u256_decimal_18(),
+                U256::default(),
+                U256::default(),
+            ]),
+            now,
+            now,
+        )));
 
-        let (collaterals, last_sync, last_modified) = &mut *expected.collateral.write().await;
-        collaterals.push(RwLock::new(Array1::from_vec(vec![
-            U256::default(),
-            3.as_u256_decimal_6(),
-            10.as_u256_decimal_12(),
-        ])));
-        (*last_sync, *last_modified) = (now, now);
+        let collaterals = &mut *expected.collateral.write().await;
+        collaterals.push(RwLock::new((
+            Array1::from_vec(vec![
+                U256::default(),
+                3.as_u256_decimal_6(),
+                10.as_u256_decimal_12(),
+            ]),
+            now,
+            now,
+        )));
 
         let col_matrix = &mut *expected.collateral_matrix.write().await;
         *col_matrix = Array2::from_shape_vec((1, 3), vec![0.0, 3.0, 10.0])?;
 
-        let (borroweds, last_sync, last_modified) = &mut *expected.borrowed.write().await;
-        borroweds.push(RwLock::new(Array1::from_vec(vec![
-            U256::default(),
-            1.as_u256_decimal_6(),
-            1.as_u256_decimal_12(),
-        ])));
-        (*last_sync, *last_modified) = (now, now);
+        let borroweds = &mut *expected.borrowed.write().await;
+        borroweds.push(RwLock::new((
+            Array1::from_vec(vec![
+                U256::default(),
+                1.as_u256_decimal_6(),
+                1.as_u256_decimal_12(),
+            ]),
+            now,
+            now,
+        )));
 
         let bor_matrix = &mut *expected.borrowed_matrix.write().await;
         *bor_matrix = Array2::from_shape_vec((1, 3), vec![0.0, 1.0, 1.0])?;
@@ -605,47 +615,43 @@ async fn test_events() -> eyre::Result<()> {
     }
 
     {
-        let (reserves, last_sync, last_modified) = &*cache.reserve.read().await;
-        let (reserves_expected, last_sync_expected, last_modified_expected) =
-            &*expected.reserve.read().await;
+        let reserves = &*cache.reserve.read().await;
+        let (res, last_sync, last_modified) = &*reserves
+            .get(0)
+            .ok_or_else(|| eyre!("can't get row = 0 from reserves"))?
+            .write()
+            .await;
+
+        let reserves_expected = &*expected.reserve.read().await;
+        let (res_expected, last_sync_expected, last_modified_expected) = &*reserves_expected
+            .get(0)
+            .ok_or_else(|| eyre!("can't get row = 0 from reserves exepected"))?
+            .write()
+            .await;
 
         assert!(last_sync < last_sync_expected);
         assert!(last_modified < last_modified_expected);
-
-        let reserve = &*reserves
-            .get(0)
-            .ok_or_else(|| eyre!("no reserves found"))?
-            .read()
-            .await;
-        let reserve_expected = &*reserves_expected
-            .get(0)
-            .ok_or_else(|| eyre!("no reserves expected found"))?
-            .read()
-            .await;
-
-        assert_eq!(reserve, reserve_expected);
+        assert_eq!(res, res_expected);
     }
 
     {
-        let (collaterals, last_sync, last_modified) = &*cache.collateral.read().await;
-        let (collaterals_expected, last_sync_expected, last_modified_expected) =
-            &*expected.collateral.read().await;
+        let collaterals = &*cache.collateral.read().await;
+        let (col, last_sync, last_modified) = &*collaterals
+            .get(0)
+            .ok_or_else(|| eyre!("can't get row = 0 from collaterals"))?
+            .write()
+            .await;
+
+        let collaterals_expected = &*expected.collateral.read().await;
+        let (col_expected, last_sync_expected, last_modified_expected) = &*collaterals_expected
+            .get(0)
+            .ok_or_else(|| eyre!("can't get row = 0 from collateral expected"))?
+            .write()
+            .await;
 
         assert!(last_sync < last_sync_expected);
         assert!(last_modified < last_modified_expected);
-
-        let collateral = &*collaterals
-            .get(0)
-            .ok_or_else(|| eyre!("no collaterals found"))?
-            .read()
-            .await;
-        let collateral_expected = &*collaterals_expected
-            .get(0)
-            .ok_or_else(|| eyre!("no collaterals expected found"))?
-            .read()
-            .await;
-
-        assert_eq!(collateral, collateral_expected);
+        assert_eq!(col, col_expected);
     }
 
     {
@@ -656,25 +662,23 @@ async fn test_events() -> eyre::Result<()> {
     }
 
     {
-        let (borroweds, last_sync, last_modified) = &*cache.borrowed.read().await;
-        let (borroweds_expected, last_sync_expected, last_modified_expected) =
-            &*expected.borrowed.read().await;
+        let borrowed = &*cache.borrowed.read().await;
+        let (bor, last_sync, last_modified) = &*borrowed
+            .get(0)
+            .ok_or_else(|| eyre!("can't get row = 0 from borrowed"))?
+            .write()
+            .await;
+
+        let borrowed_expected = &*expected.borrowed.read().await;
+        let (bor_expected, last_sync_expected, last_modified_expected) = &*borrowed_expected
+            .get(0)
+            .ok_or_else(|| eyre!("can't get row = 0 from borrowed expected"))?
+            .write()
+            .await;
 
         assert!(last_sync < last_sync_expected);
         assert!(last_modified < last_modified_expected);
-
-        let borrowed = &*borroweds
-            .get(0)
-            .ok_or_else(|| eyre!("no borroweds found"))?
-            .read()
-            .await;
-        let borrowed_expected = &*borroweds_expected
-            .get(0)
-            .ok_or_else(|| eyre!("no borroweds expected found"))?
-            .read()
-            .await;
-
-        assert_eq!(borrowed, borrowed_expected);
+        assert_eq!(bor, bor_expected);
     }
 
     {
