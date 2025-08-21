@@ -1,7 +1,7 @@
 //TODO
 
-- RwLock<Vec<RwLock<MyStruct>>> we need to read the outer lock and write inner one. we use write on both. fix it
-- any way to use U256 for matrix calc???
+- improve sync by adding column
+- update U256 to f64 
 - we still need to re-sync all users assets, possible every 24h.
 
 **Future Improvements**

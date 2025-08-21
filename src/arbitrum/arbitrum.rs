@@ -1,6 +1,6 @@
 use crate::arbitrum::arbitrum::IAaveOracle::IAaveOracleInstance;
 use crate::arbitrum::arbitrum::IAaveProtocolDataProvider::{
-    getUserReserveDataReturn, IAaveProtocolDataProviderInstance, TokenData,
+    IAaveProtocolDataProviderInstance, TokenData, getUserReserveDataReturn,
 };
 use crate::arbitrum::arbitrum::IChainlinkAggregator::IChainlinkAggregatorEvents;
 use crate::arbitrum::arbitrum::IL2Pool::IL2PoolEvents;
@@ -20,13 +20,13 @@ use chrono::Utc;
 use dashmap::DashMap;
 use eyre::eyre;
 use futures::future::try_join_all;
-use ndarray::{concatenate, Array1, Array2, Axis};
+use ndarray::{Array1, Array2, Axis, concatenate};
 use std::collections::HashMap;
 use std::default::Default;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::RwLock;
+use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::{task, time};
 use tracing::{debug, error};
 
@@ -842,10 +842,16 @@ where
 }
 
 #[derive(Debug, PartialEq)]
+pub(crate) enum SyncTarget {
+    Row(usize),
+    Cell(usize, usize),
+}
+
+#[derive(Debug, PartialEq)]
 pub(crate) enum SyncRequest {
-    Collateral(usize, TimeStamp),
-    Borrowed(usize, TimeStamp),
-    Both(usize, TimeStamp),
+    Collateral(SyncTarget, TimeStamp),
+    Borrowed(SyncTarget, TimeStamp),
+    Both(SyncTarget, TimeStamp),
 }
 
 pub(crate) async fn listen_sync(
@@ -876,14 +882,14 @@ pub(crate) async fn listen_sync(
 async fn listen_sync_handler(cache: &Cache, rc: &mut Receiver<SyncRequest>) -> eyre::Result<()> {
     while let Some(sync_rq) = rc.recv().await {
         match sync_rq {
-            SyncRequest::Collateral(row_num, rq_date) => {
-                let _ = cache.sync_collateral(row_num, rq_date).await;
+            SyncRequest::Collateral(target, rq_date) => {
+                let _ = cache.sync_collateral(&target, rq_date).await;
             }
-            SyncRequest::Borrowed(row_num, rq_date) => {
-                let _ = cache.sync_borrowed(row_num, rq_date).await;
+            SyncRequest::Borrowed(target, rq_date) => {
+                let _ = cache.sync_borrowed(&target, rq_date).await;
             }
-            SyncRequest::Both(row_num, rq_date) => {
-                let _ = cache.sync_data(row_num, rq_date).await;
+            SyncRequest::Both(target, rq_date) => {
+                let _ = cache.sync_data(&target, rq_date).await;
             }
         }
     }
@@ -1239,7 +1245,7 @@ impl Cache {
 
     pub(in crate::arbitrum) async fn sync_collateral(
         &self,
-        row_num: usize,
+        target: &SyncTarget,
         rq_date: TimeStamp,
     ) -> eyre::Result<()> {
         let col_lock = self.collateral.read().await;
@@ -1247,8 +1253,8 @@ impl Cache {
         let (decimals, _) = &*self.decimal.read().await;
 
         debug!(
-            "sync_collateral: row_num = {}, col_lock = {:?}",
-            row_num, col_lock
+            "sync_collateral: sync target = {:?}, col_lock = {:?}",
+            target, col_lock
         );
 
         let low_bound = col_matrix_lock.nrows().saturating_sub(1);
@@ -1273,6 +1279,11 @@ impl Cache {
             col_matrix_lock
         );
 
+        let (row_num, col_num) = match target {
+            SyncTarget::Row(row_num) => (*row_num, None),
+            SyncTarget::Cell(row_num, col_num) => (*row_num, Some(*col_num)),
+        };
+
         if row_num > low_bound {
             debug!("{}", {
                 let received = Utc::now().timestamp_micros();
@@ -1287,20 +1298,32 @@ impl Cache {
             return Ok(());
         }
 
-        let row_lock = col_lock
-            .get(row_num)
-            .ok_or_else(|| eyre!("row = {} not found in collateral", row_num))?
-            .read()
-            .await;
+        if let Some(col_num) = col_num {
+            col_matrix_lock[(row_num, col_num)] = {
+                let (col, _, _) = &*col_lock
+                    .get(row_num)
+                    .ok_or_else(|| eyre!("row = {} not found in collateral", row_num))?
+                    .read()
+                    .await;
+                col.get(col_num)
+                    .ok_or_else(|| eyre!("column = {} not found in collateral", col_num))?
+                    .as_f64(decimals[col_num])
+            };
+        } else {
+            let row = col_lock
+                .get(row_num)
+                .ok_or_else(|| eyre!("row = {} not found in collateral", row_num))?
+                .read()
+                .await;
 
-        let row = Array1::from_iter(
-            row_lock
-                .0
-                .iter()
-                .enumerate()
-                .map(|(idx, v)| v.as_f64(decimals[idx])),
-        );
-        col_matrix_lock.row_mut(row_num).assign(&row);
+            let row = Array1::from_iter(
+                row.0
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, v)| v.as_f64(decimals[idx])),
+            );
+            col_matrix_lock.row_mut(row_num).assign(&row);
+        }
 
         debug!("{}", {
             let received = Utc::now().timestamp_micros();
@@ -1319,7 +1342,7 @@ impl Cache {
 
     pub(in crate::arbitrum) async fn sync_borrowed(
         &self,
-        row_num: usize,
+        target: &SyncTarget,
         rq_date: TimeStamp,
     ) -> eyre::Result<()> {
         let bor_lock = self.borrowed.read().await;
@@ -1327,8 +1350,8 @@ impl Cache {
         let (decimals, _) = &*self.decimal.read().await;
 
         debug!(
-            "sync_borrowed: row_num = {}, bor_lock = {:?}",
-            row_num, bor_lock
+            "sync_borrowed: sync target = {:?}, bor_lock = {:?}",
+            target, bor_lock
         );
 
         let low_bound = bor_matrix_lock.nrows().saturating_sub(1);
@@ -1354,6 +1377,11 @@ impl Cache {
             bor_matrix_lock
         );
 
+        let (row_num, col_num) = match target {
+            SyncTarget::Row(row_num) => (*row_num, None),
+            SyncTarget::Cell(row_num, col_num) => (*row_num, Some(*col_num)),
+        };
+
         if row_num > low_bound {
             debug!("{}", {
                 let received = Utc::now().timestamp_micros();
@@ -1368,20 +1396,32 @@ impl Cache {
             return Ok(());
         }
 
-        let row_lock = bor_lock
-            .get(row_num)
-            .ok_or_else(|| eyre!("row = {} not found in borrowed", row_num))?
-            .read()
-            .await;
+        if let Some(col_num) = col_num {
+            bor_matrix_lock[(row_num, col_num)] = {
+                let (bor, _, _) = &*bor_lock
+                    .get(row_num)
+                    .ok_or_else(|| eyre!("row = {} not found in borrowed", row_num))?
+                    .read()
+                    .await;
+                bor.get(col_num)
+                    .ok_or_else(|| eyre!("column = {} not found in borrowed", col_num))?
+                    .as_f64(decimals[col_num])
+            };
+        } else {
+            let row = bor_lock
+                .get(row_num)
+                .ok_or_else(|| eyre!("row = {} not found in borrowed", row_num))?
+                .read()
+                .await;
 
-        let row = Array1::from_iter(
-            row_lock
-                .0
-                .iter()
-                .enumerate()
-                .map(|(idx, v)| v.as_f64(decimals[idx])),
-        );
-        bor_matrix_lock.row_mut(row_num).assign(&row);
+            let row = Array1::from_iter(
+                row.0
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, v)| v.as_f64(decimals[idx])),
+            );
+            bor_matrix_lock.row_mut(row_num).assign(&row);
+        }
 
         debug!("{}", {
             let received = Utc::now().timestamp_micros();
@@ -1400,11 +1440,11 @@ impl Cache {
 
     pub(in crate::arbitrum) async fn sync_data(
         &self,
-        row_num: usize,
+        target: &SyncTarget,
         rq_date: TimeStamp,
     ) -> eyre::Result<()> {
-        self.sync_collateral(row_num, rq_date).await?;
-        self.sync_borrowed(row_num, rq_date).await?;
+        self.sync_collateral(target, rq_date).await?;
+        self.sync_borrowed(target, rq_date).await?;
 
         Ok(())
     }

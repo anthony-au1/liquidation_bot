@@ -5,9 +5,9 @@ use crate::arbitrum::arbitrum::IL2Pool::{
     ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
 use crate::arbitrum::arbitrum::{
-    liquidation_threshold_update, listen_events, listen_hf_calc, listen_price_update, listen_sync, setup, AaveEvents, Cache,
-    DataProvider, F64Converter, HFRequest, RqDate, SyncRequest,
-    Token, TokenDetails, UserReserveData, UserSettings,
+    AaveEvents, Cache, DataProvider, F64Converter, HFRequest, RqDate, SyncRequest, SyncTarget, Token,
+    TokenDetails, UserReserveData, UserSettings, liquidation_threshold_update, listen_events,
+    listen_hf_calc, listen_price_update, listen_sync, setup,
 };
 use crate::arbitrum::events::{
     answer_updated, borrow, create_user, liquidation_call, repay,
@@ -25,8 +25,8 @@ use std::fmt::Debug;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc::channel;
 use tokio::sync::RwLock;
+use tokio::sync::mpsc::channel;
 use tokio::task;
 use tokio::time::sleep;
 
@@ -365,7 +365,7 @@ async fn test_sync_collateral() -> eyre::Result<()> {
         *cache.collateral_matrix.write().await = Array2::from_elem((1, row_len), 0.0);
     }
 
-    cache.sync_collateral(0, rq_date).await?;
+    cache.sync_collateral(&SyncTarget::Row(0), rq_date).await?;
 
     let mut expected = Array2::from_shape_vec(
         (1, row_len),
@@ -390,7 +390,7 @@ async fn test_sync_collateral() -> eyre::Result<()> {
         collateral.push(RwLock::new((Array1::from_vec(row.clone()), 0, 0)));
     }
 
-    cache.sync_collateral(1, rq_date).await?;
+    cache.sync_collateral(&SyncTarget::Row(1), rq_date).await?;
 
     expected.push_row(
         Array1::from_vec(vec![
@@ -415,7 +415,7 @@ async fn test_sync_collateral() -> eyre::Result<()> {
         collateral.push(RwLock::new((Array1::from_vec(row.clone()), 0, 0)));
     }
 
-    cache.sync_collateral(2, rq_date).await?;
+    cache.sync_collateral(&SyncTarget::Row(2), rq_date).await?;
 
     expected.push_row(
         Array1::from_vec(vec![
@@ -442,7 +442,7 @@ async fn test_sync_collateral() -> eyre::Result<()> {
         col_row[2] = 600.as_u256_decimal_12();
     }
 
-    cache.sync_collateral(1, rq_date).await?;
+    cache.sync_collateral(&SyncTarget::Row(1), rq_date).await?;
 
     expected[(1, 0)] = 400.0;
     expected[(1, 1)] = 500.0;
@@ -482,7 +482,7 @@ async fn test_sync_borrowed() -> eyre::Result<()> {
         *cache.borrowed_matrix.write().await = Array2::from_elem((1, row_len), 0.0);
     }
 
-    cache.sync_borrowed(0, rq_date).await?;
+    cache.sync_borrowed(&SyncTarget::Row(0), rq_date).await?;
 
     let mut expected = Array2::from_shape_vec(
         (1, row_len),
@@ -507,7 +507,7 @@ async fn test_sync_borrowed() -> eyre::Result<()> {
         borrowed.push(RwLock::new((Array1::from_vec(row.clone()), 0, 0)));
     }
 
-    cache.sync_borrowed(1, rq_date).await?;
+    cache.sync_borrowed(&SyncTarget::Row(1), rq_date).await?;
 
     expected.push_row(
         Array1::from_vec(vec![
@@ -532,7 +532,7 @@ async fn test_sync_borrowed() -> eyre::Result<()> {
         borrowed.push(RwLock::new((Array1::from_vec(row.clone()), 0, 0)));
     }
 
-    cache.sync_borrowed(2, rq_date).await?;
+    cache.sync_borrowed(&SyncTarget::Row(2), rq_date).await?;
 
     expected.push_row(
         Array1::from_vec(vec![
@@ -559,7 +559,7 @@ async fn test_sync_borrowed() -> eyre::Result<()> {
         bor_row[2] = 600.as_u256_decimal_12();
     }
 
-    cache.sync_borrowed(1, rq_date).await?;
+    cache.sync_borrowed(&SyncTarget::Row(1), rq_date).await?;
 
     expected[(1, 0)] = 400.0;
     expected[(1, 1)] = 500.0;
@@ -1094,7 +1094,7 @@ async fn test_create_user() -> eyre::Result<()> {
             .recv()
             .await
             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
-        assert_eq!(SyncRequest::Both(0, rq_date), msg);
+        assert_eq!(SyncRequest::Both(SyncTarget::Row(0), rq_date), msg);
 
         Ok::<_, eyre::Error>(())
     });
@@ -1206,7 +1206,7 @@ async fn test_supply() -> eyre::Result<()> {
             .recv()
             .await
             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
-        assert_eq!(SyncRequest::Both(0, rq_date), msg);
+        assert_eq!(SyncRequest::Both(SyncTarget::Row(0), rq_date), msg);
 
         Ok::<_, eyre::Error>(())
     });
@@ -1292,7 +1292,7 @@ async fn test_supply() -> eyre::Result<()> {
             .recv()
             .await
             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
-        assert_eq!(SyncRequest::Collateral(0, rq_date), msg);
+        assert_eq!(SyncRequest::Collateral(SyncTarget::Cell(0, 0), rq_date), msg);
 
         Ok::<_, eyre::Error>(())
     });
@@ -1501,7 +1501,7 @@ async fn test_supply() -> eyre::Result<()> {
             .recv()
             .await
             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
-        assert_eq!(SyncRequest::Both(0, rq_date), msg);
+        assert_eq!(SyncRequest::Both(SyncTarget::Row(0), rq_date), msg);
 
         Ok::<_, eyre::Error>(())
     });
@@ -1790,7 +1790,9 @@ async fn test_listen_sync() -> eyre::Result<()> {
     let senders = listen_sync(cache.clone(), 1, 1).await?;
     let sender = senders.get(0).ok_or_else(|| eyre::eyre!("senders empty"))?;
     let rq_date = Utc::now().timestamp_micros();
-    sender.send(SyncRequest::Both(0, rq_date)).await?;
+    sender
+        .send(SyncRequest::Both(SyncTarget::Row(0), rq_date))
+        .await?;
 
     sleep(Duration::from_secs(1)).await;
 
@@ -2025,7 +2027,7 @@ async fn test_withdraw() -> eyre::Result<()> {
             .recv()
             .await
             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
-        assert_eq!(SyncRequest::Both(0, rq_date), msg);
+        assert_eq!(SyncRequest::Both(SyncTarget::Row(0), rq_date), msg);
 
         Ok::<_, eyre::Error>(())
     });
@@ -2125,7 +2127,7 @@ async fn test_withdraw() -> eyre::Result<()> {
             .recv()
             .await
             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
-        assert_eq!(SyncRequest::Collateral(0, rq_date), msg);
+        assert_eq!(SyncRequest::Collateral(SyncTarget::Cell(0, 0), rq_date), msg);
 
         Ok::<_, eyre::Error>(())
     });
@@ -2350,7 +2352,7 @@ async fn test_withdraw() -> eyre::Result<()> {
             .recv()
             .await
             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
-        assert_eq!(SyncRequest::Both(0, rq_date), msg);
+        assert_eq!(SyncRequest::Both(SyncTarget::Row(0), rq_date), msg);
 
         Ok::<_, eyre::Error>(())
     });
@@ -2439,7 +2441,7 @@ async fn test_borrow() -> eyre::Result<()> {
             .recv()
             .await
             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
-        assert_eq!(SyncRequest::Both(0, rq_date), msg);
+        assert_eq!(SyncRequest::Both(SyncTarget::Row(0), rq_date), msg);
 
         Ok::<_, eyre::Error>(())
     });
@@ -2542,7 +2544,7 @@ async fn test_borrow() -> eyre::Result<()> {
             .recv()
             .await
             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
-        assert_eq!(SyncRequest::Borrowed(0, rq_date), msg);
+        assert_eq!(SyncRequest::Borrowed(SyncTarget::Cell(0, 0), rq_date), msg);
 
         Ok::<_, eyre::Error>(())
     });
@@ -2665,7 +2667,7 @@ async fn test_borrow() -> eyre::Result<()> {
             .recv()
             .await
             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
-        assert_eq!(SyncRequest::Both(0, rq_date), msg);
+        assert_eq!(SyncRequest::Both(SyncTarget::Row(0), rq_date), msg);
 
         Ok::<_, eyre::Error>(())
     });
@@ -2752,7 +2754,7 @@ async fn test_repay() -> eyre::Result<()> {
             .recv()
             .await
             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
-        assert_eq!(SyncRequest::Both(0, rq_date), msg);
+        assert_eq!(SyncRequest::Both(SyncTarget::Row(0), rq_date), msg);
 
         Ok::<_, eyre::Error>(())
     });
@@ -2853,7 +2855,7 @@ async fn test_repay() -> eyre::Result<()> {
             .recv()
             .await
             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
-        assert_eq!(SyncRequest::Borrowed(0, rq_date), msg);
+        assert_eq!(SyncRequest::Borrowed(SyncTarget::Cell(0, 0), rq_date), msg);
 
         Ok::<_, eyre::Error>(())
     });
@@ -2972,7 +2974,7 @@ async fn test_repay() -> eyre::Result<()> {
             .recv()
             .await
             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
-        assert_eq!(SyncRequest::Both(0, rq_date), msg);
+        assert_eq!(SyncRequest::Both(SyncTarget::Row(0), rq_date), msg);
 
         Ok::<_, eyre::Error>(())
     });
@@ -3056,7 +3058,7 @@ async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
             .recv()
             .await
             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
-        assert_eq!(SyncRequest::Both(0, rq_date), msg);
+        assert_eq!(SyncRequest::Both(SyncTarget::Row(0), rq_date), msg);
 
         Ok::<_, eyre::Error>(())
     });
@@ -3154,7 +3156,7 @@ async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
             .recv()
             .await
             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
-        assert_eq!(SyncRequest::Collateral(0, rq_date), msg);
+        assert_eq!(SyncRequest::Collateral(SyncTarget::Cell(0, 2), rq_date), msg);
 
         Ok::<_, eyre::Error>(())
     });
@@ -3267,7 +3269,7 @@ async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
             .recv()
             .await
             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
-        assert_eq!(SyncRequest::Both(0, rq_date), msg);
+        assert_eq!(SyncRequest::Both(SyncTarget::Row(0), rq_date), msg);
 
         Ok::<_, eyre::Error>(())
     });
@@ -3351,7 +3353,7 @@ async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
             .recv()
             .await
             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
-        assert_eq!(SyncRequest::Both(0, rq_date), msg);
+        assert_eq!(SyncRequest::Both(SyncTarget::Row(0), rq_date), msg);
 
         Ok::<_, eyre::Error>(())
     });
@@ -3449,7 +3451,7 @@ async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
             .recv()
             .await
             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
-        assert_eq!(SyncRequest::Collateral(0, rq_date), msg);
+        assert_eq!(SyncRequest::Collateral(SyncTarget::Cell(0, 2), rq_date), msg);
 
         Ok::<_, eyre::Error>(())
     });
@@ -3562,7 +3564,7 @@ async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
             .recv()
             .await
             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
-        assert_eq!(SyncRequest::Both(0, rq_date), msg);
+        assert_eq!(SyncRequest::Both(SyncTarget::Row(0), rq_date), msg);
 
         Ok::<_, eyre::Error>(())
     });
@@ -3650,7 +3652,7 @@ async fn test_liquidation_call() -> eyre::Result<()> {
             .recv()
             .await
             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
-        assert_eq!(SyncRequest::Both(0, rq_date), msg);
+        assert_eq!(SyncRequest::Both(SyncTarget::Row(0), rq_date), msg);
 
         Ok::<_, eyre::Error>(())
     });
@@ -3767,7 +3769,13 @@ async fn test_liquidation_call() -> eyre::Result<()> {
             .recv()
             .await
             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
-        assert_eq!(SyncRequest::Both(0, rq_date), msg);
+        assert_eq!(SyncRequest::Collateral(SyncTarget::Cell(0, 0), rq_date), msg);
+
+        let msg = sync_rc
+            .recv()
+            .await
+            .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
+        assert_eq!(SyncRequest::Borrowed(SyncTarget::Cell(0, 1), rq_date), msg);
 
         Ok::<_, eyre::Error>(())
     });
@@ -3900,7 +3908,7 @@ async fn test_liquidation_call() -> eyre::Result<()> {
             .recv()
             .await
             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
-        assert_eq!(SyncRequest::Both(0, rq_date), msg);
+        assert_eq!(SyncRequest::Both(SyncTarget::Row(0), rq_date), msg);
 
         Ok::<_, eyre::Error>(())
     });

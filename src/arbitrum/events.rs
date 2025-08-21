@@ -4,7 +4,7 @@ use crate::arbitrum::arbitrum::IL2Pool::{
     ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
 use crate::arbitrum::arbitrum::{
-    Cache, DataProvider, HFRequest, RqDate, SyncRequest, TimeStamp, Token, Tokens,
+    Cache, DataProvider, HFRequest, RqDate, SyncRequest, SyncTarget, TimeStamp, Token, Tokens,
 };
 use alloy_primitives::{Address, U256};
 use chrono::Utc;
@@ -42,11 +42,13 @@ where
 
                 sync_tx
                     .send(SyncRequest::Both(
-                        cache
-                            .users
-                            .get(user)
-                            .ok_or_else(|| eyre!("user = {:?} not found", user))?
-                            .row_num,
+                        SyncTarget::Row(
+                            cache
+                                .users
+                                .get(user)
+                                .ok_or_else(|| eyre!("user = {:?} not found", user))?
+                                .row_num,
+                        ),
                         rq_date,
                     ))
                     .await?;
@@ -97,13 +99,16 @@ where
             // sync user
             debug!("supply: sync_user user = {:?}", user);
             cache.sync_user(&user, &tokens, provider).await?;
+
             sync_tx
                 .send(SyncRequest::Both(
-                    cache
-                        .users
-                        .get(user)
-                        .ok_or_else(|| eyre!("user = {:?} not found", user))?
-                        .row_num,
+                    SyncTarget::Row(
+                        cache
+                            .users
+                            .get(user)
+                            .ok_or_else(|| eyre!("user = {:?} not found", user))?
+                            .row_num,
+                    ),
                     rq_date,
                 ))
                 .await?;
@@ -209,7 +214,11 @@ where
             col[idx] += event.amount;
             *last_modified = now;
 
-            s_tx.send(SyncRequest::Collateral(row_num, rq_date)).await?;
+            s_tx.send(SyncRequest::Collateral(
+                SyncTarget::Cell(row_num, idx),
+                rq_date,
+            ))
+            .await?;
             h_tx.send(HFRequest::User(event.onBehalfOf, rq_date))
                 .await?;
 
@@ -384,7 +393,11 @@ where
             col[idx] -= event.amount;
             *last_modified = now;
 
-            s_tx.send(SyncRequest::Collateral(row_num, rq_date)).await?;
+            s_tx.send(SyncRequest::Collateral(
+                SyncTarget::Cell(row_num, idx),
+                rq_date,
+            ))
+            .await?;
             h_tx.send(HFRequest::User(event.user, rq_date)).await?;
 
             Ok(())
@@ -557,7 +570,8 @@ where
         bor[idx] += event.amount;
         *last_modified = now;
 
-        s_tx.send(SyncRequest::Borrowed(row_num, rq_date)).await?;
+        s_tx.send(SyncRequest::Borrowed(SyncTarget::Cell(row_num, idx), rq_date))
+            .await?;
         h_tx.send(HFRequest::User(event.user, rq_date)).await?;
 
         Ok(())
@@ -678,7 +692,8 @@ where
         bor[idx] -= event.amount;
         *last_modified = now;
 
-        s_tx.send(SyncRequest::Borrowed(row_num, rq_date)).await?;
+        s_tx.send(SyncRequest::Borrowed(SyncTarget::Cell(row_num, idx), rq_date))
+            .await?;
         h_tx.send(HFRequest::User(event.user, rq_date)).await?;
 
         Ok(())
@@ -823,7 +838,11 @@ where
         col[idx] = res[idx];
         res[idx] = U256::default();
 
-        s_tx.send(SyncRequest::Collateral(row_num, rq_date)).await?;
+        s_tx.send(SyncRequest::Collateral(
+            SyncTarget::Cell(row_num, idx),
+            rq_date,
+        ))
+        .await?;
         h_tx.send(HFRequest::User(event.user, rq_date)).await?;
 
         Ok(())
@@ -968,7 +987,11 @@ where
         res[idx] = col[idx];
         col[idx] = U256::default();
 
-        s_tx.send(SyncRequest::Collateral(row_num, rq_date)).await?;
+        s_tx.send(SyncRequest::Collateral(
+            SyncTarget::Cell(row_num, idx),
+            rq_date,
+        ))
+        .await?;
         h_tx.send(HFRequest::User(event.user, rq_date)).await?;
 
         Ok(())
@@ -1110,7 +1133,16 @@ where
         bor[bor_idx] -= event.debtToCover;
         col[col_idx] -= event.liquidatedCollateralAmount;
 
-        s_tx.send(SyncRequest::Both(row_num, rq_date)).await?;
+        s_tx.send(SyncRequest::Collateral(
+            SyncTarget::Cell(row_num, col_idx),
+            rq_date,
+        ))
+        .await?;
+        s_tx.send(SyncRequest::Borrowed(
+            SyncTarget::Cell(row_num, bor_idx),
+            rq_date,
+        ))
+        .await?;
         h_tx.send(HFRequest::User(event.user, rq_date)).await?;
 
         Ok(())
