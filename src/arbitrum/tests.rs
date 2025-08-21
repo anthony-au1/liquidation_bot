@@ -5,9 +5,9 @@ use crate::arbitrum::arbitrum::IL2Pool::{
     ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
 use crate::arbitrum::arbitrum::{
-    AaveEvents, Cache, DataProvider, F64Converter, HFRequest, RqDate, SyncRequest, SyncTarget, Token,
-    TokenDetails, UserReserveData, UserSettings, liquidation_threshold_update, listen_events,
-    listen_hf_calc, listen_price_update, listen_sync, setup,
+    liquidation_threshold_update, listen_events, listen_hf_calc, listen_price_update, listen_sync, setup, AaveEvents, Cache,
+    DataProvider, F64Converter, HFRequest, RqDate, SyncRequest,
+    SyncTarget, Token, TokenDetails, UserReserveData, UserSettings,
 };
 use crate::arbitrum::events::{
     answer_updated, borrow, create_user, liquidation_call, repay,
@@ -25,8 +25,8 @@ use std::fmt::Debug;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
 use tokio::sync::mpsc::channel;
+use tokio::sync::RwLock;
 use tokio::task;
 use tokio::time::sleep;
 
@@ -1292,7 +1292,10 @@ async fn test_supply() -> eyre::Result<()> {
             .recv()
             .await
             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
-        assert_eq!(SyncRequest::Collateral(SyncTarget::Cell(0, 0), rq_date), msg);
+        assert_eq!(
+            SyncRequest::Collateral(SyncTarget::Cell(0, 0), rq_date),
+            msg
+        );
 
         Ok::<_, eyre::Error>(())
     });
@@ -2127,7 +2130,10 @@ async fn test_withdraw() -> eyre::Result<()> {
             .recv()
             .await
             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
-        assert_eq!(SyncRequest::Collateral(SyncTarget::Cell(0, 0), rq_date), msg);
+        assert_eq!(
+            SyncRequest::Collateral(SyncTarget::Cell(0, 0), rq_date),
+            msg
+        );
 
         Ok::<_, eyre::Error>(())
     });
@@ -3156,7 +3162,10 @@ async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
             .recv()
             .await
             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
-        assert_eq!(SyncRequest::Collateral(SyncTarget::Cell(0, 2), rq_date), msg);
+        assert_eq!(
+            SyncRequest::Collateral(SyncTarget::Cell(0, 2), rq_date),
+            msg
+        );
 
         Ok::<_, eyre::Error>(())
     });
@@ -3451,7 +3460,10 @@ async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
             .recv()
             .await
             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
-        assert_eq!(SyncRequest::Collateral(SyncTarget::Cell(0, 2), rq_date), msg);
+        assert_eq!(
+            SyncRequest::Collateral(SyncTarget::Cell(0, 2), rq_date),
+            msg
+        );
 
         Ok::<_, eyre::Error>(())
     });
@@ -3769,7 +3781,10 @@ async fn test_liquidation_call() -> eyre::Result<()> {
             .recv()
             .await
             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
-        assert_eq!(SyncRequest::Collateral(SyncTarget::Cell(0, 0), rq_date), msg);
+        assert_eq!(
+            SyncRequest::Collateral(SyncTarget::Cell(0, 0), rq_date),
+            msg
+        );
 
         let msg = sync_rc
             .recv()
@@ -3959,6 +3974,31 @@ async fn test_liquidation_call() -> eyre::Result<()> {
             30.as_u256_decimal_12()
         ]
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_u256_to_f64() -> eyre::Result<()> {
+    let divider_6 = 10_f64.powi(6);
+    let divider_12 = 10_f64.powi(12);
+    let divider_18 = 10_f64.powi(18);
+    let divider_27 = 10_f64.powi(27);
+
+    let a = U256::from(1000_000_000_000_123456_u128);
+    let b = U256::from(1000_000_000_000_123456123456_u128);
+    let c = U256::from(1000_000_000_000_123456123456123456_u128);
+    let d = U256::from(100_000_000_000_123456123456123456123456123_u128);
+
+    let a2 = a.as_f64(divider_6);
+    let b2 = b.as_f64(divider_12);
+    let c2 = c.as_f64(divider_18);
+    let d2 = d.as_f64(divider_27);
+
+    assert_eq!(a2, a2);
+    assert_eq!(b2, b2);
+    assert_eq!(c2, c2);
+    assert_eq!(d2, d2);
 
     Ok(())
 }

@@ -1,6 +1,6 @@
 use crate::arbitrum::arbitrum::IAaveOracle::IAaveOracleInstance;
 use crate::arbitrum::arbitrum::IAaveProtocolDataProvider::{
-    IAaveProtocolDataProviderInstance, TokenData, getUserReserveDataReturn,
+    getUserReserveDataReturn, IAaveProtocolDataProviderInstance, TokenData,
 };
 use crate::arbitrum::arbitrum::IChainlinkAggregator::IChainlinkAggregatorEvents;
 use crate::arbitrum::arbitrum::IL2Pool::IL2PoolEvents;
@@ -20,13 +20,13 @@ use chrono::Utc;
 use dashmap::DashMap;
 use eyre::eyre;
 use futures::future::try_join_all;
-use ndarray::{Array1, Array2, Axis, concatenate};
+use ndarray::{concatenate, Array1, Array2, Axis};
 use std::collections::HashMap;
 use std::default::Default;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::RwLock;
-use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::{task, time};
 use tracing::{debug, error};
 
@@ -342,7 +342,7 @@ where
             .call()
             .await?;
 
-        Ok(10_f64.powf(decimals as f64))
+        Ok(10_f64.powi(decimals as i32))
     }
 }
 
@@ -1562,11 +1562,26 @@ impl Cache {
 }
 
 pub(crate) trait F64Converter {
-    fn as_f64(&self, decimal: f64) -> f64;
+    fn as_f64(&self, divisor: f64) -> f64;
 }
 
 impl F64Converter for U256 {
-    fn as_f64(&self, decimal: f64) -> f64 {
-        self.saturating_to::<u128>() as f64 / decimal
+    #[inline(always)]
+    fn as_f64(&self, divisor: f64) -> f64 {
+        let limbs = self.into_limbs();
+        const POW64: [f64; 4] = [
+            1.0,                                                          // 2^0
+            18446744073709551616.0,                                       // 2^64
+            340282366920938463463374607431768211456.0,                    // 2^128
+            6277101735386680763835789423207666416102355444464034512896.0, // 2^192
+        ];
+
+        let mut result = 0.0;
+        result += limbs[0] as f64 * POW64[0];
+        result += limbs[1] as f64 * POW64[1];
+        result += limbs[2] as f64 * POW64[2];
+        result += limbs[3] as f64 * POW64[3];
+
+        result / divisor
     }
 }

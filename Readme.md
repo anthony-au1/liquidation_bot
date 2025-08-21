@@ -1,6 +1,5 @@
 //TODO
 
-- improve sync by adding column
 - update U256 to f64 
 - we still need to re-sync all users assets, possible every 24h.
 
