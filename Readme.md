@@ -1,6 +1,8 @@
 //TODO
 
-- find decimals for prices 
+- we have to get scaled assets of user
+- we have to update all liquidation and borrow indexes when we get one index recalc
+
 - scaled deposit when get all data for users
 - ray calculations when we scale values
 - we still need to re-sync all users assets, possible every 24h.

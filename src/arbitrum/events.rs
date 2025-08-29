@@ -1235,7 +1235,7 @@ where
 
     {
         let (prices, last_modified) = &mut *cache.prices.write().await;
-        prices[token_details.order] = current.as_f64(10_f64.powi(18));
+        prices[token_details.order] = current.as_f64(token_details.price_decimals);
         *last_modified = rq_date;
     }
 

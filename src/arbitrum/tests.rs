@@ -200,8 +200,8 @@ impl DataProvider for DummyDataProvider {
         Ok(urd)
     }
 
-    async fn get_decimal(&self, token: &Address) -> eyre::Result<f64> {
-        let urd = match token {
+    async fn get_decimals(&self, token: &Address) -> eyre::Result<f64> {
+        let decimals = match token {
             t if *t == Address::from_str("0x1Ac54C113cefD1792CbFcF41B711824d657eb61D")? => {
                 10_f64.powf(18_f64)
             }
@@ -214,7 +214,24 @@ impl DataProvider for DummyDataProvider {
             _ => 10_f64.powf(18_f64),
         };
 
-        Ok(urd)
+        Ok(decimals)
+    }
+
+    async fn get_price_decimals(&self, price_source: &Address) -> eyre::Result<f64> {
+        let decimals = match price_source {
+            t if *t == Address::from_str("0xba5DdD1f9d7F570dc94a51479a000E3BCE967196")? => {
+                10_f64.powf(18_f64)
+            }
+            t if *t == Address::from_str("0xaf88d065e77c8cC2239327C5EDb3A432268e5831")? => {
+                10_f64.powf(6_f64)
+            }
+            t if *t == Address::from_str("0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1")? => {
+                10_f64.powf(12_f64)
+            }
+            _ => 10_f64.powf(18_f64),
+        };
+
+        Ok(decimals)
     }
 }
 
@@ -231,6 +248,7 @@ async fn generate_cache_and_tokens(
             Address::from_str("0xba5DdD1f9d7F570dc94a51479a000E3BCE967196")?,
             0,
             10_f64.powf(18_f64),
+            10_f64.powf(18_f64),
         ),
     );
     tokens.insert(
@@ -240,6 +258,7 @@ async fn generate_cache_and_tokens(
             Address::from_str("0xaf88d065e77c8cC2239327C5EDb3A432268e5831")?,
             1,
             10_f64.powf(6_f64),
+            10_f64.powf(6_f64),
         ),
     );
     tokens.insert(
@@ -248,6 +267,7 @@ async fn generate_cache_and_tokens(
             String::from("DAI"),
             Address::from_str("0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1")?,
             2,
+            10_f64.powf(12_f64),
             10_f64.powf(12_f64),
         ),
     );
@@ -296,7 +316,7 @@ async fn generate_cache_and_tokens(
 
         *cache.prices.write().await = (Array1::from_elem(tokens.len(), 0.0), now);
         *cache.liquidation_threshold.write().await = (Array1::from_elem(tokens.len(), 0.0), now);
-        *cache.decimal.write().await = (Array1::from_elem(tokens.len(), 0.0), now);
+        *cache.decimals.write().await = (Array1::from_elem(tokens.len(), 0.0), now);
     }
 
     Ok((cache, tokens))
@@ -351,7 +371,7 @@ async fn test_sync_collateral() -> eyre::Result<()> {
     {
         let now = Utc::now().timestamp_micros();
 
-        *cache.decimal.write().await = (
+        *cache.decimals.write().await = (
             Array1::from_vec(vec![
                 10_f64.powf(18_f64),
                 10_f64.powf(6_f64),
@@ -469,7 +489,7 @@ async fn test_sync_borrowed() -> eyre::Result<()> {
     {
         let now = Utc::now().timestamp_micros();
 
-        *cache.decimal.write().await = (
+        *cache.decimals.write().await = (
             Array1::from_vec(vec![
                 10_f64.powf(18_f64),
                 10_f64.powf(6_f64),
@@ -829,7 +849,7 @@ async fn test_calc_hf() -> eyre::Result<()> {
         .clone();
 
     {
-        let (d, _) = &mut *cache.decimal.write().await;
+        let (d, _) = &mut *cache.decimals.write().await;
         *d = Array1::from_vec(vec![
             10_f64.powf(18_f64),
             10_f64.powf(6_f64),
@@ -886,7 +906,7 @@ async fn test_calc_hf() -> eyre::Result<()> {
     let (cache, _) = generate_cache_and_tokens(3).await?;
 
     {
-        let (d, _) = &mut *cache.decimal.write().await;
+        let (d, _) = &mut *cache.decimals.write().await;
         *d = Array1::from_vec(vec![
             10_f64.powf(18_f64),
             10_f64.powf(6_f64),
@@ -1040,7 +1060,11 @@ impl DataProvider for CreateUserDataProvider {
         Err(eyre::eyre!("mock error"))
     }
 
-    async fn get_decimal(&self, _: &Address) -> eyre::Result<f64> {
+    async fn get_decimals(&self, _: &Address) -> eyre::Result<f64> {
+        todo!()
+    }
+
+    async fn get_price_decimals(&self, _: &Address) -> eyre::Result<f64> {
         todo!()
     }
 }
@@ -1758,7 +1782,7 @@ async fn test_listen_sync() -> eyre::Result<()> {
         .map(|(cache, _)| Arc::new(cache))?;
 
     {
-        let (decimal, _) = &mut *cache.decimal.write().await;
+        let (decimal, _) = &mut *cache.decimals.write().await;
         *decimal = Array1::from_vec(vec![
             10_f64.powf(18_f64),
             10_f64.powf(6_f64),
@@ -1824,7 +1848,7 @@ async fn test_hf_calc() -> eyre::Result<()> {
     let user = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
 
     {
-        let (decimal, _) = &mut *cache.decimal.write().await;
+        let (decimal, _) = &mut *cache.decimals.write().await;
         *decimal = Array1::from_vec(vec![
             10_f64.powf(18_f64),
             10_f64.powf(6_f64),
@@ -1956,10 +1980,10 @@ async fn test_answer_updated() -> eyre::Result<()> {
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
     let dummy_data_provider = Arc::new(DummyDataProvider::new());
 
-    let token = tokens.keys().next().ok_or_else(|| eyre::eyre!("no data"))?;
+    let token = Address::from_str("0x1Ac54C113cefD1792CbFcF41B711824d657eb61D")?;
 
     let event = AnswerUpdated {
-        current: alloy_primitives::I256::try_from(999_001_61230_000_000_i128)?,
+        current: alloy_primitives::I256::try_from(999_001_612_300_000_000_000_000_000_i128)?,
         roundId: U256::from(0),
         timestamp: U256::from(Utc::now().timestamp()),
     };
@@ -1987,13 +2011,13 @@ async fn test_answer_updated() -> eyre::Result<()> {
     let _ = hf_handler.await?;
 
     let idx = tokens
-        .get(token)
+        .get(&token)
         .ok_or_else(|| eyre::eyre!("no token = {:?}", token))?
         .order;
 
     let (prices, last_modified) = &*cache.prices.read().await;
 
-    assert_eq!(prices[idx], 999_001_612.30);
+    assert_eq!(prices[idx] as f32, 999_001_612.30);
     assert_eq!(*last_modified, rq_date);
 
     Ok(())

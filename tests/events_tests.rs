@@ -13,7 +13,7 @@ use liquidation_bot::arbitrum::arbitrum::IL2Pool::{
     ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
 use liquidation_bot::arbitrum::arbitrum::{
-    start, Cache, DataProvider, UserReserveData, UserSettings,
+    Cache, DataProvider, UserReserveData, UserSettings, start,
 };
 use ndarray::{Array1, Array2};
 use std::fmt::Debug;
@@ -177,15 +177,31 @@ impl DataProvider for SharedDataProvider {
         }
     }
 
-    async fn get_decimal(&self, token: &Address) -> eyre::Result<f64> {
-        let decimal = match token {
+    async fn get_decimals(&self, token: &Address) -> eyre::Result<f64> {
+        let decimals = match token {
             addr if *addr == Address::from_str(AAVE)? => 10_f64.powf(18_f64),
             addr if *addr == Address::from_str(USDC)? => 10_f64.powf(6_f64),
             addr if *addr == Address::from_str(DAI)? => 10_f64.powf(12_f64),
-            _ => return Err(eyre!("decimal for token = {:?} not found", token)),
+            _ => return Err(eyre!("decimals for token = {:?} not found", token)),
         };
 
-        Ok(decimal)
+        Ok(decimals)
+    }
+
+    async fn get_price_decimals(&self, price_source: &Address) -> eyre::Result<f64> {
+        let decimals = match price_source {
+            addr if *addr == Address::from_str(AAVE_PRICE_SOURCE)? => 10_f64.powf(18_f64),
+            addr if *addr == Address::from_str(USDC_PRICE_SOURCE)? => 10_f64.powf(6_f64),
+            addr if *addr == Address::from_str(DAI_PRICE_SOURCE)? => 10_f64.powf(12_f64),
+            _ => {
+                return Err(eyre!(
+                    "decimals for price source = {:?} not found",
+                    price_source
+                ));
+            }
+        };
+
+        Ok(decimals)
     }
 }
 
@@ -422,9 +438,9 @@ impl DataProvider for DummyDataProvider {
                 };
 
                 match count {
-                    1 => 161_230_000_000_i128,
-                    2 => 131_230_000_000_i128,
-                    _ => 171_230_000_000_i128,
+                    1 => 161_230_000_000_000_000_0000_i128,
+                    2 => 131_230_000_000_000_000_0000_i128,
+                    _ => 171_230_000_000_000_000_0000_i128,
                 }
             }
             ps if *ps == Address::from_str(USDC_PRICE_SOURCE)? => {
@@ -435,9 +451,9 @@ impl DataProvider for DummyDataProvider {
                 };
 
                 match count {
-                    1 => 261_230_000_000_i128,
-                    2 => 231_230_000_000_i128,
-                    _ => 281_230_000_000_i128,
+                    1 => 261_230_000_0_i128,
+                    2 => 231_230_000_0_i128,
+                    _ => 281_230_000_0_i128,
                 }
             }
             ps if *ps == Address::from_str(DAI_PRICE_SOURCE)? => {
@@ -448,9 +464,9 @@ impl DataProvider for DummyDataProvider {
                 };
 
                 match count {
-                    1 => 361_230_000_000_i128,
-                    2 => 311_230_000_000_i128,
-                    _ => 401_230_000_000_i128,
+                    1 => 361_230_000_000_000_0_i128,
+                    2 => 311_230_000_000_000_0_i128,
+                    _ => 401_230_000_000_000_0_i128,
                 }
             }
             _ => return Err(eyre!("price_source = {:?} not found", price_source)),
@@ -482,8 +498,14 @@ impl DataProvider for DummyDataProvider {
             .await
     }
 
-    async fn get_decimal(&self, token: &Address) -> eyre::Result<f64> {
-        self.shared_data_provider.get_decimal(token).await
+    async fn get_decimals(&self, token: &Address) -> eyre::Result<f64> {
+        self.shared_data_provider.get_decimals(token).await
+    }
+
+    async fn get_price_decimals(&self, price_source: &Address) -> eyre::Result<f64> {
+        self.shared_data_provider
+            .get_price_decimals(price_source)
+            .await
     }
 }
 
@@ -611,6 +633,13 @@ async fn test_events() -> eyre::Result<()> {
         let (price_expected, last_modified_expected) = &*expected.prices.read().await;
 
         assert!(last_modified < last_modified_expected);
+
+        let price = price.iter().map(|p| p.clone() as f32).collect::<Vec<f32>>();
+        let price_expected = price_expected
+            .iter()
+            .map(|p| p.clone() as f32)
+            .collect::<Vec<f32>>();
+
         assert_eq!(price, price_expected);
     }
 

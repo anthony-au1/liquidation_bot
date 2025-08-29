@@ -188,8 +188,8 @@ pub trait DataProvider: Send + Sync {
         token: &Address,
         user: &Address,
     ) -> eyre::Result<UserReserveData>;
-    async fn get_decimal(&self, token: &Address) -> eyre::Result<f64>;
-    async fn get_price_decimal(&self, price_source: &Address) -> eyre::Result<f64>;
+    async fn get_decimals(&self, token: &Address) -> eyre::Result<f64>;
+    async fn get_price_decimals(&self, price_source: &Address) -> eyre::Result<f64>;
 }
 
 pub struct UserReserveData {
@@ -338,7 +338,7 @@ where
         ))
     }
 
-    async fn get_decimal(&self, token: &Address) -> eyre::Result<f64> {
+    async fn get_decimals(&self, token: &Address) -> eyre::Result<f64> {
         let decimals = IERC20Metadata::new(token.clone(), &self.provider)
             .decimals()
             .call()
@@ -347,10 +347,8 @@ where
         Ok(10_f64.powi(decimals as i32))
     }
 
-    async fn get_price_decimal(&self, price_source: &Address) -> eyre::Result<f64> {
-        let decimals = IChainlinkAggregator::new(price_source.clone(), &self.provider);
-
-        let decimals = IERC20Metadata::new(token.clone(), &self.provider)
+    async fn get_price_decimals(&self, price_source: &Address) -> eyre::Result<f64> {
+        let decimals = IChainlinkAggregator::new(price_source.clone(), &self.provider)
             .decimals()
             .call()
             .await?;
@@ -366,7 +364,8 @@ pub(crate) struct TokenDetails {
     pub(crate) name: String,
     pub(crate) price_source: Address,
     pub(crate) order: usize,
-    pub(crate) decimal: f64,
+    pub(crate) decimals: f64,
+    pub(crate) price_decimals: f64,
 }
 
 impl TokenDetails {
@@ -374,13 +373,15 @@ impl TokenDetails {
         name: String,
         price_source: Address,
         order: usize,
-        decimal: f64,
+        decimals: f64,
+        price_decimals: f64,
     ) -> Self {
         Self {
             name,
             price_source,
             order,
-            decimal,
+            decimals,
+            price_decimals,
         }
     }
 }
@@ -653,13 +654,14 @@ where
         );
 
         let asset_source = provider.get_source_of_asset(&token.tokenAddress).await?;
-        let decimal = provider.get_decimal(&token.tokenAddress).await?;
+        let decimals = provider.get_decimals(&token.tokenAddress).await?;
+        let price_decimals = provider.get_price_decimals(&asset_source).await?;
 
         debug!("setup: token asset_address = {}", asset_source);
 
         tokens.insert(
             token.tokenAddress,
-            TokenDetails::new(token.symbol, asset_source, order, decimal),
+            TokenDetails::new(token.symbol, asset_source, order, decimals, price_decimals),
         );
         order += 1;
     }
@@ -990,7 +992,7 @@ impl UserSettings {
 pub struct Cache {
     pub users: UserDetails,
     pub users_num: RwLock<usize>,
-    pub decimal: Array,
+    pub decimals: Array,
 
     pub reserve: Arrays,
     pub collateral: Arrays,
@@ -1013,10 +1015,18 @@ impl Cache {
         let now = Utc::now().timestamp_micros();
 
         let mut decimals = vec![0.0; token_num];
-        for (_, TokenDetails { order, decimal, .. }) in tokens {
-            decimals[*order] = *decimal;
+        for (
+            _,
+            TokenDetails {
+                order,
+                decimals: dec,
+                ..
+            },
+        ) in tokens
+        {
+            decimals[*order] = *dec;
         }
-        *self.decimal.write().await = (Array1::from_vec(decimals), now);
+        *self.decimals.write().await = (Array1::from_vec(decimals), now);
 
         *self.prices.write().await = (Array1::from_elem(token_num, 0.0), now);
         *self.liquidation_threshold.write().await = (Array1::from_elem(token_num, 0.0), now);
@@ -1266,7 +1276,7 @@ impl Cache {
     ) -> eyre::Result<()> {
         let col_lock = self.collateral.read().await;
         let mut col_matrix_lock = self.collateral_matrix.write().await;
-        let (decimals, _) = &*self.decimal.read().await;
+        let (decimals, _) = &*self.decimals.read().await;
 
         debug!(
             "sync_collateral: sync target = {:?}, col_lock = {:?}",
@@ -1363,7 +1373,7 @@ impl Cache {
     ) -> eyre::Result<()> {
         let bor_lock = self.borrowed.read().await;
         let mut bor_matrix_lock = self.borrowed_matrix.write().await;
-        let (decimals, _) = &*self.decimal.read().await;
+        let (decimals, _) = &*self.decimals.read().await;
 
         debug!(
             "sync_borrowed: sync target = {:?}, bor_lock = {:?}",
@@ -1486,7 +1496,7 @@ impl Cache {
                 .get(user)
                 .ok_or_else(|| eyre!("user = {:?} not found", user))?
                 .row_num;
-            let (decimals, _) = &*self.decimal.read().await;
+            let (decimals, _) = &*self.decimals.read().await;
 
             let col_eff = {
                 let collateral = &*self.collateral.read().await;
