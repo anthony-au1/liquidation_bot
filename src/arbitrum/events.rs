@@ -4,7 +4,8 @@ use crate::arbitrum::arbitrum::IL2Pool::{
     ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
 use crate::arbitrum::arbitrum::{
-    Cache, DataProvider, HFRequest, RqDate, SyncRequest, SyncTarget, TimeStamp, Token, Tokens,
+    Cache, DataProvider, F64Converter, HFRequest, RqDate, SyncRequest, SyncTarget, TimeStamp,
+    Token, Tokens,
 };
 use alloy_primitives::{Address, U256};
 use chrono::Utc;
@@ -570,8 +571,11 @@ where
         bor[idx] += event.amount;
         *last_modified = now;
 
-        s_tx.send(SyncRequest::Borrowed(SyncTarget::Cell(row_num, idx), rq_date))
-            .await?;
+        s_tx.send(SyncRequest::Borrowed(
+            SyncTarget::Cell(row_num, idx),
+            rq_date,
+        ))
+        .await?;
         h_tx.send(HFRequest::User(event.user, rq_date)).await?;
 
         Ok(())
@@ -692,8 +696,11 @@ where
         bor[idx] -= event.amount;
         *last_modified = now;
 
-        s_tx.send(SyncRequest::Borrowed(SyncTarget::Cell(row_num, idx), rq_date))
-            .await?;
+        s_tx.send(SyncRequest::Borrowed(
+            SyncTarget::Cell(row_num, idx),
+            rq_date,
+        ))
+        .await?;
         h_tx.send(HFRequest::User(event.user, rq_date)).await?;
 
         Ok(())
@@ -1228,7 +1235,7 @@ where
 
     {
         let (prices, last_modified) = &mut *cache.prices.write().await;
-        prices[token_details.order] = current.as_u64() as f64 / 100_000_000.0;
+        prices[token_details.order] = current.as_f64(10_f64.powi(18));
         *last_modified = rq_date;
     }
 

@@ -1,6 +1,6 @@
 use crate::arbitrum::arbitrum::IAaveOracle::IAaveOracleInstance;
 use crate::arbitrum::arbitrum::IAaveProtocolDataProvider::{
-    getUserReserveDataReturn, IAaveProtocolDataProviderInstance, TokenData,
+    IAaveProtocolDataProviderInstance, TokenData, getUserReserveDataReturn,
 };
 use crate::arbitrum::arbitrum::IChainlinkAggregator::IChainlinkAggregatorEvents;
 use crate::arbitrum::arbitrum::IL2Pool::IL2PoolEvents;
@@ -13,20 +13,20 @@ use alloy::providers::Provider;
 use alloy::rpc::types::Filter;
 use alloy::sol;
 use alloy::sol_types::SolEventInterface;
-use alloy_primitives::U256;
+use alloy_primitives::{I256, Sign, U256};
 use async_trait::async_trait;
 use bitvec::prelude::*;
 use chrono::Utc;
 use dashmap::DashMap;
 use eyre::eyre;
 use futures::future::try_join_all;
-use ndarray::{concatenate, Array1, Array2, Axis};
+use ndarray::{Array1, Array2, Axis, concatenate};
 use std::collections::HashMap;
 use std::default::Default;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::RwLock;
+use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::{task, time};
 use tracing::{debug, error};
 
@@ -157,6 +157,7 @@ sol! {
     #[sol(rpc)]
     interface IChainlinkAggregator {
         event AnswerUpdated(int256 indexed current, uint256 indexed roundId, uint256 timestamp);
+        function decimals() external view returns (uint8);
     }
 
     #[sol(rpc)]
@@ -188,6 +189,7 @@ pub trait DataProvider: Send + Sync {
         user: &Address,
     ) -> eyre::Result<UserReserveData>;
     async fn get_decimal(&self, token: &Address) -> eyre::Result<f64>;
+    async fn get_price_decimal(&self, price_source: &Address) -> eyre::Result<f64>;
 }
 
 pub struct UserReserveData {
@@ -310,7 +312,7 @@ where
             .call()
             .await?;
 
-        Ok(data.liquidationThreshold.as_f64(10_f64.powf(4_f64)))
+        Ok(data.liquidationThreshold.as_f64(10_f64.powi(4)))
     }
 
     async fn get_user_reserve_data(
@@ -337,6 +339,17 @@ where
     }
 
     async fn get_decimal(&self, token: &Address) -> eyre::Result<f64> {
+        let decimals = IERC20Metadata::new(token.clone(), &self.provider)
+            .decimals()
+            .call()
+            .await?;
+
+        Ok(10_f64.powi(decimals as i32))
+    }
+
+    async fn get_price_decimal(&self, price_source: &Address) -> eyre::Result<f64> {
+        let decimals = IChainlinkAggregator::new(price_source.clone(), &self.provider);
+
         let decimals = IERC20Metadata::new(token.clone(), &self.provider)
             .decimals()
             .call()
@@ -978,11 +991,14 @@ pub struct Cache {
     pub users: UserDetails,
     pub users_num: RwLock<usize>,
     pub decimal: Array,
+
     pub reserve: Arrays,
     pub collateral: Arrays,
     pub collateral_matrix: Matrix,
+
     pub borrowed: Arrays,
     pub borrowed_matrix: Matrix,
+
     pub liquidation_threshold: Array,
     pub prices: Array,
     pub health_factors: Array,
@@ -1565,23 +1581,42 @@ pub(crate) trait F64Converter {
     fn as_f64(&self, divisor: f64) -> f64;
 }
 
+const POW64: [f64; 4] = [
+    1.0,                                                          // 2^0
+    18446744073709551616.0,                                       // 2^64
+    340282366920938463463374607431768211456.0,                    // 2^128
+    6277101735386680763835789423207666416102355444464034512896.0, // 2^192
+];
+
+impl F64Converter for I256 {
+    #[inline(always)]
+    fn as_f64(&self, divisor: f64) -> f64 {
+        let (sign, limbs) = self.into_sign_and_abs();
+
+        let mut result = limbs
+            .into_limbs()
+            .iter()
+            .enumerate()
+            .map(|(idx, &v)| v as f64 * POW64[idx])
+            .sum::<f64>();
+
+        if sign == Sign::Negative {
+            result = -result;
+        }
+
+        result / divisor
+    }
+}
+
 impl F64Converter for U256 {
     #[inline(always)]
     fn as_f64(&self, divisor: f64) -> f64 {
         let limbs = self.into_limbs();
-        const POW64: [f64; 4] = [
-            1.0,                                                          // 2^0
-            18446744073709551616.0,                                       // 2^64
-            340282366920938463463374607431768211456.0,                    // 2^128
-            6277101735386680763835789423207666416102355444464034512896.0, // 2^192
-        ];
 
         let mut result = 0.0;
-        result += limbs[0] as f64 * POW64[0];
-        result += limbs[1] as f64 * POW64[1];
-        result += limbs[2] as f64 * POW64[2];
-        result += limbs[3] as f64 * POW64[3];
-
+        for i in 0..4 {
+            result += limbs[i] as f64 * POW64[i];
+        }
         result / divisor
     }
 }

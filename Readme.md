@@ -1,6 +1,8 @@
 //TODO
 
-- update U256 to f64 
+- find decimals for prices 
+- scaled deposit when get all data for users
+- ray calculations when we scale values
 - we still need to re-sync all users assets, possible every 24h.
 
 **Future Improvements**
