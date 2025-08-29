@@ -1,6 +1,6 @@
 use crate::arbitrum::arbitrum::IAaveOracle::IAaveOracleInstance;
 use crate::arbitrum::arbitrum::IAaveProtocolDataProvider::{
-    IAaveProtocolDataProviderInstance, TokenData, getUserReserveDataReturn,
+    getReserveDataReturn, getUserReserveDataReturn, IAaveProtocolDataProviderInstance, TokenData,
 };
 use crate::arbitrum::arbitrum::IChainlinkAggregator::IChainlinkAggregatorEvents;
 use crate::arbitrum::arbitrum::IL2Pool::IL2PoolEvents;
@@ -13,21 +13,21 @@ use alloy::providers::Provider;
 use alloy::rpc::types::Filter;
 use alloy::sol;
 use alloy::sol_types::SolEventInterface;
-use alloy_primitives::{I256, Sign, U256};
+use alloy_primitives::{Sign, I256, U256};
 use async_trait::async_trait;
 use bitvec::prelude::*;
 use chrono::Utc;
 use dashmap::DashMap;
 use eyre::eyre;
 use futures::future::try_join_all;
-use ndarray::{Array1, Array2, Axis, concatenate};
+use ndarray::{concatenate, Array1, Array2, Axis};
 use std::collections::HashMap;
 use std::default::Default;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::RwLock;
-use tokio::sync::mpsc::{Receiver, Sender, channel};
-use tokio::{task, time};
+use tokio::{task, time, try_join};
 use tracing::{debug, error};
 
 pub const WS_URL: &str = "wss://arb-mainnet.g.alchemy.com/v2/9DDcCoPPxnq-aSjQ8k79vxfLvrhBAXjQ";
@@ -147,6 +147,21 @@ sol! {
             bool isActive,
             bool isFrozen
         );
+
+        function getReserveData(address asset) external view override returns (
+            uint256 unbacked,
+            uint256 accruedToTreasuryScaled,
+            uint256 totalAToken,
+            uint256 totalStableDebt,
+            uint256 totalVariableDebt,
+            uint256 liquidityRate,
+            uint256 variableBorrowRate,
+            uint256 stableBorrowRate,
+            uint256 averageStableBorrowRate,
+            uint256 liquidityIndex,
+            uint256 variableBorrowIndex,
+            uint40 lastUpdateTimestamp
+        );
     }
 
     #[sol(rpc)]
@@ -188,8 +203,32 @@ pub trait DataProvider: Send + Sync {
         token: &Address,
         user: &Address,
     ) -> eyre::Result<UserReserveData>;
+    async fn get_reserve_data(&self, token: &Address) -> eyre::Result<ReserveData>;
     async fn get_decimals(&self, token: &Address) -> eyre::Result<f64>;
     async fn get_price_decimals(&self, price_source: &Address) -> eyre::Result<f64>;
+}
+
+pub struct ReserveData {
+    pub liquidity_rate: U256,
+    pub variable_borrow_rate: U256,
+    pub liquidity_index: U256,
+    pub variable_borrow_index: U256,
+}
+
+impl ReserveData {
+    pub fn new(
+        liquidity_rate: U256,
+        variable_borrow_rate: U256,
+        liquidity_index: U256,
+        variable_borrow_index: U256,
+    ) -> Self {
+        Self {
+            liquidity_rate,
+            variable_borrow_rate,
+            liquidity_index,
+            variable_borrow_index,
+        }
+    }
 }
 
 pub struct UserReserveData {
@@ -335,6 +374,27 @@ where
             current_atoken_balance,
             current_variable_debt,
             bool::from(usage_as_collateral_enabled),
+        ))
+    }
+
+    async fn get_reserve_data(&self, token: &Address) -> eyre::Result<ReserveData> {
+        let getReserveDataReturn {
+            liquidityRate: liquidity_rate,
+            variableBorrowRate: variable_borrow_rate,
+            liquidityIndex: liquidity_index,
+            variableBorrowIndex: variable_borrow_index,
+            ..
+        } = self
+            .aave_protocol_data_provider
+            .getReserveData(token.clone())
+            .call()
+            .await?;
+
+        Ok(ReserveData::new(
+            liquidity_rate,
+            variable_borrow_rate,
+            liquidity_index,
+            variable_borrow_index,
         ))
     }
 
@@ -653,8 +713,11 @@ where
             token.symbol, token.tokenAddress
         );
 
-        let asset_source = provider.get_source_of_asset(&token.tokenAddress).await?;
-        let decimals = provider.get_decimals(&token.tokenAddress).await?;
+        let (asset_source, decimals) = try_join!(
+            provider.get_source_of_asset(&token.tokenAddress),
+            provider.get_decimals(&token.tokenAddress),
+        )?;
+
         let price_decimals = provider.get_price_decimals(&asset_source).await?;
 
         debug!("setup: token asset_address = {}", asset_source);

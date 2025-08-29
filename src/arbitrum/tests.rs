@@ -5,9 +5,9 @@ use crate::arbitrum::arbitrum::IL2Pool::{
     ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
 use crate::arbitrum::arbitrum::{
-    liquidation_threshold_update, listen_events, listen_hf_calc, listen_price_update, listen_sync, setup, AaveEvents, Cache,
-    DataProvider, F64Converter, HFRequest, RqDate, SyncRequest,
-    SyncTarget, Token, TokenDetails, UserReserveData, UserSettings,
+    AaveEvents, Cache, DataProvider, F64Converter, HFRequest, ReserveData, RqDate, SyncRequest,
+    SyncTarget, Token, TokenDetails, UserReserveData, UserSettings, liquidation_threshold_update,
+    listen_events, listen_hf_calc, listen_price_update, listen_sync, setup,
 };
 use crate::arbitrum::events::{
     answer_updated, borrow, create_user, liquidation_call, repay,
@@ -25,8 +25,8 @@ use std::fmt::Debug;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc::channel;
 use tokio::sync::RwLock;
+use tokio::sync::mpsc::channel;
 use tokio::task;
 use tokio::time::sleep;
 
@@ -34,12 +34,15 @@ trait F64Helper: F64Converter {
     fn as_f64_decimal_18(&self) -> f64;
     fn as_f64_decimal_6(&self) -> f64;
     fn as_f64_decimal_12(&self) -> f64;
+    fn as_f64_decimal_27(&self) -> f64;
 }
 
 trait U256Helper {
+    fn as_u256(&self, decimals: usize) -> U256;
     fn as_u256_decimal_18(&self) -> U256;
     fn as_u256_decimal_6(&self) -> U256;
     fn as_u256_decimal_12(&self) -> U256;
+    fn as_u256_decimal_27(&self) -> U256;
 }
 
 impl<T> U256Helper for T
@@ -47,16 +50,24 @@ where
     T: Copy + TryInto<u128>,
     <T as TryInto<u128>>::Error: Debug,
 {
+    fn as_u256(&self, decimals: usize) -> U256 {
+        U256::from((*self).try_into().unwrap()) * U256::from(10).pow(U256::from(decimals))
+    }
+
     fn as_u256_decimal_18(&self) -> U256 {
-        U256::from((*self).try_into().unwrap()) * U256::from(10).pow(U256::from(18))
+        self.as_u256(18)
     }
 
     fn as_u256_decimal_6(&self) -> U256 {
-        U256::from((*self).try_into().unwrap()) * U256::from(10).pow(U256::from(6))
+        self.as_u256(6)
     }
 
     fn as_u256_decimal_12(&self) -> U256 {
-        U256::from((*self).try_into().unwrap()) * U256::from(10).pow(U256::from(12))
+        self.as_u256(12)
+    }
+
+    fn as_u256_decimal_27(&self) -> U256 {
+        self.as_u256(27)
     }
 }
 
@@ -71,6 +82,10 @@ impl F64Helper for U256 {
 
     fn as_f64_decimal_12(&self) -> f64 {
         self.as_f64(10_f64.powf(12_f64))
+    }
+
+    fn as_f64_decimal_27(&self) -> f64 {
+        self.as_f64(10_f64.powf(27_f64))
     }
 }
 
@@ -164,8 +179,8 @@ impl DataProvider for DummyDataProvider {
         callback(IChainlinkAggregatorEvents::AnswerUpdated(event)).await
     }
 
-    async fn get_reserve_configuration_data(&self, token_address: &Address) -> eyre::Result<f64> {
-        let lt = match token_address.clone() {
+    async fn get_reserve_configuration_data(&self, token: &Address) -> eyre::Result<f64> {
+        let lt = match token.clone() {
             addr if addr == Address::from_str("0x1Ac54C113cefD1792CbFcF41B711824d657eb61D")? => {
                 0.78
             }
@@ -181,10 +196,10 @@ impl DataProvider for DummyDataProvider {
 
     async fn get_user_reserve_data(
         &self,
-        token_address: &Address,
+        token: &Address,
         _: &Address,
     ) -> eyre::Result<UserReserveData> {
-        let urd = match token_address {
+        let urd = match token {
             t if *t == Address::from_str("0x1Ac54C113cefD1792CbFcF41B711824d657eb61D")? => {
                 UserReserveData::new(10.as_u256_decimal_18(), 10.as_u256_decimal_18(), false)
             }
@@ -198,6 +213,43 @@ impl DataProvider for DummyDataProvider {
         };
 
         Ok(urd)
+    }
+
+    async fn get_reserve_data(&self, token: &Address) -> eyre::Result<ReserveData> {
+        let rd = match token {
+            t if *t == Address::from_str("0x1Ac54C113cefD1792CbFcF41B711824d657eb61D")? => {
+                ReserveData::new(
+                    45.as_u256(24),
+                    5.as_u256(25),
+                    1045.as_u256(24),
+                    105.as_u256(25),
+                )
+            }
+            t if *t == Address::from_str("0x1Af54C113cefD1792CbFcF41B711834d657ea61D")? => {
+                ReserveData::new(
+                    35.as_u256(24),
+                    4.as_u256(25),
+                    1035.as_u256(24),
+                    104.as_u256(25),
+                )
+            }
+            t if *t == Address::from_str("0x1Af54C113cefD1792CbFcF41B711824d657eb61D")? => {
+                ReserveData::new(
+                    25.as_u256(24),
+                    3.as_u256(25),
+                    1025.as_u256(24),
+                    103.as_u256(25),
+                )
+            }
+            _ => ReserveData::new(
+                55.as_u256(24),
+                6.as_u256(25),
+                1055.as_u256(24),
+                106.as_u256(25),
+            ),
+        };
+
+        Ok(rd)
     }
 
     async fn get_decimals(&self, token: &Address) -> eyre::Result<f64> {
@@ -1058,6 +1110,10 @@ impl DataProvider for CreateUserDataProvider {
         _: &Address,
     ) -> eyre::Result<UserReserveData> {
         Err(eyre::eyre!("mock error"))
+    }
+
+    async fn get_reserve_data(&self, _: &Address) -> eyre::Result<ReserveData> {
+        todo!()
     }
 
     async fn get_decimals(&self, _: &Address) -> eyre::Result<f64> {

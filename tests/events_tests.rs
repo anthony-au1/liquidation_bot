@@ -13,7 +13,7 @@ use liquidation_bot::arbitrum::arbitrum::IL2Pool::{
     ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
 use liquidation_bot::arbitrum::arbitrum::{
-    Cache, DataProvider, UserReserveData, UserSettings, start,
+    Cache, DataProvider, ReserveData, UserReserveData, UserSettings, start,
 };
 use ndarray::{Array1, Array2};
 use std::fmt::Debug;
@@ -41,9 +41,11 @@ trait F64Helper {
 }
 
 trait U256Helper {
+    fn as_u256(&self, decimals: usize) -> U256;
     fn as_u256_decimal_18(&self) -> U256;
     fn as_u256_decimal_6(&self) -> U256;
     fn as_u256_decimal_12(&self) -> U256;
+    fn as_u256_decimal_27(&self) -> U256;
 }
 
 impl<T> U256Helper for T
@@ -51,16 +53,24 @@ where
     T: Copy + TryInto<u128>,
     <T as TryInto<u128>>::Error: Debug,
 {
+    fn as_u256(&self, decimals: usize) -> U256 {
+        U256::from((*self).try_into().unwrap()) * U256::from(10).pow(U256::from(decimals))
+    }
+
     fn as_u256_decimal_18(&self) -> U256 {
-        U256::from((*self).try_into().unwrap()) * U256::from(10).pow(U256::from(18))
+        self.as_u256(18)
     }
 
     fn as_u256_decimal_6(&self) -> U256 {
-        U256::from((*self).try_into().unwrap()) * U256::from(10).pow(U256::from(6))
+        self.as_u256(6)
     }
 
     fn as_u256_decimal_12(&self) -> U256 {
-        U256::from((*self).try_into().unwrap()) * U256::from(10).pow(U256::from(12))
+        self.as_u256(12)
+    }
+
+    fn as_u256_decimal_27(&self) -> U256 {
+        self.as_u256(27)
     }
 }
 
@@ -175,6 +185,31 @@ impl DataProvider for SharedDataProvider {
                 Ok(urd)
             }
         }
+    }
+
+    async fn get_reserve_data(&self, token: &Address) -> eyre::Result<ReserveData> {
+        let rd = match token {
+            t if *t == Address::from_str(AAVE)? => ReserveData::new(
+                45.as_u256(24),
+                5.as_u256(25),
+                1045.as_u256(24),
+                105.as_u256(25),
+            ),
+            t if *t == Address::from_str(USDC)? => ReserveData::new(
+                35.as_u256(24),
+                4.as_u256(25),
+                1035.as_u256(24),
+                104.as_u256(25),
+            ),
+            t if *t == Address::from_str(DAI)? => ReserveData::new(
+                25.as_u256(24),
+                3.as_u256(25),
+                1025.as_u256(24),
+                103.as_u256(25),
+            ),
+            _ => return Err(eyre!("token = {:?} not found", token)),
+        };
+        Ok(rd)
     }
 
     async fn get_decimals(&self, token: &Address) -> eyre::Result<f64> {
@@ -496,6 +531,10 @@ impl DataProvider for DummyDataProvider {
         self.shared_data_provider
             .get_user_reserve_data(token, user)
             .await
+    }
+
+    async fn get_reserve_data(&self, token: &Address) -> eyre::Result<ReserveData> {
+        self.shared_data_provider.get_reserve_data(token).await
     }
 
     async fn get_decimals(&self, token: &Address) -> eyre::Result<f64> {
