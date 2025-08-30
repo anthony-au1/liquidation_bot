@@ -5,9 +5,10 @@ use crate::arbitrum::arbitrum::IL2Pool::{
     ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
 use crate::arbitrum::arbitrum::{
-    AaveEvents, Cache, DataProvider, F64Converter, HFRequest, ReserveData, RqDate, SyncRequest,
-    SyncTarget, Token, TokenDetails, UserReserveData, UserSettings, liquidation_threshold_update,
-    listen_events, listen_hf_calc, listen_price_update, listen_sync, setup,
+    liquidation_threshold_update, listen_events, listen_hf_calc, listen_price_update, listen_sync, setup, AaveEvents, Cache,
+    DataProvider, F64Converter, HFRequest, ReserveData, RqDate, Scaler,
+    SyncRequest, SyncTarget, Token, TokenDetails, UserReserveData,
+    UserSettings,
 };
 use crate::arbitrum::events::{
     answer_updated, borrow, create_user, liquidation_call, repay,
@@ -25,8 +26,8 @@ use std::fmt::Debug;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
 use tokio::sync::mpsc::channel;
+use tokio::sync::RwLock;
 use tokio::task;
 use tokio::time::sleep;
 
@@ -4079,6 +4080,34 @@ async fn test_u256_to_f64() -> eyre::Result<()> {
     assert_eq!(b2, b2);
     assert_eq!(c2, c2);
     assert_eq!(d2, d2);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_ray_ops() -> eyre::Result<()> {
+    // value = scaled_value * (index / 1e27)
+    // scaled_value = value * (1e27 / index)
+
+    // we get it when create a new user
+    let value = U256::from(115.6638746432_f64 * 10_f64.powi(27));
+    let index = U256::from(3.2324232 * 10_f64.powi(27));
+
+    let scaled_value = value.to_scaled(index);
+    let scaled_value_as_f = scaled_value.as_f64(10_f64.powi(27)) as f32;
+
+    let scaled_value_expected = U256::from(35.7824046 * 10_f64.powi(27));
+    let scaled_value_expected_as_f = scaled_value_expected.as_f64(10_f64.powi(27)) as f32;
+
+    assert_eq!(scaled_value_as_f, scaled_value_expected_as_f);
+
+    let current = scaled_value.to_current(index);
+    let current_as_f = current.as_f64(10_f64.powi(27)) as f32;
+
+    let current_expected = scaled_value_expected.to_current(index);
+    let current_expected_as_f = current_expected.as_f64(10_f64.powi(27)) as f32;
+
+    assert_eq!(current_as_f, current_expected_as_f);
 
     Ok(())
 }

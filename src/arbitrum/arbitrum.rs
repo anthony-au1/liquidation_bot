@@ -1,6 +1,6 @@
 use crate::arbitrum::arbitrum::IAaveOracle::IAaveOracleInstance;
 use crate::arbitrum::arbitrum::IAaveProtocolDataProvider::{
-    getReserveDataReturn, getUserReserveDataReturn, IAaveProtocolDataProviderInstance, TokenData,
+    IAaveProtocolDataProviderInstance, TokenData, getReserveDataReturn, getUserReserveDataReturn,
 };
 use crate::arbitrum::arbitrum::IChainlinkAggregator::IChainlinkAggregatorEvents;
 use crate::arbitrum::arbitrum::IL2Pool::IL2PoolEvents;
@@ -13,20 +13,20 @@ use alloy::providers::Provider;
 use alloy::rpc::types::Filter;
 use alloy::sol;
 use alloy::sol_types::SolEventInterface;
-use alloy_primitives::{Sign, I256, U256};
+use alloy_primitives::{I256, Sign, U256};
 use async_trait::async_trait;
 use bitvec::prelude::*;
 use chrono::Utc;
 use dashmap::DashMap;
 use eyre::eyre;
 use futures::future::try_join_all;
-use ndarray::{concatenate, Array1, Array2, Axis};
+use ndarray::{Array1, Array2, Axis, concatenate};
 use std::collections::HashMap;
 use std::default::Default;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::RwLock;
+use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::{task, time, try_join};
 use tracing::{debug, error};
 
@@ -1691,5 +1691,40 @@ impl F64Converter for U256 {
             result += limbs[i] as f64 * POW64[i];
         }
         result / divisor
+    }
+}
+
+pub(crate) trait RayOperations {
+    fn ray_mul(self, b: U256) -> U256;
+    fn ray_div(self, b: U256) -> U256;
+}
+
+const RAY: u128 = 1_000_000_000_000_000_000_000_000_000; // 1e27
+
+impl RayOperations for U256 {
+    fn ray_mul(self, b: U256) -> U256 {
+        // (a * b + RAY/2) / RAY
+        let half = U256::from(RAY / 2);
+        (self.saturating_mul(b) + half) / U256::from(RAY)
+    }
+    fn ray_div(self, b: U256) -> U256 {
+        // (a * RAY + b/2) / b
+        let half_b = b / U256::from(2u8);
+        (self.saturating_mul(U256::from(RAY)) + half_b) / b
+    }
+}
+
+pub(crate) trait Scaler {
+    fn to_scaled(self, index: U256) -> U256;
+    fn to_current(self, index: U256) -> U256;
+}
+
+impl Scaler for U256 {
+    fn to_scaled(self, index: U256) -> U256 {
+        self.ray_mul(U256::from(RAY).ray_div(index))
+    }
+
+    fn to_current(self, index: U256) -> U256 {
+        self.ray_mul(index.ray_div(U256::from(RAY)))
     }
 }
