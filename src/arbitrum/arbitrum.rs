@@ -1,6 +1,6 @@
 use crate::arbitrum::arbitrum::IAaveOracle::IAaveOracleInstance;
 use crate::arbitrum::arbitrum::IAaveProtocolDataProvider::{
-    getReserveDataReturn, getUserReserveDataReturn, IAaveProtocolDataProviderInstance, TokenData,
+    IAaveProtocolDataProviderInstance, TokenData, getReserveDataReturn, getUserReserveDataReturn,
 };
 use crate::arbitrum::arbitrum::IChainlinkAggregator::IChainlinkAggregatorEvents;
 use crate::arbitrum::arbitrum::IL2Pool::IL2PoolEvents;
@@ -13,20 +13,20 @@ use alloy::providers::Provider;
 use alloy::rpc::types::Filter;
 use alloy::sol;
 use alloy::sol_types::SolEventInterface;
-use alloy_primitives::{Sign, I256, U256, U512};
+use alloy_primitives::{I256, Sign, U256, U512};
 use async_trait::async_trait;
 use bitvec::prelude::*;
 use chrono::Utc;
 use dashmap::DashMap;
 use eyre::eyre;
 use futures::future::try_join_all;
-use ndarray::{concatenate, Array1, Array2, Axis};
+use ndarray::{Array1, Array2, Axis, concatenate};
 use std::collections::HashMap;
 use std::default::Default;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::RwLock;
+use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::{task, time, try_join};
 use tracing::{debug, error};
 
@@ -1035,6 +1035,19 @@ pub type UserDetails = DashMap<Address, UserSettings>;
 pub type Array = RwLock<(Array1<f64>, TimeStamp)>;
 pub type Arrays = RwLock<Vec<RwLock<(Array1<U256>, TimeStamp, TimeStamp)>>>;
 pub type Matrix = RwLock<Array2<f64>>;
+pub type Indexes = RwLock<(Array1<Index>, TimeStamp)>;
+
+#[derive(Default, Debug, Clone)]
+pub struct Index {
+    pub index: U256,
+    pub rate: U256,
+}
+
+impl Index {
+    fn new(index: U256, rate: U256) -> Self {
+        Self { index, rate }
+    }
+}
 
 #[derive(Default, Debug, Clone)]
 pub struct UserSettings {
@@ -1064,6 +1077,11 @@ pub struct Cache {
     pub borrowed: Arrays,
     pub borrowed_matrix: Matrix,
 
+    pub liquidity: Indexes,
+    pub liquidity_index: Array,
+    pub variable_borrow: Indexes,
+    pub variable_borrow_index: Array,
+
     pub liquidation_threshold: Array,
     pub prices: Array,
     pub health_factors: Array,
@@ -1090,6 +1108,11 @@ impl Cache {
             decimals[*order] = *dec;
         }
         *self.decimals.write().await = (Array1::from_vec(decimals), now);
+
+        *self.liquidity.write().await = (Array1::from_elem(token_num, Index::default()), now);
+        *self.liquidity_index.write().await = (Array1::from_elem(token_num, 0.0), now);
+        *self.variable_borrow.write().await = (Array1::from_elem(token_num, Index::default()), now);
+        *self.variable_borrow_index.write().await = (Array1::from_elem(token_num, 0.0), now);
 
         *self.prices.write().await = (Array1::from_elem(token_num, 0.0), now);
         *self.liquidation_threshold.write().await = (Array1::from_elem(token_num, 0.0), now);
@@ -1735,10 +1758,10 @@ pub(crate) trait Scaler {
 
 impl Scaler for U256 {
     fn to_scaled(self, index: U256) -> U256 {
-        self.ray_div(index)   // (self * RAY) / index
+        self.ray_div(index) // (self * RAY) / index
     }
 
     fn to_current(self, index: U256) -> U256 {
-        self.ray_mul(index)   // (self * index) / RAY
+        self.ray_mul(index) // (self * index) / RAY
     }
 }
