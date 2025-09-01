@@ -1,6 +1,6 @@
 use crate::arbitrum::arbitrum::IAaveOracle::IAaveOracleInstance;
 use crate::arbitrum::arbitrum::IAaveProtocolDataProvider::{
-    IAaveProtocolDataProviderInstance, TokenData, getReserveDataReturn, getUserReserveDataReturn,
+    getReserveDataReturn, getUserReserveDataReturn, IAaveProtocolDataProviderInstance, TokenData,
 };
 use crate::arbitrum::arbitrum::IChainlinkAggregator::IChainlinkAggregatorEvents;
 use crate::arbitrum::arbitrum::IL2Pool::IL2PoolEvents;
@@ -13,20 +13,22 @@ use alloy::providers::Provider;
 use alloy::rpc::types::Filter;
 use alloy::sol;
 use alloy::sol_types::SolEventInterface;
-use alloy_primitives::{I256, Sign, U256, U512};
+use alloy_primitives::aliases::U40;
+use alloy_primitives::{Sign, I256, U256, U512};
 use async_trait::async_trait;
 use bitvec::prelude::*;
-use chrono::Utc;
+use chrono::{Timelike, Utc};
 use dashmap::DashMap;
 use eyre::eyre;
 use futures::future::try_join_all;
-use ndarray::{Array1, Array2, Axis, concatenate};
+use ndarray::{concatenate, Array1, Array2, Axis};
 use std::collections::HashMap;
 use std::default::Default;
+use std::iter::zip;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::RwLock;
-use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::{task, time, try_join};
 use tracing::{debug, error};
 
@@ -213,6 +215,7 @@ pub struct ReserveData {
     pub variable_borrow_rate: U256,
     pub liquidity_index: U256,
     pub variable_borrow_index: U256,
+    pub last_update_timestamp: U40,
 }
 
 impl ReserveData {
@@ -221,12 +224,14 @@ impl ReserveData {
         variable_borrow_rate: U256,
         liquidity_index: U256,
         variable_borrow_index: U256,
+        last_update_timestamp: U40,
     ) -> Self {
         Self {
             liquidity_rate,
             variable_borrow_rate,
             liquidity_index,
             variable_borrow_index,
+            last_update_timestamp,
         }
     }
 }
@@ -383,6 +388,7 @@ where
             variableBorrowRate: variable_borrow_rate,
             liquidityIndex: liquidity_index,
             variableBorrowIndex: variable_borrow_index,
+            lastUpdateTimestamp: last_update_timestamp,
             ..
         } = self
             .aave_protocol_data_provider
@@ -395,6 +401,7 @@ where
             variable_borrow_rate,
             liquidity_index,
             variable_borrow_index,
+            last_update_timestamp,
         ))
     }
 
@@ -1041,11 +1048,16 @@ pub type Indexes = RwLock<(Array1<Index>, TimeStamp)>;
 pub struct Index {
     pub index: U256,
     pub rate: U256,
+    pub last_update: TimeStamp,
 }
 
 impl Index {
-    fn new(index: U256, rate: U256) -> Self {
-        Self { index, rate }
+    fn new(index: U256, rate: U256, last_update: TimeStamp) -> Self {
+        Self {
+            index,
+            rate,
+            last_update,
+        }
     }
 }
 
@@ -1060,6 +1072,45 @@ impl UserSettings {
         Self {
             row_num,
             use_as_collateral,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(in crate::arbitrum) struct UserData {
+    pub(in crate::arbitrum) reserve_scaled: Vec<U256>,
+    pub(in crate::arbitrum) collateral_scaled: Vec<U256>,
+    pub(in crate::arbitrum) borrowed_scaled: Vec<U256>,
+    pub(in crate::arbitrum) liquidity_indexes: Vec<U256>,
+    pub(in crate::arbitrum) liquidity_rates: Vec<U256>,
+    pub(in crate::arbitrum) variable_borrow_indexes: Vec<U256>,
+    pub(in crate::arbitrum) variable_borrow_rates: Vec<U256>,
+    pub(in crate::arbitrum) last_update_timestamps: Vec<U40>,
+    pub(in crate::arbitrum) user_settings: UserSettings,
+}
+
+impl UserData {
+    pub fn new(
+        reserve_scaled: Vec<U256>,
+        collateral_scaled: Vec<U256>,
+        borrowed_scaled: Vec<U256>,
+        liquidity_indexes: Vec<U256>,
+        liquidity_rates: Vec<U256>,
+        variable_borrow_indexes: Vec<U256>,
+        variable_borrow_rates: Vec<U256>,
+        last_update_timestamps: Vec<U40>,
+        user_settings: UserSettings,
+    ) -> Self {
+        Self {
+            reserve_scaled,
+            collateral_scaled,
+            borrowed_scaled,
+            liquidity_indexes,
+            liquidity_rates,
+            variable_borrow_indexes,
+            variable_borrow_rates,
+            last_update_timestamps,
+            user_settings,
         }
     }
 }
@@ -1134,13 +1185,25 @@ impl Cache {
     where
         P: DataProvider + 'static,
     {
-        let (collateral, reserve, borrowed) = self.get_user_data(provider, tokens, user).await?;
+        let UserData {
+            reserve_scaled,
+            collateral_scaled,
+            borrowed_scaled,
+            liquidity_indexes,
+            liquidity_rates,
+            variable_borrow_indexes,
+            variable_borrow_rates,
+            last_update_timestamps,
+            user_settings,
+        } = self.get_user_data(provider, tokens, user).await?;
         let row_num = self
             .users
             .get(user)
             .ok_or_else(|| eyre!("user = {:?} not found", user))?
             .row_num;
         let now = Utc::now().timestamp_micros();
+
+        self.users.insert(user.clone(), user_settings);
 
         {
             let collaterals = &*self.collateral.read().await;
@@ -1149,8 +1212,8 @@ impl Cache {
                 .ok_or_else(|| eyre!("can't get row = {} from collateral", row_num))?
                 .write()
                 .await;
-            (*col, *last_sync, *last_modified) = (Array1::from(collateral), now, now);
-            debug!("sync_user: new collateral = {:?}", col);
+            (*col, *last_sync, *last_modified) = (Array1::from(collateral_scaled), now, now);
+            debug!("sync_user: new collateral scaled = {:?}", col);
         }
 
         {
@@ -1160,8 +1223,8 @@ impl Cache {
                 .ok_or_else(|| eyre!("can't get row = {} from reserve", row_num))?
                 .write()
                 .await;
-            (*res, *last_sync, *last_modified) = (Array1::from(reserve), now, now);
-            debug!("sync_user: new reserve = {:?}", res);
+            (*res, *last_sync, *last_modified) = (Array1::from(reserve_scaled), now, now);
+            debug!("sync_user: new reserve scaled = {:?}", res);
         }
 
         {
@@ -1171,8 +1234,62 @@ impl Cache {
                 .ok_or_else(|| eyre!("can't get row = {} from borrowed", row_num))?
                 .write()
                 .await;
-            (*bor, *last_sync, *last_modified) = (Array1::from(borrowed), now, now);
-            debug!("sync_user: new borrowed = {:?}", bor);
+            (*bor, *last_sync, *last_modified) = (Array1::from(borrowed_scaled), now, now);
+            debug!("sync_user: new borrowed scaled = {:?}", bor);
+        }
+
+        {
+            let (indexes, last_modified) = &mut *self.liquidity.write().await;
+            let idx = liquidity_indexes
+                .iter()
+                .zip(liquidity_rates.iter())
+                .zip(last_update_timestamps.iter())
+                .map(|((li, lr), lu)| {
+                    Index::new(
+                        li.clone(),
+                        lr.clone(),
+                        lu.saturating_mul(U40::from(1_000_000)).to::<TimeStamp>(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            (*indexes, *last_modified) = (Array1::from(idx), now);
+            debug!("sync_user: new liquidity = {:?}", indexes);
+        }
+
+        {
+            let (indexes, last_modified) = &mut *self.liquidity_index.write().await;
+            (*indexes, *last_modified) = (
+                Array1::from_iter(liquidity_indexes.iter().map(F64Converter::as_f64_ray)),
+                now,
+            );
+            debug!("sync_user: new liquidity index = {:?}", indexes);
+        }
+
+        {
+            let (indexes, last_modified) = &mut *self.variable_borrow.write().await;
+            let idx = variable_borrow_indexes
+                .iter()
+                .zip(variable_borrow_rates.iter())
+                .zip(last_update_timestamps.iter())
+                .map(|((vbi, vbr), lu)| {
+                    Index::new(
+                        vbi.clone(),
+                        vbr.clone(),
+                        lu.saturating_mul(U40::from(1_000_000)).to::<TimeStamp>(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            (*indexes, *last_modified) = (Array1::from(idx), now);
+            debug!("sync_user: new variable borrow = {:?}", indexes);
+        }
+
+        {
+            let (indexes, last_modified) = &mut *self.variable_borrow_index.write().await;
+            (*indexes, *last_modified) = (
+                Array1::from_iter(variable_borrow_indexes.iter().map(F64Converter::as_f64_ray)),
+                now,
+            );
+            debug!("sync_user: new variable borrow index = {:?}", indexes);
         }
 
         Ok(())
@@ -1254,26 +1371,43 @@ impl Cache {
         provider: Arc<P>,
         tokens: &Tokens,
         user: &Address,
-    ) -> eyre::Result<(Vec<U256>, Vec<U256>, Vec<U256>)>
+    ) -> eyre::Result<UserData>
     where
         P: DataProvider + 'static,
     {
         let tasks = tokens.iter().map(|(token_address, _)| {
             let provider = provider.clone();
             async move {
-                Ok::<_, eyre::Error>((
-                    provider.get_user_reserve_data(token_address, user).await?,
-                    token_address.clone(),
-                ))
+                let (reserve_data, user_reserve_data) = try_join!(
+                    provider.get_reserve_data(token_address),
+                    provider.get_user_reserve_data(token_address, user)
+                )?;
+
+                Ok::<_, eyre::Error>((reserve_data, user_reserve_data, token_address.clone()))
             }
         });
 
-        let user_reserve_data = try_join_all(tasks).await?;
+        let task_results = try_join_all(tasks).await?;
 
-        let (mut collateral, mut reserve, mut borrowed, mut user_settings) = (
+        let (
+            mut reserve_scaled,
+            mut collateral_scaled,
+            mut borrowed_scaled,
+            mut liquidity_indexes,
+            mut liquidity_rates,
+            mut variable_borrow_indexes,
+            mut variable_borrow_rates,
+            mut last_update_timestamps,
+            mut user_settings,
+        ) = (
             vec![U256::default(); tokens.len()],
             vec![U256::default(); tokens.len()],
             vec![U256::default(); tokens.len()],
+            vec![U256::default(); tokens.len()],
+            vec![U256::default(); tokens.len()],
+            vec![U256::default(); tokens.len()],
+            vec![U256::default(); tokens.len()],
+            vec![U40::default(); tokens.len()],
             self.users
                 .get(user)
                 .ok_or_else(|| eyre!("user = {:?} not found", user))?
@@ -1281,30 +1415,52 @@ impl Cache {
         );
 
         for (
+            ReserveData {
+                liquidity_rate,
+                variable_borrow_rate,
+                liquidity_index,
+                variable_borrow_index,
+                last_update_timestamp,
+            },
             UserReserveData {
                 current_atoken_balance,
                 current_variable_debt,
                 usage_as_collateral_enabled,
             },
             token_address,
-        ) in user_reserve_data
+        ) in task_results
         {
             let idx = tokens
                 .get(&token_address)
                 .ok_or_else(|| eyre!("token = {} not found", token_address))?
                 .order;
+
+            liquidity_indexes[idx] = liquidity_index;
+            liquidity_rates[idx] = liquidity_rate;
+            variable_borrow_indexes[idx] = variable_borrow_index;
+            variable_borrow_rates[idx] = variable_borrow_rate;
+            last_update_timestamps[idx] = last_update_timestamp;
+
             if usage_as_collateral_enabled {
-                collateral[idx] = current_atoken_balance;
+                collateral_scaled[idx] = current_atoken_balance.to_scaled(liquidity_index);
                 user_settings.use_as_collateral.set(idx, true);
             } else {
-                reserve[idx] = current_atoken_balance;
+                reserve_scaled[idx] = current_atoken_balance.to_scaled(liquidity_index);
             }
-            borrowed[idx] = current_variable_debt;
+            borrowed_scaled[idx] = current_variable_debt.to_scaled(variable_borrow_index);
         }
 
-        self.users.insert(user.clone(), user_settings);
-
-        Ok((collateral, reserve, borrowed))
+        Ok(UserData::new(
+            reserve_scaled,
+            collateral_scaled,
+            borrowed_scaled,
+            liquidity_indexes,
+            liquidity_rates,
+            variable_borrow_indexes,
+            variable_borrow_rates,
+            last_update_timestamps,
+            user_settings,
+        ))
     }
 
     pub(in crate::arbitrum) fn remove_user(&self, addr: &Address) {
