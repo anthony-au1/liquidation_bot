@@ -22,6 +22,6 @@ index:
 - reserve_data_updated
 - sync data - matrix's values in f64
 - hc calc - add from scaled to current
+- tests + add math tests 
 - 
-- tests
 - integration tests

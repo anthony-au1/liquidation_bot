@@ -21,7 +21,7 @@ use chrono::Utc;
 use dashmap::DashMap;
 use eyre::eyre;
 use futures::future::try_join_all;
-use ndarray::{concatenate, Array1, Array2, Axis};
+use ndarray::{concatenate, Array1, Array2, Axis, Ix1, OwnedRepr};
 use std::collections::HashMap;
 use std::default::Default;
 use std::sync::Arc;
@@ -1616,12 +1616,7 @@ impl Cache {
                 .read()
                 .await;
 
-            let row = Array1::from_iter(
-                row_lock
-                    .0
-                    .iter()
-                    .map(F64Converter::as_f64_ray),
-            );
+            let row = Array1::from_iter(row_lock.0.iter().map(F64Converter::as_f64_ray));
             bor_matrix_lock.push_row(row.view())?;
         }
 
@@ -1667,11 +1662,7 @@ impl Cache {
                 .read()
                 .await;
 
-            let row = Array1::from_iter(
-                row.0
-                    .iter()
-                    .map(F64Converter::as_f64_ray),
-            );
+            let row = Array1::from_iter(row.0.iter().map(F64Converter::as_f64_ray));
             bor_matrix_lock.row_mut(row_num).assign(&row);
         }
 
@@ -1722,10 +1713,10 @@ impl Cache {
                 .get(user)
                 .ok_or_else(|| eyre!("user = {:?} not found", user))?
                 .row_num;
-            let (decimals, _) = &*self.decimals.read().await;
 
             let col_eff = {
                 let collateral = &*self.collateral.read().await;
+                let (li, _) = &*self.liquidity.read().await;
                 let col_row_lock = Array1::from_iter(
                     collateral
                         .get(row_num)
@@ -1735,13 +1726,14 @@ impl Cache {
                         .0
                         .iter()
                         .enumerate()
-                        .map(|(idx, v)| v.as_f64(decimals[idx])),
+                        .map(|(idx, v)| v.to_current(li[idx].index).as_f64_ray()),
                 );
                 col_row_lock.dot(&ltp)
             };
 
             let bor_eff = {
                 let borrowed = &*self.borrowed.read().await;
+                let (vbi, _) = &*self.variable_borrow.read().await;
                 let bor_row_lock = Array1::from_iter(
                     borrowed
                         .get(row_num)
@@ -1751,7 +1743,7 @@ impl Cache {
                         .0
                         .iter()
                         .enumerate()
-                        .map(|(idx, v)| v.as_f64(decimals[idx])),
+                        .map(|(idx, v)| v.to_current(vbi[idx].index).as_f64_ray()),
                 );
                 bor_row_lock.dot(&price)
             };
@@ -1785,13 +1777,25 @@ impl Cache {
         }
 
         let col_eff = {
-            let collateral_lock = self.collateral_matrix.read().await;
-            collateral_lock.dot(&ltp)
+            let collateral = &*self.collateral_matrix.read().await;
+            let (li, _) = &*self.liquidity_index.read().await;
+            let scaled = collateral
+                * &li
+                    .broadcast((collateral.nrows(), li.len()))
+                    .ok_or_else(|| eyre!("collateral = {:?} not found", collateral))?
+                    .to_owned();
+            scaled.dot(&ltp)
         };
 
         let bor_eff = {
-            let borrowed_lock = self.borrowed_matrix.read().await;
-            borrowed_lock.dot(&price)
+            let borrowed = &*self.borrowed_matrix.read().await;
+            let (vbi, _) = &*self.variable_borrow_index.read().await;
+            let scaled = borrowed
+                * &vbi
+                    .broadcast((borrowed.nrows(), vbi.len()))
+                    .ok_or_else(|| eyre!("borrowed = {:?} not found", borrowed))?
+                    .to_owned();
+            scaled.dot(&price)
         };
 
         let mut hf_lock = self.health_factors.write().await;
