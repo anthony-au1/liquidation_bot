@@ -17,14 +17,13 @@ use alloy_primitives::aliases::U40;
 use alloy_primitives::{Sign, I256, U256, U512};
 use async_trait::async_trait;
 use bitvec::prelude::*;
-use chrono::{Timelike, Utc};
+use chrono::Utc;
 use dashmap::DashMap;
 use eyre::eyre;
 use futures::future::try_join_all;
 use ndarray::{concatenate, Array1, Array2, Axis};
 use std::collections::HashMap;
 use std::default::Default;
-use std::iter::zip;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
@@ -1518,7 +1517,6 @@ impl Cache {
     ) -> eyre::Result<()> {
         let col_lock = self.collateral.read().await;
         let mut col_matrix_lock = self.collateral_matrix.write().await;
-        let (decimals, _) = &*self.decimals.read().await;
 
         debug!(
             "sync_collateral: sync target = {:?}, col_lock = {:?}",
@@ -1532,13 +1530,7 @@ impl Cache {
                 .ok_or_else(|| eyre!("row = {} not found in collateral", col_matrix_lock.nrows()))?
                 .read()
                 .await;
-            let row = Array1::from_iter(
-                row_lock
-                    .0
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, v)| v.as_f64(decimals[idx])),
-            );
+            let row = Array1::from_iter(row_lock.0.iter().map(F64Converter::as_f64_ray));
             col_matrix_lock.push_row(row.view())?;
         }
 
@@ -1575,7 +1567,7 @@ impl Cache {
                     .await;
                 col.get(col_num)
                     .ok_or_else(|| eyre!("column = {} not found in collateral", col_num))?
-                    .as_f64(decimals[col_num])
+                    .as_f64_ray()
             };
         } else {
             let row = col_lock
@@ -1584,12 +1576,7 @@ impl Cache {
                 .read()
                 .await;
 
-            let row = Array1::from_iter(
-                row.0
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, v)| v.as_f64(decimals[idx])),
-            );
+            let row = Array1::from_iter(row.0.iter().map(F64Converter::as_f64_ray));
             col_matrix_lock.row_mut(row_num).assign(&row);
         }
 
@@ -1615,7 +1602,6 @@ impl Cache {
     ) -> eyre::Result<()> {
         let bor_lock = self.borrowed.read().await;
         let mut bor_matrix_lock = self.borrowed_matrix.write().await;
-        let (decimals, _) = &*self.decimals.read().await;
 
         debug!(
             "sync_borrowed: sync target = {:?}, bor_lock = {:?}",
@@ -1634,8 +1620,7 @@ impl Cache {
                 row_lock
                     .0
                     .iter()
-                    .enumerate()
-                    .map(|(idx, v)| v.as_f64(decimals[idx])),
+                    .map(F64Converter::as_f64_ray),
             );
             bor_matrix_lock.push_row(row.view())?;
         }
@@ -1673,7 +1658,7 @@ impl Cache {
                     .await;
                 bor.get(col_num)
                     .ok_or_else(|| eyre!("column = {} not found in borrowed", col_num))?
-                    .as_f64(decimals[col_num])
+                    .as_f64_ray()
             };
         } else {
             let row = bor_lock
@@ -1685,8 +1670,7 @@ impl Cache {
             let row = Array1::from_iter(
                 row.0
                     .iter()
-                    .enumerate()
-                    .map(|(idx, v)| v.as_f64(decimals[idx])),
+                    .map(F64Converter::as_f64_ray),
             );
             bor_matrix_lock.row_mut(row_num).assign(&row);
         }
@@ -1889,7 +1873,7 @@ pub(crate) trait RayOperations {
     fn ray_div(self, b: U256) -> U256;
 }
 
-const RAY: u128 = 1_000_000_000_000_000_000_000_000_000; // 1e27
+pub(in crate::arbitrum) const RAY: u128 = 1_000_000_000_000_000_000_000_000_000; // 1e27
 
 impl RayOperations for U256 {
     fn ray_mul(self, b: U256) -> U256 {

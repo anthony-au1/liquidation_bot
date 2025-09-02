@@ -20,8 +20,8 @@ index:
 - create user
 - all events - scale values
 - reserve_data_updated
-- 
 - sync data - matrix's values in f64
 - hc calc - add from scaled to current
+- 
 - tests
 - integration tests

@@ -3,11 +3,9 @@ use crate::arbitrum::arbitrum::IL2Pool::{
     Borrow, LiquidationCall, Repay, ReserveDataUpdated, ReserveUsedAsCollateralDisabled,
     ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
-use crate::arbitrum::arbitrum::{
-    Cache, DataProvider, F64Converter, HFRequest, RqDate, Scaler, SyncRequest, SyncTarget,
-    TimeStamp, Token, Tokens,
-};
+use crate::arbitrum::arbitrum::{Cache, DataProvider, F64Converter, HFRequest, RayOperations, RqDate, Scaler, SyncRequest, SyncTarget, TimeStamp, Token, TokenDetails, Tokens, RAY};
 use alloy_primitives::{Address, U256};
+use bitvec::macros::internal::funty::Integral;
 use chrono::Utc;
 use eyre::eyre;
 use std::sync::Arc;
@@ -1184,7 +1182,7 @@ where
 
 pub(crate) async fn reserve_data_updated<P>(
     cache: Arc<Cache>,
-    provider: Arc<P>,
+    _: Arc<P>,
     tokens: Arc<Tokens>,
     event: (ReserveDataUpdated, Sender<HFRequest>, RqDate),
 ) -> eyre::Result<()>
@@ -1202,19 +1200,6 @@ where
             received - rq_date
         )
     });
-
-    // event ReserveDataUpdated(
-    //     address indexed reserve,
-    //     uint256 liquidityRate,
-    //     uint256 stableBorrowRate,
-    //     uint256 variableBorrowRate,
-    //     uint256 liquidityIndex,
-    //     uint256 variableBorrowIndex
-    // );
-
-    // todo
-    // update all indexes for the provided asset
-    // off-chain calc other assets' indexes
 
     let now = Utc::now().timestamp_micros();
     let idx = tokens
@@ -1243,6 +1228,53 @@ where
         let (vbi, _) = &mut *cache.variable_borrow_index.write().await;
         vbi[idx] = event.variableBorrowIndex.as_f64_ray();
     }
+
+    {
+        let one_ray: U256 = U256::from(RAY);
+        let seconds_per_year = U256::from(31_536_000);
+
+        let (li, li_last_modified) = &mut *cache.liquidity.write().await;
+        let (lii, lii_last_modified) = &mut *cache.liquidity_index.write().await;
+
+        let (vbi, vbi_last_modified) = &mut *cache.variable_borrow.write().await;
+        let (vbii, vbii_last_modified) = &mut *cache.variable_borrow_index.write().await;
+
+        for (_, TokenDetails { order, .. }) in tokens.iter() {
+            let idx2 = order.clone();
+            if idx == idx2 {
+                continue;
+            }
+
+            let dt = U256::from(now.saturating_sub(li[idx2].last_update) / 1_000_000);
+
+            let dt_spy = dt.ray_div(seconds_per_year);
+            let li_new = li[idx2]
+                .index
+                .ray_mul(one_ray + li[idx2].rate.ray_mul(dt_spy));
+            (li[idx2].index, li[idx2].last_update) = (li_new, now);
+
+            lii[idx2] = li_new.as_f64_ray();
+
+            let dt = U256::from(now.saturating_sub(vbi[idx2].last_update) / 1_000_000);
+
+            let dt_spy = dt.ray_div(seconds_per_year);
+            let vbi_new = vbi[idx2]
+                .index
+                .ray_mul(one_ray + vbi[idx2].rate.ray_mul(dt_spy));
+            (vbi[idx2].index, vbi[idx2].last_update) = (vbi_new, now);
+
+            vbii[idx2] = vbi_new.as_f64_ray();
+        }
+
+        (
+            *li_last_modified,
+            *lii_last_modified,
+            *vbi_last_modified,
+            *vbii_last_modified,
+        ) = (now, now, now, now);
+    }
+
+    hf_tx.send(HFRequest::Full(rq_date)).await?;
 
     Ok(())
 }
