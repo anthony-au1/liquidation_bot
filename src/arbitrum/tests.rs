@@ -4,7 +4,12 @@ use crate::arbitrum::arbitrum::IL2Pool::{
     Borrow, IL2PoolEvents, LiquidationCall, Repay, ReserveUsedAsCollateralDisabled,
     ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
-use crate::arbitrum::arbitrum::{AaveEvents, Cache, DataProvider, F64Converter, HFRequest, ReserveData, RqDate, Scaler, SyncRequest, SyncTarget, Token, TokenDetails, UserData, UserReserveData, UserSettings, liquidation_threshold_update, listen_events, listen_hf_calc, listen_price_update, listen_sync, setup, RayOperations};
+use crate::arbitrum::arbitrum::{
+    liquidation_threshold_update, listen_events, listen_hf_calc, listen_price_update, listen_sync, setup, AaveEvents, Cache,
+    DataProvider, F64Converter, HFRequest, Index, RayOperations, ReserveData, RqDate, Scaler,
+    SyncRequest, SyncTarget, Token, TokenDetails, UserData,
+    UserReserveData, UserSettings,
+};
 use crate::arbitrum::events::{
     answer_updated, borrow, create_user, liquidation_call, repay,
     reserve_used_as_collateral_disabled, reserve_used_as_collateral_enabled, supply, withdraw,
@@ -23,8 +28,8 @@ use std::fmt::Debug;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
 use tokio::sync::mpsc::channel;
+use tokio::sync::RwLock;
 use tokio::task;
 use tokio::time::sleep;
 
@@ -327,11 +332,10 @@ async fn generate_cache_and_tokens(
         ),
     );
 
+    let now = Utc::now().timestamp_micros();
     if user_num > 0 {
         let mut user_addr = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
-        let now = Utc::now().timestamp_micros();
 
-        *cache.health_factors.write().await = (Array1::from_elem(0, 0.0), now);
         for i in 0..user_num {
             cache.users.insert(
                 user_addr,
@@ -368,11 +372,51 @@ async fn generate_cache_and_tokens(
 
         *cache.collateral_matrix.write().await = Array2::from_elem((0, tokens.len()), 0.0);
         *cache.borrowed_matrix.write().await = Array2::from_elem((0, tokens.len()), 0.0);
-
-        *cache.prices.write().await = (Array1::from_elem(tokens.len(), 0.0), now);
-        *cache.liquidation_threshold.write().await = (Array1::from_elem(tokens.len(), 0.0), now);
-        *cache.decimals.write().await = (Array1::from_elem(tokens.len(), 0.0), now);
     }
+
+    *cache.health_factors.write().await = (Array1::from_elem(0, 0.0), now);
+    *cache.prices.write().await = (Array1::from_elem(tokens.len(), 0.0), now);
+    *cache.liquidation_threshold.write().await = (Array1::from_elem(tokens.len(), 0.0), now);
+    *cache.decimals.write().await = (
+        Array1::from_vec(vec![
+            10_f64.powf(18_f64),
+            10_f64.powf(6_f64),
+            10_f64.powf(12_f64),
+        ]),
+        now,
+    );
+    *cache.liquidity.write().await = (
+        Array1::from_vec(vec![
+            Index::new(1045.as_u256(24), 45.as_u256(24), now),
+            Index::new(1035.as_u256(24), 35.as_u256(24), now),
+            Index::new(1025.as_u256(24), 25.as_u256(24), now),
+        ]),
+        now,
+    );
+    *cache.liquidity_index.write().await = (
+        Array1::from_vec(vec![
+            1045.as_u256(24).as_f64_ray(),
+            1035.as_u256(24).as_f64_ray(),
+            1025.as_u256(24).as_f64_ray(),
+        ]),
+        now,
+    );
+    *cache.variable_borrow.write().await = (
+        Array1::from_vec(vec![
+            Index::new(105.as_u256(25), 5.as_u256(25), now),
+            Index::new(104.as_u256(25), 4.as_u256(25), now),
+            Index::new(103.as_u256(25), 3.as_u256(25), now),
+        ]),
+        now,
+    );
+    *cache.variable_borrow_index.write().await = (
+        Array1::from_vec(vec![
+            105.as_u256(25).as_f64_ray(),
+            104.as_u256(25).as_f64_ray(),
+            103.as_u256(25).as_f64_ray(),
+        ]),
+        now,
+    );
 
     Ok((cache, tokens))
 }
@@ -2554,7 +2598,7 @@ async fn test_borrow() -> eyre::Result<()> {
     };
 
     let (sync_tx, mut sync_rc) = channel::<SyncRequest>(1);
-    let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
+    let (hf_tx, _) = channel::<HFRequest>(1);
 
     let sync_handler = task::spawn(async move {
         let msg = sync_rc
@@ -2566,16 +2610,6 @@ async fn test_borrow() -> eyre::Result<()> {
         Ok::<_, eyre::Error>(())
     });
 
-    // let hf_handler = task::spawn(async move {
-    //     let msg = hf_rc
-    //         .recv()
-    //         .await
-    //         .ok_or_else(|| eyre::eyre!("hf channel closed"))?;
-    //     assert_eq!(HFRequest::User(user.clone(), rq_date), msg);
-    //
-    //     Ok::<_, eyre::Error>(())
-    // });
-
     assert_eq!(cache.users.len(), 0);
 
     borrow(
@@ -2586,124 +2620,136 @@ async fn test_borrow() -> eyre::Result<()> {
     )
     .await?;
     let _ = sync_handler.await?;
-    // let _ = hf_handler.await?;
 
     assert_eq!(cache.users.len(), 1);
     assert_eq!(cache.users.contains_key(&user), true);
 
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
+    let (decimals, _) = &*cache.decimals.read().await;
 
     assert_eq!(
         collateral,
-        vec![U256::default(), 20.as_u256_decimal_6(), U256::default()]
+        vec![
+            U256::default(),
+            20.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.liquidity.read().await.0[1].index),
+            U256::default()
+        ]
     );
     assert_eq!(
         reserve,
         vec![
-            10.as_u256_decimal_18(),
+            10.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.liquidity.read().await.0[0].index),
             U256::default(),
             30.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.liquidity.read().await.0[2].index),
         ]
     );
     assert_eq!(
         borrowed,
         vec![
-            10.as_u256_decimal_18(),
-            20.as_u256_decimal_6(),
+            10.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+            20.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.variable_borrow.read().await.0[1].index),
             30.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.variable_borrow.read().await.0[2].index),
         ]
     );
 
     // 2 case - borrowed new event
 
-    // let dummy_data_provider = Arc::new(DummyDataProvider::new());
-    // let (cache, tokens) = generate_cache_and_tokens(1)
-    //     .await
-    //     .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
-    //
-    // {
-    //     let borrowed = &*cache.borrowed.read().await;
-    //     let (bor, _, _) = &mut *borrowed
-    //         .get(0)
-    //         .ok_or_else(|| eyre!("can't get row = 0 from borrowed"))?
-    //         .write()
-    //         .await;
-    //     *bor = Array1::from_vec(vec![
-    //         100.as_u256_decimal_18(),
-    //         U256::default(),
-    //         U256::default(),
-    //     ]);
-    // }
-    //
-    // let user = cache
-    //     .users
-    //     .iter()
-    //     .next()
-    //     .ok_or_else(|| eyre::eyre!("no users"))?
-    //     .key()
-    //     .clone();
-    // let token = Address::from_str("0x1Ac54C113cefD1792CbFcF41B711824d657eb61D")?;
-    //
-    // let rq_date = Utc::now().timestamp_micros();
-    //
-    // let event = Borrow {
-    //     reserve: token.clone(),
-    //     user: user.clone(),
-    //     onBehalfOf: user,
-    //     amount: 20.as_u256_decimal_18(),
-    //     interestRateMode: 2,
-    //     borrowRate: U256::from(5_000_000_000_000_000_000_000_0000u128),
-    //     referralCode: 0,
-    // };
-    //
-    // let (sync_tx, mut sync_rc) = channel::<SyncRequest>(1);
-    // let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
-    //
-    // let sync_handler = task::spawn(async move {
-    //     let msg = sync_rc
-    //         .recv()
-    //         .await
-    //         .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
-    //     assert_eq!(SyncRequest::Borrowed(SyncTarget::Cell(0, 0), rq_date), msg);
-    //
-    //     Ok::<_, eyre::Error>(())
-    // });
-    //
-    // let hf_handler = task::spawn(async move {
-    //     let msg = hf_rc
-    //         .recv()
-    //         .await
-    //         .ok_or_else(|| eyre::eyre!("hf channel closed"))?;
-    //     assert_eq!(HFRequest::User(user.clone(), rq_date), msg);
-    //
-    //     Ok::<_, eyre::Error>(())
-    // });
-    //
-    // assert_eq!(cache.users.len(), 1);
-    //
-    // borrow(
-    //     cache.clone(),
-    //     dummy_data_provider,
-    //     tokens,
-    //     (event, sync_tx, hf_tx, RqDate(rq_date)),
-    // )
-    // .await?;
-    // let _ = sync_handler.await?;
-    // let _ = hf_handler.await?;
-    //
-    // assert_eq!(cache.users.len(), 1);
-    //
-    // let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
-    //
-    // assert_eq!(collateral, vec![U256::default(); 3]);
-    // assert_eq!(reserve, vec![U256::default(); 3]);
-    // assert_eq!(
-    //     borrowed,
-    //     vec![120.as_u256_decimal_18(), U256::default(), U256::default()]
-    // );
-    //
-    // // 3 case - borrowed skip event
-    //
+    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let (cache, tokens) = generate_cache_and_tokens(1)
+        .await
+        .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
+    let (decimals, _) = &*cache.decimals.read().await;
+
+    {
+        let borrowed = &*cache.borrowed.read().await;
+        let (bor, _, _) = &mut *borrowed
+            .get(0)
+            .ok_or_else(|| eyre!("can't get row = 0 from borrowed"))?
+            .write()
+            .await;
+        *bor = Array1::from_vec(vec![
+            100.as_u256_decimal_18(),
+            U256::default(),
+            U256::default(),
+        ]);
+    }
+
+    let user = cache
+        .users
+        .iter()
+        .next()
+        .ok_or_else(|| eyre::eyre!("no users"))?
+        .key()
+        .clone();
+    let token = Address::from_str("0x1Ac54C113cefD1792CbFcF41B711824d657eb61D")?;
+
+    let rq_date = Utc::now().timestamp_micros();
+
+    let event = Borrow {
+        reserve: token.clone(),
+        user: user.clone(),
+        onBehalfOf: user,
+        amount: 20.as_u256_decimal_18(),
+        interestRateMode: 2,
+        borrowRate: U256::from(5_000_000_000_000_000_000_000_0000u128),
+        referralCode: 0,
+    };
+
+    let (sync_tx, mut sync_rc) = channel::<SyncRequest>(1);
+    let (hf_tx, _) = channel::<HFRequest>(1);
+
+    let sync_handler = task::spawn(async move {
+        let msg = sync_rc
+            .recv()
+            .await
+            .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
+        assert_eq!(SyncRequest::Borrowed(SyncTarget::Cell(0, 0), rq_date), msg);
+
+        Ok::<_, eyre::Error>(())
+    });
+
+    assert_eq!(cache.users.len(), 1);
+
+    borrow(
+        cache.clone(),
+        dummy_data_provider,
+        tokens,
+        (event, sync_tx, hf_tx, RqDate(rq_date)),
+    )
+    .await?;
+    let _ = sync_handler.await?;
+
+    assert_eq!(cache.users.len(), 1);
+
+    let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
+
+    assert_eq!(collateral, vec![U256::default(); 3]);
+    assert_eq!(reserve, vec![U256::default(); 3]);
+    assert_eq!(
+        borrowed,
+        vec![
+            120.as_u256_decimal_18()
+                .to_ray(decimals[1])
+                .to_scaled(cache.variable_borrow.read().await.0[1].index),
+            U256::default(),
+            U256::default()
+        ]
+    );
+
+    // 3 case - borrowed skip event
+
     // let rq_date = Utc::now().timestamp_micros();
     // let dummy_data_provider = Arc::new(DummyDataProvider::new());
     // let (cache, tokens) = generate_cache_and_tokens(1)
@@ -4119,8 +4165,8 @@ async fn test_u256_to_f64() -> eyre::Result<()> {
 
 #[tokio::test]
 async fn test_ray_ops() -> eyre::Result<()> {
-    let decimals = 6.0;
-    let value = U256::from(20) * U256::from(10).pow(U256::from(decimals));
+    let decimals = 1_000_000.0;
+    let value = U256::from(20) * U256::from(decimals);
 
     let liquidity_index = U256::from(104) * U256::from(10).pow(U256::from(25));
     let amount = value.to_ray(decimals);
@@ -4130,7 +4176,10 @@ async fn test_ray_ops() -> eyre::Result<()> {
     let amount_scaled_as_f64 = amount_scaled.as_f64_ray();
     let amount_scaled_expected_as_f64 = amount_scaled_expected.as_f64_ray();
 
-    assert_eq!(amount_scaled_as_f64 as f32, amount_scaled_expected_as_f64 as f32);
+    assert_eq!(
+        amount_scaled_as_f64 as f32,
+        amount_scaled_expected_as_f64 as f32
+    );
 
     Ok(())
 }

@@ -1051,7 +1051,7 @@ pub struct Index {
 }
 
 impl Index {
-    fn new(index: U256, rate: U256, last_update: TimeStamp) -> Self {
+    pub fn new(index: U256, rate: U256, last_update: TimeStamp) -> Self {
         Self {
             index,
             rate,
@@ -1387,6 +1387,7 @@ impl Cache {
         });
 
         let task_results = try_join_all(tasks).await?;
+        let (decimals, _) = &*self.decimals.read().await;
 
         let (
             mut reserve_scaled,
@@ -1441,12 +1442,18 @@ impl Cache {
             last_update_timestamps[idx] = last_update_timestamp;
 
             if usage_as_collateral_enabled {
-                collateral_scaled[idx] = current_atoken_balance.to_scaled(liquidity_index);
+                collateral_scaled[idx] = current_atoken_balance
+                    .to_ray(decimals[idx])
+                    .to_scaled(liquidity_index);
                 user_settings.use_as_collateral.set(idx, true);
             } else {
-                reserve_scaled[idx] = current_atoken_balance.to_scaled(liquidity_index);
+                reserve_scaled[idx] = current_atoken_balance
+                    .to_ray(decimals[idx])
+                    .to_scaled(liquidity_index);
             }
-            borrowed_scaled[idx] = current_variable_debt.to_scaled(variable_borrow_index);
+            borrowed_scaled[idx] = current_variable_debt
+                .to_ray(decimals[idx])
+                .to_scaled(variable_borrow_index);
         }
 
         Ok(UserData::new(
@@ -1895,7 +1902,7 @@ impl RayOperations for U256 {
     }
 
     fn to_ray(self, decimals: f64) -> U256 {
-       self * U256::from(10).pow(U256::from(27.0 - decimals))
+        self * U256::from(RAY / (decimals as u128))
     }
 }
 
