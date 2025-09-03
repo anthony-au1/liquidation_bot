@@ -1875,10 +1875,10 @@ impl F64Converter for U256 {
 pub(crate) trait RayOperations {
     fn ray_mul(self, b: U256) -> U256;
     fn ray_div(self, b: U256) -> U256;
+    fn to_ray(self, decimals: f64) -> U256;
 }
 
 pub(in crate::arbitrum) const RAY: u128 = 1_000_000_000_000_000_000_000_000_000; // 1e27
-
 impl RayOperations for U256 {
     fn ray_mul(self, b: U256) -> U256 {
         // (a * b + RAY/2) / RAY
@@ -1892,6 +1892,10 @@ impl RayOperations for U256 {
         let half_b = b / U512::from(2u8);
         let result = (U512::from(self) * U512::from(RAY) + half_b) / b;
         U256::from(result)
+    }
+
+    fn to_ray(self, decimals: f64) -> U256 {
+       self * U256::from(10).pow(U256::from(27.0 - decimals))
     }
 }
 

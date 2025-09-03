@@ -20,6 +20,7 @@ use std::fmt::Debug;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+use alloy_primitives::aliases::U40;
 use tokio::sync::{Mutex, RwLock};
 use tokio::task;
 use tokio::time::sleep;
@@ -188,24 +189,28 @@ impl DataProvider for SharedDataProvider {
     }
 
     async fn get_reserve_data(&self, token: &Address) -> eyre::Result<ReserveData> {
+        let now = Utc::now().timestamp();
         let rd = match token {
             t if *t == Address::from_str(AAVE)? => ReserveData::new(
                 45.as_u256(24),
                 5.as_u256(25),
                 1045.as_u256(24),
                 105.as_u256(25),
+                U40::from(now),
             ),
             t if *t == Address::from_str(USDC)? => ReserveData::new(
                 35.as_u256(24),
                 4.as_u256(25),
                 1035.as_u256(24),
                 104.as_u256(25),
+                U40::from(now),
             ),
             t if *t == Address::from_str(DAI)? => ReserveData::new(
                 25.as_u256(24),
                 3.as_u256(25),
                 1025.as_u256(24),
                 103.as_u256(25),
+                U40::from(now),
             ),
             _ => return Err(eyre!("token = {:?} not found", token)),
         };

@@ -5,7 +5,6 @@ use crate::arbitrum::arbitrum::IL2Pool::{
 };
 use crate::arbitrum::arbitrum::{Cache, DataProvider, F64Converter, HFRequest, RayOperations, RqDate, Scaler, SyncRequest, SyncTarget, TimeStamp, Token, TokenDetails, Tokens, RAY};
 use alloy_primitives::{Address, U256};
-use bitvec::macros::internal::funty::Integral;
 use chrono::Utc;
 use eyre::eyre;
 use std::sync::Arc;
@@ -181,6 +180,7 @@ where
         .get(&event.reserve)
         .ok_or_else(|| eyre!("token = {:?} not found", event.reserve))?
         .order;
+    let (decimals, _) = &*cache.decimals.read().await;
     let now = Utc::now().timestamp_micros();
 
     if user_settings.use_as_collateral[idx] {
@@ -207,6 +207,7 @@ where
                 .await;
             col[idx] += event
                 .amount
+                .to_ray(decimals[idx])
                 .to_scaled(c.liquidity.read().await.0[idx].index);
             *last_modified = now;
 
@@ -265,6 +266,7 @@ where
                 .await;
             res[idx] += event
                 .amount
+                .to_ray(decimals[idx])
                 .to_scaled(c.liquidity.read().await.0[idx].index);
             *last_modified = now;
 
@@ -359,6 +361,7 @@ where
         .get(&event.reserve)
         .ok_or_else(|| eyre!("token = {:?} not found", event.reserve))?
         .order;
+    let (decimals, _) = &*cache.decimals.read().await;
     let now = Utc::now().timestamp_micros();
 
     if user_settings.use_as_collateral[idx] {
@@ -385,6 +388,7 @@ where
                 .await;
             col[idx] -= event
                 .amount
+                .to_ray(decimals[idx])
                 .to_scaled(c.liquidity.read().await.0[idx].index);
             *last_modified = now;
 
@@ -443,6 +447,7 @@ where
                 .await;
             res[idx] -= event
                 .amount
+                .to_ray(decimals[idx])
                 .to_scaled(c.liquidity.read().await.0[idx].index);
             *last_modified = now;
 
@@ -537,6 +542,7 @@ where
         .get(&event.reserve)
         .ok_or_else(|| eyre!("token = {:?} not found", event.reserve))?
         .order;
+    let (decimals, _) = &*cache.decimals.read().await;
     let now = Utc::now().timestamp_micros();
 
     let (last_sync, last_modified) = {
@@ -562,6 +568,7 @@ where
             .await;
         bor[idx] += event
             .amount
+            .to_ray(decimals[idx])
             .to_scaled(c.variable_borrow.read().await.0[idx].index);
         *last_modified = now;
 
@@ -661,6 +668,7 @@ where
         .get(&event.reserve)
         .ok_or_else(|| eyre!("token = {:?} not found", event.reserve))?
         .order;
+    let (decimals, _) = &*cache.decimals.read().await;
     let now = Utc::now().timestamp_micros();
 
     let (last_sync, last_modified) = {
@@ -686,6 +694,7 @@ where
             .await;
         bor[idx] -= event
             .amount
+            .to_ray(decimals[idx])
             .to_scaled(c.variable_borrow.read().await.0[idx].index);
         *last_modified = now;
 
@@ -1078,6 +1087,7 @@ where
         .ok_or_else(|| eyre!("user = {:?} not found", event.user))?
         .clone();
     let row_num = user_settings.row_num;
+    let (decimals, _) = &*cache.decimals.read().await;
     let now = Utc::now().timestamp_micros();
 
     let bor_idx = tokens
@@ -1123,9 +1133,11 @@ where
 
         bor[bor_idx] -= event
             .debtToCover
+            .to_ray(decimals[bor_idx])
             .to_scaled(c.variable_borrow.read().await.0[bor_idx].index);
         col[col_idx] -= event
             .liquidatedCollateralAmount
+            .to_ray(decimals[col_idx])
             .to_scaled(c.liquidity.read().await.0[col_idx].index);
 
         s_tx.send(SyncRequest::Collateral(
