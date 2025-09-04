@@ -1450,6 +1450,7 @@ impl Cache {
                 reserve_scaled[idx] = current_atoken_balance
                     .to_ray(decimals[idx])
                     .to_scaled(liquidity_index);
+                user_settings.use_as_collateral.set(idx, false);
             }
             borrowed_scaled[idx] = current_variable_debt
                 .to_ray(decimals[idx])

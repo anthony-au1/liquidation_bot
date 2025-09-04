@@ -5,10 +5,10 @@ use crate::arbitrum::arbitrum::IL2Pool::{
     ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
 use crate::arbitrum::arbitrum::{
-    liquidation_threshold_update, listen_events, listen_hf_calc, listen_price_update, listen_sync, setup, AaveEvents, Cache,
-    DataProvider, F64Converter, HFRequest, Index, RayOperations, ReserveData, RqDate, Scaler,
-    SyncRequest, SyncTarget, Token, TokenDetails, UserData,
-    UserReserveData, UserSettings,
+    AaveEvents, Cache, DataProvider, F64Converter, HFRequest, Index, RayOperations, ReserveData,
+    RqDate, Scaler, SyncRequest, SyncTarget, Token, TokenDetails, UserData, UserReserveData,
+    UserSettings, liquidation_threshold_update, listen_events, listen_hf_calc, listen_price_update,
+    listen_sync, setup,
 };
 use crate::arbitrum::events::{
     answer_updated, borrow, create_user, liquidation_call, repay,
@@ -28,8 +28,8 @@ use std::fmt::Debug;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc::channel;
 use tokio::sync::RwLock;
+use tokio::sync::mpsc::channel;
 use tokio::task;
 use tokio::time::sleep;
 
@@ -333,6 +333,7 @@ async fn generate_cache_and_tokens(
     );
 
     let now = Utc::now().timestamp_micros();
+    *cache.health_factors.write().await = (Array1::from_elem(0, 0.0), now);
     if user_num > 0 {
         let mut user_addr = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
 
@@ -374,7 +375,6 @@ async fn generate_cache_and_tokens(
         *cache.borrowed_matrix.write().await = Array2::from_elem((0, tokens.len()), 0.0);
     }
 
-    *cache.health_factors.write().await = (Array1::from_elem(0, 0.0), now);
     *cache.prices.write().await = (Array1::from_elem(tokens.len(), 0.0), now);
     *cache.liquidation_threshold.write().await = (Array1::from_elem(tokens.len(), 0.0), now);
     *cache.decimals.write().await = (
@@ -821,40 +821,67 @@ async fn test_get_user_data() -> eyre::Result<()> {
     assert_eq!(cache.contains(&user), true);
     assert_eq!(cache.users.len(), 1);
 
+    let (decimals, _) = &*cache.decimals.read().await;
+
     assert_eq!(
         collateral_scaled,
-        vec![U256::default(), 20.as_u256_decimal_6(), U256::default()]
+        vec![
+            U256::default(),
+            20.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.liquidity.read().await.0[1].index),
+            U256::default()
+        ]
     );
     assert_eq!(
         reserve_scaled,
         vec![
-            10.as_u256_decimal_18(),
+            10.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.liquidity.read().await.0[0].index),
             U256::default(),
             30.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.liquidity.read().await.0[2].index),
         ]
     );
     assert_eq!(
         borrowed_scaled,
         vec![
-            10.as_u256_decimal_18(),
-            20.as_u256_decimal_6(),
+            10.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+            20.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.variable_borrow.read().await.0[1].index),
             30.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.variable_borrow.read().await.0[2].index),
         ]
     );
 
-    assert_eq!(liquidity_indexes, vec![U256::default(); 3]);
-    assert_eq!(liquidity_rates, vec![U256::default(); 3]);
-    assert_eq!(variable_borrow_indexes, vec![U256::default(); 3]);
-    assert_eq!(variable_borrow_rates, vec![U256::default(); 3]);
+    assert_eq!(
+        liquidity_indexes,
+        vec![1045.as_u256(24), 1035.as_u256(24), 1025.as_u256(24)]
+    );
+    assert_eq!(
+        liquidity_rates,
+        vec![45.as_u256(24), 35.as_u256(24), 25.as_u256(24)]
+    );
+    assert_eq!(
+        variable_borrow_indexes,
+        vec![105.as_u256(25), 104.as_u256(25), 103.as_u256(25)]
+    );
+    assert_eq!(
+        variable_borrow_rates,
+        vec![5.as_u256(25), 4.as_u256(25), 3.as_u256(25)]
+    );
     assert_eq!(
         last_update_timestamps,
         vec![U40::from(Utc::now().timestamp()); 3]
     );
     assert_eq!(user_settings.row_num, 0);
-    assert_eq!(
-        user_settings.use_as_collateral,
-        bitvec![usize, Lsb0; 0; tokens.len()]
-    );
+    assert_eq!(user_settings.use_as_collateral, bitvec![0, 1, 0]);
 
     Ok(())
 }
@@ -972,12 +999,7 @@ async fn test_calc_hf() -> eyre::Result<()> {
         .clone();
 
     {
-        let (d, _) = &mut *cache.decimals.write().await;
-        *d = Array1::from_vec(vec![
-            10_f64.powf(18_f64),
-            10_f64.powf(6_f64),
-            10_f64.powf(12_f64),
-        ]);
+        let (decimals, _) = &*cache.decimals.read().await;
 
         let (lt, _) = &mut *cache.liquidation_threshold.write().await;
         *lt = Array1::from_vec(vec![0.0, 0.75, 0.8]);
@@ -995,9 +1017,15 @@ async fn test_calc_hf() -> eyre::Result<()> {
             .write()
             .await;
         *col_row = Array1::from_vec(vec![
-            2.as_u256_decimal_18(),
-            10.as_u256_decimal_6(),
-            200.as_u256_decimal_12(),
+            2.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.liquidity.read().await.0[0].index),
+            10.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.liquidity.read().await.0[1].index),
+            200.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.liquidity.read().await.0[2].index),
         ]);
 
         let borrowed = &*cache.borrowed.read().await;
@@ -1007,8 +1035,12 @@ async fn test_calc_hf() -> eyre::Result<()> {
             .write()
             .await;
         *bor_row = Array1::from_vec(vec![
-            1.as_u256_decimal_18(),
-            15.as_u256_decimal_6(),
+            1.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+            15.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.variable_borrow.read().await.0[1].index),
             U256::default(),
         ]);
     }
@@ -1029,12 +1061,7 @@ async fn test_calc_hf() -> eyre::Result<()> {
     let (cache, _) = generate_cache_and_tokens(3).await?;
 
     {
-        let (d, _) = &mut *cache.decimals.write().await;
-        *d = Array1::from_vec(vec![
-            10_f64.powf(18_f64),
-            10_f64.powf(6_f64),
-            10_f64.powf(12_f64),
-        ]);
+        let (decimals, _) = &*cache.decimals.read().await;
 
         let (lt, _) = &mut *cache.liquidation_threshold.write().await;
         *lt = Array1::from_vec(vec![0.0, 0.75, 0.8]);
@@ -1045,52 +1072,46 @@ async fn test_calc_hf() -> eyre::Result<()> {
         let (hf, _) = &mut *cache.health_factors.write().await;
         *hf = Array1::from_vec(vec![0.0; 3]);
 
+        let col = 2
+            .as_u256_decimal_18()
+            .to_ray(decimals[0])
+            .to_scaled(cache.liquidity.read().await.0[0].index);
+        let col2 = 10
+            .as_u256_decimal_6()
+            .to_ray(decimals[1])
+            .to_scaled(cache.liquidity.read().await.0[1].index);
+        let col3 = 200
+            .as_u256_decimal_12()
+            .to_ray(decimals[2])
+            .to_scaled(cache.liquidity.read().await.0[2].index);
+
         let collaterals = &mut *cache.collateral.write().await;
-        collaterals.push(RwLock::new((
-            Array1::from_vec(vec![
-                2.as_u256_decimal_18(),
-                10.as_u256_decimal_6(),
-                200.as_u256_decimal_12(),
-            ]),
-            0,
-            0,
-        )));
-        collaterals.push(RwLock::new((
-            Array1::from_vec(vec![
-                2.as_u256_decimal_18(),
-                10.as_u256_decimal_6(),
-                200.as_u256_decimal_12(),
-            ]),
-            0,
-            0,
-        )));
+        collaterals.push(RwLock::new((Array1::from_vec(vec![col, col2, col3]), 0, 0)));
+        collaterals.push(RwLock::new((Array1::from_vec(vec![col, col2, col3]), 0, 0)));
         let (col_row, _, _) = &mut *collaterals
             .get(0)
             .ok_or_else(|| eyre!("row = 0 not found in collateral"))?
             .write()
             .await;
-        *col_row = Array1::from_vec(vec![
-            2.as_u256_decimal_18(),
-            10.as_u256_decimal_6(),
-            200.as_u256_decimal_12(),
-        ]);
+        *col_row = Array1::from_vec(vec![col, col2, col3]);
+
+        let bor = 1
+            .as_u256_decimal_18()
+            .to_ray(decimals[0])
+            .to_scaled(cache.variable_borrow.read().await.0[0].index);
+        let bor2 = 15
+            .as_u256_decimal_6()
+            .to_ray(decimals[1])
+            .to_scaled(cache.variable_borrow.read().await.0[1].index);
 
         let borrowed = &mut *cache.borrowed.write().await;
         borrowed.push(RwLock::new((
-            Array1::from_vec(vec![
-                1.as_u256_decimal_18(),
-                15.as_u256_decimal_6(),
-                U256::default(),
-            ]),
+            Array1::from_vec(vec![bor, bor2, U256::default()]),
             0,
             0,
         )));
         borrowed.push(RwLock::new((
-            Array1::from_vec(vec![
-                1.as_u256_decimal_18(),
-                15.as_u256_decimal_6(),
-                U256::default(),
-            ]),
+            Array1::from_vec(vec![bor, bor2, U256::default()]),
             0,
             0,
         )));
@@ -1099,23 +1120,28 @@ async fn test_calc_hf() -> eyre::Result<()> {
             .ok_or_else(|| eyre!("row = 0 not found in borrowed"))?
             .write()
             .await;
-        *bor_row = Array1::from_vec(vec![
-            1.as_u256_decimal_18(),
-            15.as_u256_decimal_6(),
-            U256::default(),
-        ]);
+        *bor_row = Array1::from_vec(vec![bor, bor2, U256::default()]);
 
         *cache.collateral_matrix.write().await = Array2::from_elem((0, 3), 0.);
         let col_matrix = &mut *cache.collateral_matrix.write().await;
-        col_matrix.push_row(Array1::from_vec(vec![2.0, 10.0, 200.0]).view())?;
-        col_matrix.push_row(Array1::from_vec(vec![2.0, 10.0, 200.0]).view())?;
-        col_matrix.push_row(Array1::from_vec(vec![2.0, 10.0, 200.0]).view())?;
+        col_matrix.push_row(
+            Array1::from_vec(vec![col.as_f64_ray(), col2.as_f64_ray(), col3.as_f64_ray()]).view(),
+        )?;
+        col_matrix.push_row(
+            Array1::from_vec(vec![col.as_f64_ray(), col2.as_f64_ray(), col3.as_f64_ray()]).view(),
+        )?;
+        col_matrix.push_row(
+            Array1::from_vec(vec![col.as_f64_ray(), col2.as_f64_ray(), col3.as_f64_ray()]).view(),
+        )?;
 
         *cache.borrowed_matrix.write().await = Array2::from_elem((0, 3), 0.);
         let bor_matrix = &mut *cache.borrowed_matrix.write().await;
-        bor_matrix.push_row(Array1::from_vec(vec![1.0, 15.0, 0.0]).view())?;
-        bor_matrix.push_row(Array1::from_vec(vec![1.0, 15.0, 0.0]).view())?;
-        bor_matrix.push_row(Array1::from_vec(vec![1.0, 15.0, 0.0]).view())?;
+        bor_matrix
+            .push_row(Array1::from_vec(vec![bor.as_f64_ray(), bor2.as_f64_ray(), 0.0]).view())?;
+        bor_matrix
+            .push_row(Array1::from_vec(vec![bor.as_f64_ray(), bor2.as_f64_ray(), 0.0]).view())?;
+        bor_matrix
+            .push_row(Array1::from_vec(vec![bor.as_f64_ray(), bor2.as_f64_ray(), 0.0]).view())?;
     }
 
     cache.calc_hf(None, Utc::now().timestamp_millis()).await?;
@@ -1184,7 +1210,7 @@ impl DataProvider for CreateUserDataProvider {
     }
 
     async fn get_reserve_data(&self, _: &Address) -> eyre::Result<ReserveData> {
-        todo!()
+        Err(eyre::eyre!("mock error"))
     }
 
     async fn get_decimals(&self, _: &Address) -> eyre::Result<f64> {
@@ -1277,39 +1303,66 @@ async fn test_create_user() -> eyre::Result<()> {
     assert_eq!(cache.contains(&user), true);
     assert_eq!(cache.users.len(), 1);
 
+    let (decimals, _) = &*cache.decimals.read().await;
+
     assert_eq!(
         collateral_scaled,
-        vec![U256::default(), 20.as_u256_decimal_6(), U256::default()]
+        vec![
+            U256::default(),
+            20.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.liquidity.read().await.0[1].index),
+            U256::default()
+        ]
     );
     assert_eq!(
         reserve_scaled,
         vec![
-            10.as_u256_decimal_18(),
+            10.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.liquidity.read().await.0[0].index),
             U256::default(),
-            30.as_u256_decimal_12(),
+            30.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.liquidity.read().await.0[2].index),
         ]
     );
     assert_eq!(
         borrowed_scaled,
         vec![
-            10.as_u256_decimal_18(),
-            20.as_u256_decimal_6(),
-            30.as_u256_decimal_12(),
+            10.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+            20.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.variable_borrow.read().await.0[1].index),
+            30.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.variable_borrow.read().await.0[2].index),
         ]
     );
-    assert_eq!(liquidity_indexes, vec![U256::default(); 3]);
-    assert_eq!(liquidity_rates, vec![U256::default(); 3]);
-    assert_eq!(variable_borrow_indexes, vec![U256::default(); 3]);
-    assert_eq!(variable_borrow_rates, vec![U256::default(); 3]);
+    assert_eq!(
+        liquidity_indexes,
+        vec![1045.as_u256(24), 1035.as_u256(24), 1025.as_u256(24)]
+    );
+    assert_eq!(
+        liquidity_rates,
+        vec![45.as_u256(24), 35.as_u256(24), 25.as_u256(24)]
+    );
+    assert_eq!(
+        variable_borrow_indexes,
+        vec![105.as_u256(25), 104.as_u256(25), 103.as_u256(25)]
+    );
+    assert_eq!(
+        variable_borrow_rates,
+        vec![5.as_u256(25), 4.as_u256(25), 3.as_u256(25)]
+    );
     assert_eq!(
         last_update_timestamps,
         vec![U40::from(Utc::now().timestamp()); 3]
     );
     assert_eq!(user_settings.row_num, 0);
-    assert_eq!(
-        user_settings.use_as_collateral,
-        bitvec![usize, Lsb0; 0; tokens.len()]
-    );
+    assert_eq!(user_settings.use_as_collateral, bitvec![0, 1, 0]);
 
     // 3 case - error
 
@@ -1981,14 +2034,58 @@ async fn test_hf_calc() -> eyre::Result<()> {
         .map(|(cache, _)| Arc::new(cache))?;
     let user = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
 
-    {
-        let (decimal, _) = &mut *cache.decimals.write().await;
-        *decimal = Array1::from_vec(vec![
-            10_f64.powf(18_f64),
-            10_f64.powf(6_f64),
-            10_f64.powf(12_f64),
-        ]);
+    let (decimals, _) = &*cache.decimals.read().await;
+    let col1 = 1
+        .as_u256_decimal_18()
+        .to_ray(decimals[0])
+        .to_scaled(cache.liquidity.read().await.0[0].index);
+    let col2 = 2
+        .as_u256_decimal_6()
+        .to_ray(decimals[1])
+        .to_scaled(cache.liquidity.read().await.0[1].index);
+    let col3 = 3
+        .as_u256_decimal_12()
+        .to_ray(decimals[2])
+        .to_scaled(cache.liquidity.read().await.0[2].index);
+    let col4 = 4
+        .as_u256_decimal_18()
+        .to_ray(decimals[0])
+        .to_scaled(cache.liquidity.read().await.0[0].index);
+    let col5 = 5
+        .as_u256_decimal_6()
+        .to_ray(decimals[1])
+        .to_scaled(cache.liquidity.read().await.0[1].index);
+    let col6 = 6
+        .as_u256_decimal_12()
+        .to_ray(decimals[2])
+        .to_scaled(cache.liquidity.read().await.0[2].index);
 
+    let bor1 = 1
+        .as_u256_decimal_18()
+        .to_ray(decimals[0])
+        .to_scaled(cache.variable_borrow.read().await.0[0].index);
+    let bor2 = 2
+        .as_u256_decimal_6()
+        .to_ray(decimals[1])
+        .to_scaled(cache.variable_borrow.read().await.0[1].index);
+    let bor3 = 3
+        .as_u256_decimal_12()
+        .to_ray(decimals[2])
+        .to_scaled(cache.variable_borrow.read().await.0[2].index);
+    let bor4 = 4
+        .as_u256_decimal_18()
+        .to_ray(decimals[0])
+        .to_scaled(cache.variable_borrow.read().await.0[0].index);
+    let bor5 = 5
+        .as_u256_decimal_6()
+        .to_ray(decimals[1])
+        .to_scaled(cache.variable_borrow.read().await.0[1].index);
+    let bor6 = 6
+        .as_u256_decimal_12()
+        .to_ray(decimals[2])
+        .to_scaled(cache.variable_borrow.read().await.0[2].index);
+
+    {
         let (prices, _) = &mut *cache.prices.write().await;
         *prices = Array1::from_vec(vec![120_000.0, 4000.0, 200.0]);
 
@@ -2001,22 +2098,14 @@ async fn test_hf_calc() -> eyre::Result<()> {
             .ok_or_else(|| eyre::eyre!("no collaterals"))?
             .write()
             .await;
-        *col = Array1::from_vec(vec![
-            1.as_u256_decimal_18(),
-            2.as_u256_decimal_6(),
-            3.as_u256_decimal_12(),
-        ]);
+        *col = Array1::from_vec(vec![col1, col2, col3]);
 
         let (col, _, _) = &mut *collaterals
             .get(1)
             .ok_or_else(|| eyre::eyre!("no collaterals"))?
             .write()
             .await;
-        *col = Array1::from_vec(vec![
-            4.as_u256_decimal_18(),
-            5.as_u256_decimal_6(),
-            6.as_u256_decimal_12(),
-        ]);
+        *col = Array1::from_vec(vec![col4, col5, col6]);
 
         let borrowed = &*cache.borrowed.read().await;
         let (bor, _, _) = &mut *borrowed
@@ -2024,22 +2113,14 @@ async fn test_hf_calc() -> eyre::Result<()> {
             .ok_or_else(|| eyre::eyre!("no borrowed"))?
             .write()
             .await;
-        *bor = Array1::from_vec(vec![
-            4.as_u256_decimal_18(),
-            5.as_u256_decimal_6(),
-            6.as_u256_decimal_12(),
-        ]);
+        *bor = Array1::from_vec(vec![bor4, bor5, bor6]);
 
         let (bor, _, _) = &mut *borrowed
             .get(1)
             .ok_or_else(|| eyre::eyre!("no borrowed"))?
             .write()
             .await;
-        *bor = Array1::from_vec(vec![
-            1.as_u256_decimal_18(),
-            2.as_u256_decimal_6(),
-            3.as_u256_decimal_12(),
-        ]);
+        *bor = Array1::from_vec(vec![bor1, bor2, bor3]);
     }
 
     let senders = listen_hf_calc(cache.clone(), 1, 1).await?;
@@ -2055,40 +2136,38 @@ async fn test_hf_calc() -> eyre::Result<()> {
     }
 
     {
-        // let (collaterals, _, _) = &*cache.collateral.read().await;
         let col_matrix = &mut *cache.collateral_matrix.write().await;
         col_matrix.push_row(
             Array1::from_vec(vec![
-                1.as_u256_decimal_18().as_f64_decimal_18(),
-                2.as_u256_decimal_6().as_f64_decimal_6(),
-                3.as_u256_decimal_12().as_f64_decimal_12(),
+                col1.as_f64_ray(),
+                col2.as_f64_ray(),
+                col3.as_f64_ray(),
             ])
             .view(),
         )?;
         col_matrix.push_row(
             Array1::from_vec(vec![
-                4.as_u256_decimal_18().as_f64_decimal_18(),
-                5.as_u256_decimal_6().as_f64_decimal_6(),
-                6.as_u256_decimal_12().as_f64_decimal_12(),
+                col4.as_f64_ray(),
+                col5.as_f64_ray(),
+                col6.as_f64_ray(),
             ])
             .view(),
         )?;
 
-        // let (borroweds, _, _) = &*cache.borrowed.read().await;
         let bor_matrix = &mut *cache.borrowed_matrix.write().await;
         bor_matrix.push_row(
             Array1::from_vec(vec![
-                4.as_u256_decimal_18().as_f64_decimal_18(),
-                5.as_u256_decimal_6().as_f64_decimal_6(),
-                6.as_u256_decimal_12().as_f64_decimal_12(),
+                bor4.as_f64_ray(),
+                bor5.as_f64_ray(),
+                bor6.as_f64_ray(),
             ])
             .view(),
         )?;
         bor_matrix.push_row(
             Array1::from_vec(vec![
-                1.as_u256_decimal_18().as_f64_decimal_18(),
-                2.as_u256_decimal_6().as_f64_decimal_6(),
-                3.as_u256_decimal_12().as_f64_decimal_12(),
+                bor1.as_f64_ray(),
+                bor2.as_f64_ray(),
+                bor3.as_f64_ray(),
             ])
             .view(),
         )?;
@@ -2680,7 +2759,9 @@ async fn test_borrow() -> eyre::Result<()> {
             .write()
             .await;
         *bor = Array1::from_vec(vec![
-            100.as_u256_decimal_18(),
+            100.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.variable_borrow.read().await.0[0].index),
             U256::default(),
             U256::default(),
         ]);
@@ -2741,8 +2822,8 @@ async fn test_borrow() -> eyre::Result<()> {
         borrowed,
         vec![
             120.as_u256_decimal_18()
-                .to_ray(decimals[1])
-                .to_scaled(cache.variable_borrow.read().await.0[1].index),
+                .to_ray(decimals[0])
+                .to_scaled(cache.variable_borrow.read().await.0[0].index),
             U256::default(),
             U256::default()
         ]
@@ -2750,140 +2831,151 @@ async fn test_borrow() -> eyre::Result<()> {
 
     // 3 case - borrowed skip event
 
-    // let rq_date = Utc::now().timestamp_micros();
-    // let dummy_data_provider = Arc::new(DummyDataProvider::new());
-    // let (cache, tokens) = generate_cache_and_tokens(1)
-    //     .await
-    //     .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
-    // let user = cache
-    //     .users
-    //     .iter()
-    //     .next()
-    //     .ok_or_else(|| eyre::eyre!("no users"))?
-    //     .key()
-    //     .clone();
-    // let token = Address::from_str("0x1Ac54C113cefD1792CbFcF41B711824d657eb61D")?;
-    //
-    // let event = Borrow {
-    //     reserve: token.clone(),
-    //     user: user.clone(),
-    //     onBehalfOf: user,
-    //     amount: 30.as_u256_decimal_18(),
-    //     interestRateMode: 2,
-    //     borrowRate: U256::from(5_000_000_000_000_000_000_000_0000u128),
-    //     referralCode: 0,
-    // };
-    //
-    // let (sync_tx, _) = channel::<SyncRequest>(1);
-    // let (hf_tx, _) = channel::<HFRequest>(1);
-    //
-    // assert_eq!(cache.users.len(), 1);
-    //
-    // borrow(
-    //     cache.clone(),
-    //     dummy_data_provider,
-    //     tokens,
-    //     (event, sync_tx, hf_tx, RqDate(rq_date)),
-    // )
-    // .await?;
-    //
-    // assert_eq!(cache.users.len(), 1);
-    //
-    // let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
-    //
-    // assert_eq!(collateral, vec![U256::default(); 3]);
-    // assert_eq!(reserve, vec![U256::default(); 3]);
-    // assert_eq!(borrowed, vec![U256::default(); 3]);
-    //
-    // // 4 case - sync event
-    //
-    // let dummy_data_provider = Arc::new(DummyDataProvider::new());
-    // let (cache, tokens) = generate_cache_and_tokens(10)
-    //     .await
-    //     .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
-    // let rq_date = Utc::now().timestamp_micros();
-    // let user = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
-    // let token = Address::from_str("0x1Ac54C113cefD1792CbFcF41B711824d657eb61D")?;
-    //
-    // let event = Borrow {
-    //     reserve: token.clone(),
-    //     user: user.clone(),
-    //     onBehalfOf: user,
-    //     amount: 40.as_u256_decimal_18(),
-    //     interestRateMode: 2,
-    //     borrowRate: U256::from(5_000_000_000_000_000_000_000_0000u128),
-    //     referralCode: 0,
-    // };
-    //
-    // {
-    //     let borrowed = &*cache.borrowed.read().await;
-    //     let (_, _, last_modified) = &mut *borrowed
-    //         .get(0)
-    //         .ok_or_else(|| eyre!("can't get row = 0 from borrowed"))?
-    //         .write()
-    //         .await;
-    //     *last_modified = Utc::now().timestamp_micros();
-    // }
-    //
-    // let (sync_tx, mut sync_rc) = channel::<SyncRequest>(1);
-    // let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
-    //
-    // let sync_handler = task::spawn(async move {
-    //     let msg = sync_rc
-    //         .recv()
-    //         .await
-    //         .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
-    //     assert_eq!(SyncRequest::Both(SyncTarget::Row(0), rq_date), msg);
-    //
-    //     Ok::<_, eyre::Error>(())
-    // });
-    //
-    // let hf_handler = task::spawn(async move {
-    //     let msg = hf_rc
-    //         .recv()
-    //         .await
-    //         .ok_or_else(|| eyre::eyre!("hf channel closed"))?;
-    //     assert_eq!(HFRequest::User(user.clone(), rq_date), msg);
-    //
-    //     Ok::<_, eyre::Error>(())
-    // });
-    //
-    // assert_eq!(cache.users.len(), 10);
-    //
-    // borrow(
-    //     cache.clone(),
-    //     dummy_data_provider,
-    //     tokens,
-    //     (event, sync_tx, hf_tx, RqDate(rq_date)),
-    // )
-    // .await?;
-    // let _ = sync_handler.await?;
-    // let _ = hf_handler.await?;
-    //
-    // assert_eq!(cache.users.len(), 10);
-    //
-    // let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
-    //
-    // assert_eq!(
-    //     collateral,
-    //     vec![U256::default(), 20.as_u256_decimal_6(), U256::default()]
-    // );
-    // assert_eq!(
-    //     reserve,
-    //     vec![
-    //         10.as_u256_decimal_18(),
-    //         U256::default(),
-    //         30.as_u256_decimal_12()
-    //     ]
-    // );
-    // assert_eq!(
-    //     borrowed,
-    //     vec![
-    //         10.as_u256_decimal_18(),
-    //         20.as_u256_decimal_6(),
-    //         30.as_u256_decimal_12()
-    //     ]
-    // );
+    let rq_date = Utc::now().timestamp_micros();
+    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let (cache, tokens) = generate_cache_and_tokens(1)
+        .await
+        .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
+    let user = cache
+        .users
+        .iter()
+        .next()
+        .ok_or_else(|| eyre::eyre!("no users"))?
+        .key()
+        .clone();
+    let token = Address::from_str("0x1Ac54C113cefD1792CbFcF41B711824d657eb61D")?;
+
+    let event = Borrow {
+        reserve: token.clone(),
+        user: user.clone(),
+        onBehalfOf: user,
+        amount: 30
+            .as_u256_decimal_18()
+            .to_ray(decimals[0])
+            .to_scaled(cache.variable_borrow.read().await.0[0].index),
+        interestRateMode: 2,
+        borrowRate: U256::from(5_000_000_000_000_000_000_000_0000u128),
+        referralCode: 0,
+    };
+
+    let (sync_tx, _) = channel::<SyncRequest>(1);
+    let (hf_tx, _) = channel::<HFRequest>(1);
+
+    assert_eq!(cache.users.len(), 1);
+
+    borrow(
+        cache.clone(),
+        dummy_data_provider,
+        tokens,
+        (event, sync_tx, hf_tx, RqDate(rq_date)),
+    )
+    .await?;
+
+    assert_eq!(cache.users.len(), 1);
+
+    let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
+
+    assert_eq!(collateral, vec![U256::default(); 3]);
+    assert_eq!(reserve, vec![U256::default(); 3]);
+    assert_eq!(borrowed, vec![U256::default(); 3]);
+
+    // 4 case - sync event
+
+    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let (cache, tokens) = generate_cache_and_tokens(10)
+        .await
+        .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
+    let rq_date = Utc::now().timestamp_micros();
+    let user = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
+    let token = Address::from_str("0x1Ac54C113cefD1792CbFcF41B711824d657eb61D")?;
+
+    let event = Borrow {
+        reserve: token.clone(),
+        user: user.clone(),
+        onBehalfOf: user,
+        amount: 40
+            .as_u256_decimal_18()
+            .to_ray(decimals[0])
+            .to_scaled(cache.variable_borrow.read().await.0[0].index),
+        interestRateMode: 2,
+        borrowRate: U256::from(5_000_000_000_000_000_000_000_0000u128),
+        referralCode: 0,
+    };
+
+    {
+        let borrowed = &*cache.borrowed.read().await;
+        let (_, _, last_modified) = &mut *borrowed
+            .get(0)
+            .ok_or_else(|| eyre!("can't get row = 0 from borrowed"))?
+            .write()
+            .await;
+        *last_modified = Utc::now().timestamp_micros();
+    }
+
+    let (sync_tx, mut sync_rc) = channel::<SyncRequest>(1);
+    let (hf_tx, _) = channel::<HFRequest>(1);
+
+    let sync_handler = task::spawn(async move {
+        let msg = sync_rc
+            .recv()
+            .await
+            .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
+        assert_eq!(SyncRequest::Both(SyncTarget::Row(0), rq_date), msg);
+
+        Ok::<_, eyre::Error>(())
+    });
+
+    assert_eq!(cache.users.len(), 10);
+
+    borrow(
+        cache.clone(),
+        dummy_data_provider,
+        tokens,
+        (event, sync_tx, hf_tx, RqDate(rq_date)),
+    )
+    .await?;
+    let _ = sync_handler.await?;
+
+    assert_eq!(cache.users.len(), 10);
+
+    let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
+
+    assert_eq!(
+        collateral,
+        vec![
+            U256::default(),
+            20.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.liquidity.read().await.0[1].index),
+            U256::default()
+        ]
+    );
+    assert_eq!(
+        reserve,
+        vec![
+            10.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.liquidity.read().await.0[0].index),
+            U256::default(),
+            30.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.liquidity.read().await.0[2].index)
+        ]
+    );
+    assert_eq!(
+        borrowed,
+        vec![
+            10.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+            20.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.variable_borrow.read().await.0[1].index),
+            30.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.variable_borrow.read().await.0[2].index)
+        ]
+    );
 
     Ok(())
 }
