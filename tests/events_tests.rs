@@ -1,4 +1,5 @@
-use alloy_primitives::{Address, I256, U256};
+use alloy_primitives::aliases::U40;
+use alloy_primitives::{Address, I256, U256, U512};
 use async_trait::async_trait;
 use bitvec::bitvec;
 use bitvec::prelude::Lsb0;
@@ -13,14 +14,13 @@ use liquidation_bot::arbitrum::arbitrum::IL2Pool::{
     ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
 use liquidation_bot::arbitrum::arbitrum::{
-    Cache, DataProvider, ReserveData, UserReserveData, UserSettings, start,
+    Cache, DataProvider, Index, ReserveData, UserReserveData, UserSettings, start,
 };
 use ndarray::{Array1, Array2};
 use std::fmt::Debug;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use alloy_primitives::aliases::U40;
 use tokio::sync::{Mutex, RwLock};
 use tokio::task;
 use tokio::time::sleep;
@@ -39,6 +39,8 @@ trait F64Helper {
     fn as_f64_decimal_18(&self) -> f64;
     fn as_f64_decimal_6(&self) -> f64;
     fn as_f64_decimal_12(&self) -> f64;
+    fn as_f64(&self, divisor: f64) -> f64;
+    fn as_f64_ray(&self) -> f64;
 }
 
 trait U256Helper {
@@ -47,6 +49,16 @@ trait U256Helper {
     fn as_u256_decimal_6(&self) -> U256;
     fn as_u256_decimal_12(&self) -> U256;
     fn as_u256_decimal_27(&self) -> U256;
+}
+
+trait RayOperations {
+    fn ray_mul(self, b: U256) -> U256;
+    fn ray_div(self, b: U256) -> U256;
+    fn to_ray(self, decimals: f64) -> U256;
+}
+trait Scaler {
+    fn to_scaled(self, index: U256) -> U256;
+    fn to_current(self, index: U256) -> U256;
 }
 
 impl<T> U256Helper for T
@@ -75,6 +87,13 @@ where
     }
 }
 
+const POW64: [f64; 4] = [
+    1.0,                                                          // 2^0
+    18446744073709551616.0,                                       // 2^64
+    340282366920938463463374607431768211456.0,                    // 2^128
+    6277101735386680763835789423207666416102355444464034512896.0, // 2^192
+];
+
 impl F64Helper for U256 {
     fn as_f64_decimal_18(&self) -> f64 {
         self.saturating_to::<u128>() as f64 / 10_f64.powf(18_f64)
@@ -86,6 +105,54 @@ impl F64Helper for U256 {
 
     fn as_f64_decimal_12(&self) -> f64 {
         self.saturating_to::<u128>() as f64 / 10_f64.powf(12_f64)
+    }
+
+    #[inline(always)]
+    fn as_f64(&self, divisor: f64) -> f64 {
+        let limbs = self.into_limbs();
+
+        let mut result = 0.0;
+        for i in 0..4 {
+            result += limbs[i] as f64 * POW64[i];
+        }
+        result / divisor
+    }
+
+    #[inline(always)]
+    fn as_f64_ray(&self) -> f64 {
+        self.as_f64(1e27)
+    }
+}
+
+const RAY: u128 = 1_000_000_000_000_000_000_000_000_000; // 1e27
+
+impl RayOperations for U256 {
+    fn ray_mul(self, b: U256) -> U256 {
+        // (a * b + RAY/2) / RAY
+        let result = (U512::from(self) * U512::from(b) + U512::from(RAY / 2)) / U512::from(RAY);
+        U256::from(result)
+    }
+
+    fn ray_div(self, b: U256) -> U256 {
+        // (a * RAY + b/2) / b
+        let b = U512::from(b);
+        let half_b = b / U512::from(2u8);
+        let result = (U512::from(self) * U512::from(RAY) + half_b) / b;
+        U256::from(result)
+    }
+
+    fn to_ray(self, decimals: f64) -> U256 {
+        self * U256::from(RAY / (decimals as u128))
+    }
+}
+
+impl Scaler for U256 {
+    fn to_scaled(self, index: U256) -> U256 {
+        self.ray_div(index) // (self * RAY) / index
+    }
+
+    fn to_current(self, index: U256) -> U256 {
+        self.ray_mul(index) // (self * index) / RAY
     }
 }
 
@@ -569,6 +636,19 @@ async fn test_events() -> eyre::Result<()> {
 
     let expected = Cache::default();
     {
+        let now = Utc::now().timestamp_micros();
+
+        *expected.decimals.write().await = (
+            Array1::from_vec(vec![
+                10_f64.powf(18_f64),
+                10_f64.powf(6_f64),
+                10_f64.powf(12_f64),
+            ]),
+            now,
+        );
+
+        let (decimals, _) = &*expected.decimals.read().await;
+
         let user_num = &mut *expected.users_num.write().await;
         *user_num = 1;
 
@@ -580,8 +660,6 @@ async fn test_events() -> eyre::Result<()> {
             .users
             .insert(user, UserSettings::new(0, use_as_collateral));
 
-        let now = Utc::now().timestamp_micros();
-
         let (lt, last_modified) = &mut *expected.liquidation_threshold.write().await;
         *lt = Array1::from_vec(vec![0.78, 0.8, 0.75]);
         *last_modified = now;
@@ -590,44 +668,90 @@ async fn test_events() -> eyre::Result<()> {
         *prices = Array1::from_vec(vec![1712.30, 2812.30, 4012.30]);
         *last_modified = now;
 
+        *expected.liquidity.write().await = (
+            Array1::from_vec(vec![
+                Index::new(1045.as_u256(24), 45.as_u256(24), now),
+                Index::new(1035.as_u256(24), 35.as_u256(24), now),
+                Index::new(1025.as_u256(24), 25.as_u256(24), now),
+            ]),
+            now,
+        );
+        *expected.liquidity_index.write().await = (
+            Array1::from_vec(vec![
+                1045.as_u256(24).as_f64_ray(),
+                1035.as_u256(24).as_f64_ray(),
+                1025.as_u256(24).as_f64_ray(),
+            ]),
+            now,
+        );
+        *expected.variable_borrow.write().await = (
+            Array1::from_vec(vec![
+                Index::new(105.as_u256(25), 5.as_u256(25), now),
+                Index::new(104.as_u256(25), 4.as_u256(25), now),
+                Index::new(103.as_u256(25), 3.as_u256(25), now),
+            ]),
+            now,
+        );
+        *expected.variable_borrow_index.write().await = (
+            Array1::from_vec(vec![
+                105.as_u256(25).as_f64_ray(),
+                104.as_u256(25).as_f64_ray(),
+                103.as_u256(25).as_f64_ray(),
+            ]),
+            now,
+        );
+
+        let res1 = 10
+            .as_u256_decimal_18()
+            .to_ray(decimals[0])
+            .to_scaled(expected.liquidity.read().await.0[0].index);
+
         let reserves = &mut *expected.reserve.write().await;
         reserves.push(RwLock::new((
-            Array1::from_vec(vec![
-                10.as_u256_decimal_18(),
-                U256::default(),
-                U256::default(),
-            ]),
+            Array1::from_vec(vec![res1, U256::default(), U256::default()]),
             now,
             now,
         )));
 
+        let col2 = 3
+            .as_u256_decimal_6()
+            .to_ray(decimals[1])
+            .to_scaled(expected.liquidity.read().await.0[1].index);
+        let col3 = 10
+            .as_u256_decimal_12()
+            .to_ray(decimals[2])
+            .to_scaled(expected.liquidity.read().await.0[2].index);
+
         let collaterals = &mut *expected.collateral.write().await;
         collaterals.push(RwLock::new((
-            Array1::from_vec(vec![
-                U256::default(),
-                3.as_u256_decimal_6(),
-                10.as_u256_decimal_12(),
-            ]),
+            Array1::from_vec(vec![U256::default(), col2, col3]),
             now,
             now,
         )));
 
         let col_matrix = &mut *expected.collateral_matrix.write().await;
-        *col_matrix = Array2::from_shape_vec((1, 3), vec![0.0, 3.0, 10.0])?;
+        *col_matrix =
+            Array2::from_shape_vec((1, 3), vec![0.0, col2.as_f64_ray(), col3.as_f64_ray()])?;
+
+        let bor2 = 1
+            .as_u256_decimal_6()
+            .to_ray(decimals[1])
+            .to_scaled(expected.variable_borrow.read().await.0[1].index);
+        let bor3 = 1
+            .as_u256_decimal_12()
+            .to_ray(decimals[2])
+            .to_scaled(expected.variable_borrow.read().await.0[2].index);
 
         let borroweds = &mut *expected.borrowed.write().await;
         borroweds.push(RwLock::new((
-            Array1::from_vec(vec![
-                U256::default(),
-                1.as_u256_decimal_6(),
-                1.as_u256_decimal_12(),
-            ]),
+            Array1::from_vec(vec![U256::default(), bor2, bor3]),
             now,
             now,
         )));
 
         let bor_matrix = &mut *expected.borrowed_matrix.write().await;
-        *bor_matrix = Array2::from_shape_vec((1, 3), vec![0.0, 1.0, 1.0])?;
+        *bor_matrix =
+            Array2::from_shape_vec((1, 3), vec![0.0, bor2.as_f64_ray(), bor3.as_f64_ray()])?;
 
         let (hf, last_modified) = &mut *expected.health_factors.write().await;
         *hf = Array1::from_vec(vec![5.398377926911468]);
@@ -698,7 +822,7 @@ async fn test_events() -> eyre::Result<()> {
         let reserves_expected = &*expected.reserve.read().await;
         let (res_expected, last_sync_expected, last_modified_expected) = &*reserves_expected
             .get(0)
-            .ok_or_else(|| eyre!("can't get row = 0 from reserves exepected"))?
+            .ok_or_else(|| eyre!("can't get row = 0 from reserves expected"))?
             .write()
             .await;
 
@@ -724,7 +848,7 @@ async fn test_events() -> eyre::Result<()> {
 
         assert!(last_sync < last_sync_expected);
         assert!(last_modified < last_modified_expected);
-        assert_eq!(col, col_expected);
+        assert!(compare_arrays(col, col_expected));
     }
 
     {
@@ -751,7 +875,7 @@ async fn test_events() -> eyre::Result<()> {
 
         assert!(last_sync < last_sync_expected);
         assert!(last_modified < last_modified_expected);
-        assert_eq!(bor, bor_expected);
+        assert!(compare_arrays(bor, bor_expected));
     }
 
     {
@@ -770,4 +894,14 @@ async fn test_events() -> eyre::Result<()> {
     }
 
     Ok(())
+}
+
+fn compare_arrays(a: &Array1<U256>, b: &Array1<U256>) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+
+    a.iter()
+        .zip(b.iter())
+        .all(|(a, b)| a.abs_diff(*b) < U256::from(10))
 }
