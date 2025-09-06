@@ -3,10 +3,14 @@ use crate::arbitrum::arbitrum::IL2Pool::{
     Borrow, LiquidationCall, Repay, ReserveDataUpdated, ReserveUsedAsCollateralDisabled,
     ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
-use crate::arbitrum::arbitrum::{Cache, DataProvider, F64Converter, HFRequest, RayOperations, RqDate, Scaler, SyncRequest, SyncTarget, TimeStamp, Token, TokenDetails, Tokens, RAY};
+use crate::arbitrum::arbitrum::{
+    Cache, DataProvider, F64Converter, HFRequest, RayOperations, RqDate, Scaler, SyncRequest, SyncTarget,
+    TimeStamp, Token, TokenDetails, Tokens, RAY,
+};
 use alloy_primitives::{Address, U256};
-use chrono::Utc;
+use chrono::{Datelike, Duration, Utc};
 use eyre::eyre;
+use std::ops::Add;
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
 use tracing::debug;
@@ -1214,6 +1218,7 @@ where
     });
 
     let now = Utc::now().timestamp_micros();
+
     let idx = tokens
         .get(&event.reserve)
         .ok_or_else(|| eyre::eyre!("token not found"))?

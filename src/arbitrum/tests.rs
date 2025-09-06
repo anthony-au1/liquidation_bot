@@ -1,8 +1,8 @@
 use crate::arbitrum::arbitrum::IAaveProtocolDataProvider::TokenData;
 use crate::arbitrum::arbitrum::IChainlinkAggregator::{AnswerUpdated, IChainlinkAggregatorEvents};
 use crate::arbitrum::arbitrum::IL2Pool::{
-    Borrow, IL2PoolEvents, LiquidationCall, Repay, ReserveUsedAsCollateralDisabled,
-    ReserveUsedAsCollateralEnabled, Supply, Withdraw,
+    Borrow, IL2PoolEvents, LiquidationCall, Repay, ReserveDataUpdated,
+    ReserveUsedAsCollateralDisabled, ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
 use crate::arbitrum::arbitrum::{
     AaveEvents, Cache, DataProvider, F64Converter, HFRequest, Index, RayOperations, ReserveData,
@@ -11,7 +11,7 @@ use crate::arbitrum::arbitrum::{
     listen_sync, setup,
 };
 use crate::arbitrum::events::{
-    answer_updated, borrow, create_user, liquidation_call, repay,
+    answer_updated, borrow, create_user, liquidation_call, repay, reserve_data_updated,
     reserve_used_as_collateral_disabled, reserve_used_as_collateral_enabled, supply, withdraw,
 };
 use alloy_primitives::aliases::U40;
@@ -387,9 +387,9 @@ async fn generate_cache_and_tokens(
     );
     *cache.liquidity.write().await = (
         Array1::from_vec(vec![
-            Index::new(1045.as_u256(24), 45.as_u256(24), now),
-            Index::new(1035.as_u256(24), 35.as_u256(24), now),
-            Index::new(1025.as_u256(24), 25.as_u256(24), now),
+            Index::new(1045.as_u256(24), 45.as_u256(25), now),
+            Index::new(1035.as_u256(24), 35.as_u256(25), now),
+            Index::new(1025.as_u256(24), 25.as_u256(25), now),
         ]),
         now,
     );
@@ -403,9 +403,9 @@ async fn generate_cache_and_tokens(
     );
     *cache.variable_borrow.write().await = (
         Array1::from_vec(vec![
-            Index::new(105.as_u256(25), 5.as_u256(25), now),
-            Index::new(104.as_u256(25), 4.as_u256(25), now),
-            Index::new(103.as_u256(25), 3.as_u256(25), now),
+            Index::new(105.as_u256(25), 5.as_u256(26), now),
+            Index::new(104.as_u256(25), 4.as_u256(26), now),
+            Index::new(103.as_u256(25), 3.as_u256(26), now),
         ]),
         now,
     );
@@ -4471,6 +4471,106 @@ async fn test_u256_to_f64() -> eyre::Result<()> {
     assert_eq!(b2, b2);
     assert_eq!(c2, c2);
     assert_eq!(d2, d2);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_reserve_data_updated() -> eyre::Result<()> {
+    let (cache, tokens) = generate_cache_and_tokens(1)
+        .await
+        .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
+    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+
+    let token = Address::from_str("0x1Ac54C113cefD1792CbFcF41B711824d657eb61D")?;
+
+    let event = ReserveDataUpdated {
+        reserve: token,
+        liquidityRate: 1045.as_u256(24),
+        stableBorrowRate: 105.as_u256(25),
+        variableBorrowRate: 105.as_u256(25),
+        liquidityIndex: 1045.as_u256(24),
+        variableBorrowIndex: 105.as_u256(25),
+    };
+
+    let rq_date = Utc::now().timestamp_micros();
+
+    let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
+
+    let hf_handler = task::spawn(async move {
+        let msg = hf_rc
+            .recv()
+            .await
+            .ok_or_else(|| eyre::eyre!("hf channel closed"))?;
+        assert_eq!(HFRequest::Full(rq_date), msg);
+
+        Ok::<_, eyre::Error>(())
+    });
+
+    sleep(Duration::from_secs(5)).await;
+
+    reserve_data_updated(
+        cache.clone(),
+        dummy_data_provider,
+        tokens.clone(),
+        (event, hf_tx, RqDate(rq_date)),
+    )
+    .await?;
+    let _ = hf_handler.await?;
+
+    let (liquidity, _) = &*cache.liquidity.read().await;
+    let (li1, li2, li3) = (
+        U256::from(1045.as_u256(24)),
+        U256::from(1035000057434360730593607306_u128),
+        U256::from(1025000040628170979198376459_u128),
+    );
+
+    assert_eq!(liquidity[0].index, li1);
+    assert_eq!(liquidity[0].rate, 1045.as_u256(24));
+    assert_ne!(liquidity[0].last_update, rq_date);
+
+    assert_eq!(liquidity[1].index, li2);
+    assert_eq!(liquidity[1].rate, 35.as_u256(25));
+    assert_ne!(liquidity[1].last_update, rq_date);
+
+    assert_eq!(liquidity[2].index, li3);
+    assert_eq!(liquidity[2].rate, 25.as_u256(25));
+    assert_ne!(liquidity[2].last_update, rq_date);
+
+    let (liquidity_index, _) = &*cache.liquidity_index.read().await;
+    assert_eq!(
+        liquidity_index,
+        Array1::from_vec(vec![li1.as_f64_ray(), li2.as_f64_ray(), li3.as_f64_ray()])
+    );
+
+    let (vb, _) = &*cache.variable_borrow.read().await;
+    let (vbi1, vbi2, vbi3) = (
+        U256::from(105.as_u256(25)),
+        U256::from(1040000065956367326230339929_u128),
+        U256::from(1030000048991628614916286150_u128),
+    );
+
+    assert_eq!(vb[0].index, vbi1);
+    assert_eq!(vb[0].rate, 105.as_u256(25));
+    assert_ne!(vb[0].last_update, rq_date);
+
+    assert_eq!(vb[1].index, vbi2);
+    assert_eq!(vb[1].rate, 4.as_u256(26));
+    assert_ne!(vb[1].last_update, rq_date);
+
+    assert_eq!(vb[2].index, vbi3);
+    assert_eq!(vb[2].rate, 3.as_u256(26));
+    assert_ne!(vb[2].last_update, rq_date);
+
+    let (vbi, _) = &*cache.variable_borrow_index.read().await;
+    assert_eq!(
+        vbi,
+        Array1::from_vec(vec![
+            vbi1.as_f64_ray(),
+            vbi2.as_f64_ray(),
+            vbi3.as_f64_ray()
+        ])
+    );
 
     Ok(())
 }
