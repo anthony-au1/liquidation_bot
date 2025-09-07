@@ -1247,7 +1247,7 @@ impl Cache {
                     Index::new(
                         li.clone(),
                         lr.clone(),
-                        lu.saturating_mul(U40::from(1_000_000)).to::<TimeStamp>(),
+                        lu.to::<i64>() * 1_000_000,
                     )
                 })
                 .collect::<Vec<_>>();
@@ -1274,7 +1274,7 @@ impl Cache {
                     Index::new(
                         vbi.clone(),
                         vbr.clone(),
-                        lu.saturating_mul(U40::from(1_000_000)).to::<TimeStamp>(),
+                        lu.to::<i64>() * 1_000_000,
                     )
                 })
                 .collect::<Vec<_>>();

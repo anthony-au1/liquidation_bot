@@ -10,8 +10,8 @@ use liquidation_bot::arbitrum::arbitrum::IChainlinkAggregator::{
     AnswerUpdated, IChainlinkAggregatorEvents,
 };
 use liquidation_bot::arbitrum::arbitrum::IL2Pool::{
-    Borrow, IL2PoolEvents, LiquidationCall, Repay, ReserveUsedAsCollateralDisabled,
-    ReserveUsedAsCollateralEnabled, Supply, Withdraw,
+    Borrow, IL2PoolEvents, LiquidationCall, Repay, ReserveDataUpdated,
+    ReserveUsedAsCollateralDisabled, ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
 use liquidation_bot::arbitrum::arbitrum::{
     Cache, DataProvider, Index, ReserveData, UserReserveData, UserSettings, start,
@@ -259,22 +259,22 @@ impl DataProvider for SharedDataProvider {
         let now = Utc::now().timestamp();
         let rd = match token {
             t if *t == Address::from_str(AAVE)? => ReserveData::new(
-                45.as_u256(24),
-                5.as_u256(25),
+                45.as_u256(25),
+                5.as_u256(26),
                 1045.as_u256(24),
                 105.as_u256(25),
                 U40::from(now),
             ),
             t if *t == Address::from_str(USDC)? => ReserveData::new(
-                35.as_u256(24),
-                4.as_u256(25),
+                35.as_u256(25),
+                4.as_u256(26),
                 1035.as_u256(24),
                 104.as_u256(25),
                 U40::from(now),
             ),
             t if *t == Address::from_str(DAI)? => ReserveData::new(
-                25.as_u256(24),
-                3.as_u256(25),
+                25.as_u256(25),
+                3.as_u256(26),
                 1025.as_u256(24),
                 103.as_u256(25),
                 U40::from(now),
@@ -521,6 +521,17 @@ impl DataProvider for DummyDataProvider {
                 }))
                 .await
             }
+            17 => {
+                callback(IL2PoolEvents::ReserveDataUpdated(ReserveDataUpdated {
+                    reserve: Address::from_str(AAVE)?,
+                    liquidityRate: 55.as_u256(25),
+                    stableBorrowRate: 6.as_u256(26),
+                    variableBorrowRate: 6.as_u256(26),
+                    liquidityIndex: 105.as_u256(25),
+                    variableBorrowIndex: 1055.as_u256(24),
+                }))
+                .await
+            }
             _ => Err(eyre!("no listen_events events")),
         }
     }
@@ -754,7 +765,7 @@ async fn test_events() -> eyre::Result<()> {
             Array2::from_shape_vec((1, 3), vec![0.0, bor2.as_f64_ray(), bor3.as_f64_ray()])?;
 
         let (hf, last_modified) = &mut *expected.health_factors.write().await;
-        *hf = Array1::from_vec(vec![5.398377926911468]);
+        *hf = Array1::from_vec(vec![5.3983777272783815]);
         *last_modified = now;
     }
 

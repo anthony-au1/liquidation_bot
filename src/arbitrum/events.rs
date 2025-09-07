@@ -1263,7 +1263,6 @@ where
             }
 
             let dt = U256::from(now.saturating_sub(li[idx2].last_update) / 1_000_000);
-
             let dt_spy = dt.ray_div(seconds_per_year);
             let li_new = li[idx2]
                 .index
