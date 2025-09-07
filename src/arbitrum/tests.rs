@@ -5,10 +5,10 @@ use crate::arbitrum::arbitrum::IL2Pool::{
     ReserveUsedAsCollateralDisabled, ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
 use crate::arbitrum::arbitrum::{
-    AaveEvents, Cache, DataProvider, F64Converter, HFRequest, Index, RayOperations, ReserveData,
-    RqDate, Scaler, SyncRequest, SyncTarget, Token, TokenDetails, UserData, UserReserveData,
-    UserSettings, liquidation_threshold_update, listen_events, listen_hf_calc, listen_price_update,
-    listen_sync, setup,
+    liquidation_threshold_update, listen_events, listen_hf_calc, listen_price_update, listen_sync, setup, AaveEvents, Cache,
+    DataProvider, F64Converter, HFRequest, Index, RayOperations, ReserveData, RqDate, Scaler,
+    SyncRequest, SyncTarget, Token, TokenDetails, UserData,
+    UserReserveData, UserSettings,
 };
 use crate::arbitrum::events::{
     answer_updated, borrow, create_user, liquidation_call, repay, reserve_data_updated,
@@ -28,8 +28,8 @@ use std::fmt::Debug;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
 use tokio::sync::mpsc::channel;
+use tokio::sync::RwLock;
 use tokio::task;
 use tokio::time::sleep;
 
@@ -4592,6 +4592,99 @@ async fn test_ray_ops() -> eyre::Result<()> {
         amount_scaled_as_f64 as f32,
         amount_scaled_expected_as_f64 as f32
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_some_numbers() -> eyre::Result<()> {
+    const DECIMALS_18: f64 = 1e18;
+    let mut total = 1
+        .as_u256_decimal_18()
+        .to_ray(DECIMALS_18)
+        .to_scaled(1045.as_u256(24));
+
+    total -= 1
+        .as_u256_decimal_18()
+        .to_ray(DECIMALS_18)
+        .to_scaled(1051.as_u256(24));
+
+    total += 10
+        .as_u256_decimal_18()
+        .to_ray(DECIMALS_18)
+        .to_scaled(1054.as_u256(24));
+
+    assert_eq!(total, U256::from(9493129047280486755506052494_u128));
+
+    let mut total = 1
+        .as_u256_decimal_18()
+        .to_ray(DECIMALS_18)
+        .to_scaled(105.as_u256(25));
+
+    total += 10
+        .as_u256_decimal_18()
+        .to_ray(DECIMALS_18)
+        .to_scaled(1057.as_u256(24));
+
+    total -= 10
+        .as_u256_decimal_18()
+        .to_ray(DECIMALS_18)
+        .to_scaled(1058.as_u256(24));
+
+    let dt = U256::from(1);
+    let dt_spy = dt.ray_div(U256::from(31_536_000));
+    let vbi_new = 106.as_u256(25).ray_mul(
+        U256::from(1_000_000_000_000_000_000_000_000_000_u128)
+            + U256::from(6.as_u256(26)).ray_mul(dt_spy),
+    );
+
+    total -= 1
+        .as_u256_decimal_18()
+        .to_ray(DECIMALS_18)
+        .to_scaled(vbi_new);
+
+    assert_eq!(total, U256::from(17926840264096303005033358_u128));
+
+    const DECIMALS_6: f64 = 1e6;
+    let mut total = 2
+        .as_u256_decimal_6()
+        .to_ray(DECIMALS_6)
+        .to_scaled(1035.as_u256(24));
+
+    total += 2
+        .as_u256_decimal_6()
+        .to_ray(DECIMALS_6)
+        .to_scaled(1035.as_u256(24));
+
+    total -= 1
+        .as_u256_decimal_6()
+        .to_ray(DECIMALS_6)
+        .to_scaled(1036.as_u256(24));
+
+    assert_eq!(total, U256::from(2899483334265942961595135509_u128));
+
+    const DECIMALS_12: f64 = 1e12;
+    let mut total = 3
+        .as_u256_decimal_12()
+        .to_ray(DECIMALS_12)
+        .to_scaled(1025.as_u256(24));
+
+    total += 30
+        .as_u256_decimal_12()
+        .to_ray(DECIMALS_12)
+        .to_scaled(1025.as_u256(24));
+
+    total -= 13
+        .as_u256_decimal_12()
+        .to_ray(DECIMALS_12)
+        .to_scaled(1026.as_u256(24));
+
+    total -= 10
+        .as_u256_decimal_12()
+        .to_ray(DECIMALS_12)
+        .to_scaled(1029.as_u256(24));
+
+    assert_eq!(total, U256::from(9806383665596156754365865996_u128));
 
     Ok(())
 }
