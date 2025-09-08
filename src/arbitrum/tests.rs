@@ -1,21 +1,23 @@
 use crate::arbitrum::arbitrum::IAaveProtocolDataProvider::TokenData;
 use crate::arbitrum::arbitrum::IChainlinkAggregator::{AnswerUpdated, IChainlinkAggregatorEvents};
 use crate::arbitrum::arbitrum::IL2Pool::{
-    Borrow, IL2PoolEvents, LiquidationCall, Repay, ReserveUsedAsCollateralDisabled,
-    ReserveUsedAsCollateralEnabled, Supply, Withdraw,
+    Borrow, IL2PoolEvents, LiquidationCall, Repay, ReserveDataUpdated,
+    ReserveUsedAsCollateralDisabled, ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
 use crate::arbitrum::arbitrum::{
-    liquidation_threshold_update, listen_events, listen_hf_calc, listen_price_update, listen_sync, setup, AaveEvents, Cache,
-    DataProvider, F64Converter, HFRequest, ReserveData, RqDate, Scaler,
-    SyncRequest, SyncTarget, Token, TokenDetails, UserReserveData,
-    UserSettings,
+    AaveEvents, Cache, DataProvider, F64Converter, HFRequest, Index, RayOperations, ReserveData,
+    RqDate, Scaler, SyncRequest, SyncTarget, Token, TokenDetails, UserData, UserReserveData,
+    UserSettings, liquidation_threshold_update, listen_events, listen_hf_calc, listen_price_update,
+    listen_sync, setup,
 };
 use crate::arbitrum::events::{
-    answer_updated, borrow, create_user, liquidation_call, repay,
+    answer_updated, borrow, create_user, liquidation_call, repay, reserve_data_updated,
     reserve_used_as_collateral_disabled, reserve_used_as_collateral_enabled, supply, withdraw,
 };
+use alloy_primitives::aliases::U40;
 use alloy_primitives::{Address, I256, U256};
 use async_trait::async_trait;
+use bitvec::bitvec;
 use bitvec::order::Lsb0;
 use bitvec::prelude::BitVec;
 use chrono::Utc;
@@ -26,8 +28,8 @@ use std::fmt::Debug;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc::channel;
 use tokio::sync::RwLock;
+use tokio::sync::mpsc::channel;
 use tokio::task;
 use tokio::time::sleep;
 
@@ -217,6 +219,7 @@ impl DataProvider for DummyDataProvider {
     }
 
     async fn get_reserve_data(&self, token: &Address) -> eyre::Result<ReserveData> {
+        let now = Utc::now().timestamp();
         let rd = match token {
             t if *t == Address::from_str("0x1Ac54C113cefD1792CbFcF41B711824d657eb61D")? => {
                 ReserveData::new(
@@ -224,6 +227,7 @@ impl DataProvider for DummyDataProvider {
                     5.as_u256(25),
                     1045.as_u256(24),
                     105.as_u256(25),
+                    U40::from(now),
                 )
             }
             t if *t == Address::from_str("0x1Af54C113cefD1792CbFcF41B711834d657ea61D")? => {
@@ -232,6 +236,7 @@ impl DataProvider for DummyDataProvider {
                     4.as_u256(25),
                     1035.as_u256(24),
                     104.as_u256(25),
+                    U40::from(now),
                 )
             }
             t if *t == Address::from_str("0x1Af54C113cefD1792CbFcF41B711824d657eb61D")? => {
@@ -240,6 +245,7 @@ impl DataProvider for DummyDataProvider {
                     3.as_u256(25),
                     1025.as_u256(24),
                     103.as_u256(25),
+                    U40::from(now),
                 )
             }
             _ => ReserveData::new(
@@ -247,6 +253,7 @@ impl DataProvider for DummyDataProvider {
                 6.as_u256(25),
                 1055.as_u256(24),
                 106.as_u256(25),
+                U40::from(now),
             ),
         };
 
@@ -325,11 +332,11 @@ async fn generate_cache_and_tokens(
         ),
     );
 
+    let now = Utc::now().timestamp_micros();
+    *cache.health_factors.write().await = (Array1::from_elem(0, 0.0), now);
     if user_num > 0 {
         let mut user_addr = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
-        let now = Utc::now().timestamp_micros();
 
-        *cache.health_factors.write().await = (Array1::from_elem(0, 0.0), now);
         for i in 0..user_num {
             cache.users.insert(
                 user_addr,
@@ -366,11 +373,50 @@ async fn generate_cache_and_tokens(
 
         *cache.collateral_matrix.write().await = Array2::from_elem((0, tokens.len()), 0.0);
         *cache.borrowed_matrix.write().await = Array2::from_elem((0, tokens.len()), 0.0);
-
-        *cache.prices.write().await = (Array1::from_elem(tokens.len(), 0.0), now);
-        *cache.liquidation_threshold.write().await = (Array1::from_elem(tokens.len(), 0.0), now);
-        *cache.decimals.write().await = (Array1::from_elem(tokens.len(), 0.0), now);
     }
+
+    *cache.prices.write().await = (Array1::from_elem(tokens.len(), 0.0), now);
+    *cache.liquidation_threshold.write().await = (Array1::from_elem(tokens.len(), 0.0), now);
+    *cache.decimals.write().await = (
+        Array1::from_vec(vec![
+            10_f64.powf(18_f64),
+            10_f64.powf(6_f64),
+            10_f64.powf(12_f64),
+        ]),
+        now,
+    );
+    *cache.liquidity.write().await = (
+        Array1::from_vec(vec![
+            Index::new(1045.as_u256(24), 45.as_u256(25), now),
+            Index::new(1035.as_u256(24), 35.as_u256(25), now),
+            Index::new(1025.as_u256(24), 25.as_u256(25), now),
+        ]),
+        now,
+    );
+    *cache.liquidity_index.write().await = (
+        Array1::from_vec(vec![
+            1045.as_u256(24).as_f64_ray(),
+            1035.as_u256(24).as_f64_ray(),
+            1025.as_u256(24).as_f64_ray(),
+        ]),
+        now,
+    );
+    *cache.variable_borrow.write().await = (
+        Array1::from_vec(vec![
+            Index::new(105.as_u256(25), 5.as_u256(26), now),
+            Index::new(104.as_u256(25), 4.as_u256(26), now),
+            Index::new(103.as_u256(25), 3.as_u256(26), now),
+        ]),
+        now,
+    );
+    *cache.variable_borrow_index.write().await = (
+        Array1::from_vec(vec![
+            105.as_u256(25).as_f64_ray(),
+            104.as_u256(25).as_f64_ray(),
+            103.as_u256(25).as_f64_ray(),
+        ]),
+        now,
+    );
 
     Ok((cache, tokens))
 }
@@ -415,15 +461,9 @@ async fn get_all_user_data(
 async fn test_sync_collateral() -> eyre::Result<()> {
     let rq_date = Utc::now().timestamp_micros();
     let cache = Cache::default();
-    let row = vec![
-        10.as_u256_decimal_18(),
-        20.as_u256_decimal_6(),
-        30.as_u256_decimal_12(),
-    ];
-    let row_len = row.len();
-    {
-        let now = Utc::now().timestamp_micros();
 
+    let now = Utc::now().timestamp_micros();
+    {
         *cache.decimals.write().await = (
             Array1::from_vec(vec![
                 10_f64.powf(18_f64),
@@ -433,6 +473,33 @@ async fn test_sync_collateral() -> eyre::Result<()> {
             now,
         );
 
+        *cache.liquidity.write().await = (
+            Array1::from_vec(vec![
+                Index::new(1045.as_u256(24), 45.as_u256(24), now),
+                Index::new(1035.as_u256(24), 35.as_u256(24), now),
+                Index::new(1025.as_u256(24), 25.as_u256(24), now),
+            ]),
+            now,
+        );
+    }
+
+    let (decimals, _) = &*cache.decimals.read().await;
+    let col1 = 10
+        .as_u256_decimal_18()
+        .to_ray(decimals[0])
+        .to_scaled(cache.liquidity.read().await.0[0].index);
+    let col2 = 20
+        .as_u256_decimal_6()
+        .to_ray(decimals[1])
+        .to_scaled(cache.liquidity.read().await.0[1].index);
+    let col3 = 30
+        .as_u256_decimal_12()
+        .to_ray(decimals[2])
+        .to_scaled(cache.liquidity.read().await.0[2].index);
+
+    let row = vec![col1, col2, col3];
+    let row_len = row.len();
+    {
         *cache.collateral.write().await =
             vec![RwLock::new((Array1::from_vec(row.clone()), now, now))];
         *cache.collateral_matrix.write().await = Array2::from_elem((1, row_len), 0.0);
@@ -442,22 +509,27 @@ async fn test_sync_collateral() -> eyre::Result<()> {
 
     let mut expected = Array2::from_shape_vec(
         (1, row_len),
-        vec![
-            10.as_u256_decimal_18().as_f64_decimal_18(),
-            20.as_u256_decimal_6().as_f64_decimal_6(),
-            30.as_u256_decimal_12().as_f64_decimal_12(),
-        ],
+        vec![col1.as_f64_ray(), col2.as_f64_ray(), col3.as_f64_ray()],
     )?;
     {
         let collateral_matrix = &*cache.collateral_matrix.read().await;
         assert_eq!(collateral_matrix, expected);
     }
 
-    let row = vec![
-        40.as_u256_decimal_18(),
-        50.as_u256_decimal_6(),
-        60.as_u256_decimal_12(),
-    ];
+    let col4 = 40
+        .as_u256_decimal_18()
+        .to_ray(decimals[0])
+        .to_scaled(cache.liquidity.read().await.0[0].index);
+    let col5 = 50
+        .as_u256_decimal_6()
+        .to_ray(decimals[1])
+        .to_scaled(cache.liquidity.read().await.0[1].index);
+    let col6 = 60
+        .as_u256_decimal_12()
+        .to_ray(decimals[2])
+        .to_scaled(cache.liquidity.read().await.0[2].index);
+
+    let row = vec![col4, col5, col6];
     {
         let collateral = &mut *cache.collateral.write().await;
         collateral.push(RwLock::new((Array1::from_vec(row.clone()), 0, 0)));
@@ -467,9 +539,9 @@ async fn test_sync_collateral() -> eyre::Result<()> {
 
     expected.push_row(
         Array1::from_vec(vec![
-            40.as_u256_decimal_18().as_f64_decimal_18(),
-            50.as_u256_decimal_6().as_f64_decimal_6(),
-            60.as_u256_decimal_12().as_f64_decimal_12(),
+            col4.as_f64_ray(),
+            col5.as_f64_ray(),
+            col6.as_f64_ray(),
         ])
         .view(),
     )?;
@@ -478,11 +550,20 @@ async fn test_sync_collateral() -> eyre::Result<()> {
         assert_eq!(collateral_matrix, expected);
     }
 
-    let row = vec![
-        70.as_u256_decimal_18(),
-        80.as_u256_decimal_6(),
-        90.as_u256_decimal_12(),
-    ];
+    let col7 = 70
+        .as_u256_decimal_18()
+        .to_ray(decimals[0])
+        .to_scaled(cache.liquidity.read().await.0[0].index);
+    let col8 = 80
+        .as_u256_decimal_6()
+        .to_ray(decimals[1])
+        .to_scaled(cache.liquidity.read().await.0[1].index);
+    let col9 = 90
+        .as_u256_decimal_12()
+        .to_ray(decimals[2])
+        .to_scaled(cache.liquidity.read().await.0[2].index);
+
+    let row = vec![col7, col8, col9];
     {
         let collateral = &mut *cache.collateral.write().await;
         collateral.push(RwLock::new((Array1::from_vec(row.clone()), 0, 0)));
@@ -492,9 +573,9 @@ async fn test_sync_collateral() -> eyre::Result<()> {
 
     expected.push_row(
         Array1::from_vec(vec![
-            70.as_u256_decimal_18().as_f64_decimal_18(),
-            80.as_u256_decimal_6().as_f64_decimal_6(),
-            90.as_u256_decimal_12().as_f64_decimal_12(),
+            col7.as_f64_ray(),
+            col8.as_f64_ray(),
+            col9.as_f64_ray(),
         ])
         .view(),
     )?;
@@ -503,6 +584,19 @@ async fn test_sync_collateral() -> eyre::Result<()> {
         assert_eq!(collateral_matrix, expected);
     }
 
+    let col_updated1 = 400
+        .as_u256_decimal_18()
+        .to_ray(decimals[0])
+        .to_scaled(cache.liquidity.read().await.0[0].index);
+    let col_updated2 = 500
+        .as_u256_decimal_6()
+        .to_ray(decimals[1])
+        .to_scaled(cache.liquidity.read().await.0[1].index);
+    let col_updated3 = 600
+        .as_u256_decimal_12()
+        .to_ray(decimals[2])
+        .to_scaled(cache.liquidity.read().await.0[2].index);
+
     {
         let collateral = &mut *cache.collateral.write().await;
         let (col_row, _, _) = &mut *collateral
@@ -510,16 +604,16 @@ async fn test_sync_collateral() -> eyre::Result<()> {
             .ok_or_else(|| eyre!("row = 1 not found in collateral"))?
             .write()
             .await;
-        col_row[0] = 400.as_u256_decimal_18();
-        col_row[1] = 500.as_u256_decimal_6();
-        col_row[2] = 600.as_u256_decimal_12();
+        col_row[0] = col_updated1;
+        col_row[1] = col_updated2;
+        col_row[2] = col_updated3;
     }
 
     cache.sync_collateral(&SyncTarget::Row(1), rq_date).await?;
 
-    expected[(1, 0)] = 400.0;
-    expected[(1, 1)] = 500.0;
-    expected[(1, 2)] = 600.0;
+    expected[(1, 0)] = col_updated1.as_f64_ray();
+    expected[(1, 1)] = col_updated2.as_f64_ray();
+    expected[(1, 2)] = col_updated3.as_f64_ray();
 
     {
         let collateral_matrix = &*cache.collateral_matrix.read().await;
@@ -533,15 +627,9 @@ async fn test_sync_collateral() -> eyre::Result<()> {
 async fn test_sync_borrowed() -> eyre::Result<()> {
     let rq_date = Utc::now().timestamp_micros();
     let cache = Cache::default();
-    let row = vec![
-        10.as_u256_decimal_18(),
-        20.as_u256_decimal_6(),
-        30.as_u256_decimal_12(),
-    ];
-    let row_len = row.len();
-    {
-        let now = Utc::now().timestamp_micros();
 
+    let now = Utc::now().timestamp_micros();
+    {
         *cache.decimals.write().await = (
             Array1::from_vec(vec![
                 10_f64.powf(18_f64),
@@ -550,6 +638,34 @@ async fn test_sync_borrowed() -> eyre::Result<()> {
             ]),
             now,
         );
+
+        *cache.variable_borrow.write().await = (
+            Array1::from_vec(vec![
+                Index::new(105.as_u256(25), 5.as_u256(25), now),
+                Index::new(104.as_u256(25), 4.as_u256(25), now),
+                Index::new(103.as_u256(25), 3.as_u256(25), now),
+            ]),
+            now,
+        );
+    }
+
+    let (decimals, _) = &*cache.decimals.read().await;
+    let bor1 = 10
+        .as_u256_decimal_18()
+        .to_ray(decimals[0])
+        .to_scaled(cache.variable_borrow.read().await.0[0].index);
+    let bor2 = 20
+        .as_u256_decimal_6()
+        .to_ray(decimals[1])
+        .to_scaled(cache.variable_borrow.read().await.0[1].index);
+    let bor3 = 30
+        .as_u256_decimal_12()
+        .to_ray(decimals[2])
+        .to_scaled(cache.variable_borrow.read().await.0[2].index);
+
+    let row = vec![bor1, bor2, bor3];
+    let row_len = row.len();
+    {
         *cache.borrowed.write().await =
             vec![RwLock::new((Array1::from_vec(row.clone()), now, now))];
         *cache.borrowed_matrix.write().await = Array2::from_elem((1, row_len), 0.0);
@@ -559,22 +675,27 @@ async fn test_sync_borrowed() -> eyre::Result<()> {
 
     let mut expected = Array2::from_shape_vec(
         (1, row_len),
-        vec![
-            10.as_u256_decimal_18().as_f64_decimal_18(),
-            20.as_u256_decimal_6().as_f64_decimal_6(),
-            30.as_u256_decimal_12().as_f64_decimal_12(),
-        ],
+        vec![bor1.as_f64_ray(), bor2.as_f64_ray(), bor3.as_f64_ray()],
     )?;
     {
         let borrowed_matrix = &*cache.borrowed_matrix.read().await;
         assert_eq!(borrowed_matrix, expected);
     }
 
-    let row = vec![
-        40.as_u256_decimal_18(),
-        50.as_u256_decimal_6(),
-        60.as_u256_decimal_12(),
-    ];
+    let bor4 = 40
+        .as_u256_decimal_18()
+        .to_ray(decimals[0])
+        .to_scaled(cache.variable_borrow.read().await.0[0].index);
+    let bor5 = 50
+        .as_u256_decimal_6()
+        .to_ray(decimals[1])
+        .to_scaled(cache.variable_borrow.read().await.0[1].index);
+    let bor6 = 60
+        .as_u256_decimal_12()
+        .to_ray(decimals[2])
+        .to_scaled(cache.variable_borrow.read().await.0[2].index);
+
+    let row = vec![bor4, bor5, bor6];
     {
         let borrowed = &mut *cache.borrowed.write().await;
         borrowed.push(RwLock::new((Array1::from_vec(row.clone()), 0, 0)));
@@ -584,9 +705,9 @@ async fn test_sync_borrowed() -> eyre::Result<()> {
 
     expected.push_row(
         Array1::from_vec(vec![
-            40.as_u256_decimal_18().as_f64_decimal_18(),
-            50.as_u256_decimal_6().as_f64_decimal_6(),
-            60.as_u256_decimal_12().as_f64_decimal_12(),
+            bor4.as_f64_ray(),
+            bor5.as_f64_ray(),
+            bor6.as_f64_ray(),
         ])
         .view(),
     )?;
@@ -595,11 +716,20 @@ async fn test_sync_borrowed() -> eyre::Result<()> {
         assert_eq!(borrowed_matrix, expected);
     }
 
-    let row = vec![
-        70.as_u256_decimal_18(),
-        80.as_u256_decimal_6(),
-        90.as_u256_decimal_12(),
-    ];
+    let bor7 = 70
+        .as_u256_decimal_18()
+        .to_ray(decimals[0])
+        .to_scaled(cache.variable_borrow.read().await.0[0].index);
+    let bor8 = 80
+        .as_u256_decimal_6()
+        .to_ray(decimals[1])
+        .to_scaled(cache.variable_borrow.read().await.0[1].index);
+    let bor9 = 90
+        .as_u256_decimal_12()
+        .to_ray(decimals[2])
+        .to_scaled(cache.variable_borrow.read().await.0[2].index);
+
+    let row = vec![bor7, bor8, bor9];
     {
         let borrowed = &mut *cache.borrowed.write().await;
         borrowed.push(RwLock::new((Array1::from_vec(row.clone()), 0, 0)));
@@ -609,9 +739,9 @@ async fn test_sync_borrowed() -> eyre::Result<()> {
 
     expected.push_row(
         Array1::from_vec(vec![
-            70.as_u256_decimal_18().as_f64_decimal_18(),
-            80.as_u256_decimal_6().as_f64_decimal_6(),
-            90.as_u256_decimal_12().as_f64_decimal_12(),
+            bor7.as_f64_ray(),
+            bor8.as_f64_ray(),
+            bor9.as_f64_ray(),
         ])
         .view(),
     )?;
@@ -620,6 +750,19 @@ async fn test_sync_borrowed() -> eyre::Result<()> {
         assert_eq!(borrowed_matrix, expected);
     }
 
+    let bor_updated1 = 400
+        .as_u256_decimal_18()
+        .to_ray(decimals[0])
+        .to_scaled(cache.variable_borrow.read().await.0[0].index);
+    let bor_updated2 = 500
+        .as_u256_decimal_6()
+        .to_ray(decimals[1])
+        .to_scaled(cache.variable_borrow.read().await.0[1].index);
+    let bor_updated3 = 600
+        .as_u256_decimal_12()
+        .to_ray(decimals[2])
+        .to_scaled(cache.variable_borrow.read().await.0[2].index);
+
     {
         let borrowed = &mut *cache.borrowed.write().await;
         let (bor_row, _, _) = &mut *borrowed
@@ -627,16 +770,16 @@ async fn test_sync_borrowed() -> eyre::Result<()> {
             .ok_or_else(|| eyre!("row = 1 not found in borrowed"))?
             .write()
             .await;
-        bor_row[0] = 400.as_u256_decimal_18();
-        bor_row[1] = 500.as_u256_decimal_6();
-        bor_row[2] = 600.as_u256_decimal_12();
+        bor_row[0] = bor_updated1;
+        bor_row[1] = bor_updated2;
+        bor_row[2] = bor_updated3;
     }
 
     cache.sync_borrowed(&SyncTarget::Row(1), rq_date).await?;
 
-    expected[(1, 0)] = 400.0;
-    expected[(1, 1)] = 500.0;
-    expected[(1, 2)] = 600.0;
+    expected[(1, 0)] = bor_updated1.as_f64_ray();
+    expected[(1, 1)] = bor_updated2.as_f64_ray();
+    expected[(1, 2)] = bor_updated3.as_f64_ray();
 
     {
         let borrowed_matrix = &*cache.borrowed_matrix.read().await;
@@ -665,25 +808,42 @@ async fn test_sync_user() -> eyre::Result<()> {
     assert_eq!(cache.contains(&user), true);
 
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
+    let (decimal, _) = &*cache.decimals.read().await;
 
     assert_eq!(
         collateral,
-        vec![U256::default(), 20.as_u256_decimal_6(), U256::default()]
+        vec![
+            U256::default(),
+            20.as_u256_decimal_6()
+                .to_ray(decimal[1])
+                .to_scaled(cache.liquidity.read().await.0[1].index),
+            U256::default()
+        ]
     );
     assert_eq!(
         reserve,
         vec![
-            10.as_u256_decimal_18(),
+            10.as_u256_decimal_18()
+                .to_ray(decimal[0])
+                .to_scaled(cache.liquidity.read().await.0[0].index),
             U256::default(),
             30.as_u256_decimal_12()
+                .to_ray(decimal[2])
+                .to_scaled(cache.liquidity.read().await.0[2].index),
         ]
     );
     assert_eq!(
         borrowed,
         vec![
-            10.as_u256_decimal_18(),
-            20.as_u256_decimal_6(),
+            10.as_u256_decimal_18()
+                .to_ray(decimal[0])
+                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+            20.as_u256_decimal_6()
+                .to_ray(decimal[1])
+                .to_scaled(cache.variable_borrow.read().await.0[1].index),
             30.as_u256_decimal_12()
+                .to_ray(decimal[2])
+                .to_scaled(cache.variable_borrow.read().await.0[2].index),
         ]
     );
 
@@ -721,25 +881,42 @@ async fn test_init_user() -> eyre::Result<()> {
     assert_eq!(cache.users.len(), 1);
 
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
+    let (decimals, _) = &*cache.decimals.read().await;
 
     assert_eq!(
         collateral,
-        vec![U256::default(), 20.as_u256_decimal_6(), U256::default()]
+        vec![
+            U256::default(),
+            20.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.liquidity.read().await.0[1].index),
+            U256::default()
+        ]
     );
     assert_eq!(
         reserve,
         vec![
-            10.as_u256_decimal_18(),
+            10.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.liquidity.read().await.0[0].index),
             U256::default(),
             30.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.liquidity.read().await.0[2].index),
         ]
     );
     assert_eq!(
         borrowed,
         vec![
-            10.as_u256_decimal_18(),
-            20.as_u256_decimal_6(),
+            10.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+            20.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.variable_borrow.read().await.0[1].index),
             30.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.variable_borrow.read().await.0[2].index),
         ]
     );
 
@@ -758,33 +935,84 @@ async fn test_get_user_data() -> eyre::Result<()> {
         .key()
         .clone();
 
-    let (collateral, reserve, borrowed) = cache
+    let UserData {
+        reserve_scaled,
+        collateral_scaled,
+        borrowed_scaled,
+        liquidity_indexes,
+        liquidity_rates,
+        variable_borrow_indexes,
+        variable_borrow_rates,
+        last_update_timestamps,
+        user_settings,
+    } = cache
         .get_user_data(dummy_data_provider, &tokens, &user)
         .await?;
 
     assert_eq!(cache.contains(&user), true);
     assert_eq!(cache.users.len(), 1);
 
+    let (decimals, _) = &*cache.decimals.read().await;
+
     assert_eq!(
-        collateral,
-        vec![U256::default(), 20.as_u256_decimal_6(), U256::default()]
+        collateral_scaled,
+        vec![
+            U256::default(),
+            20.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.liquidity.read().await.0[1].index),
+            U256::default()
+        ]
     );
     assert_eq!(
-        reserve,
+        reserve_scaled,
         vec![
-            10.as_u256_decimal_18(),
+            10.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.liquidity.read().await.0[0].index),
             U256::default(),
             30.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.liquidity.read().await.0[2].index),
         ]
     );
     assert_eq!(
-        borrowed,
+        borrowed_scaled,
         vec![
-            10.as_u256_decimal_18(),
-            20.as_u256_decimal_6(),
+            10.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+            20.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.variable_borrow.read().await.0[1].index),
             30.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.variable_borrow.read().await.0[2].index),
         ]
     );
+
+    assert_eq!(
+        liquidity_indexes,
+        vec![1045.as_u256(24), 1035.as_u256(24), 1025.as_u256(24)]
+    );
+    assert_eq!(
+        liquidity_rates,
+        vec![45.as_u256(24), 35.as_u256(24), 25.as_u256(24)]
+    );
+    assert_eq!(
+        variable_borrow_indexes,
+        vec![105.as_u256(25), 104.as_u256(25), 103.as_u256(25)]
+    );
+    assert_eq!(
+        variable_borrow_rates,
+        vec![5.as_u256(25), 4.as_u256(25), 3.as_u256(25)]
+    );
+    assert_eq!(
+        last_update_timestamps,
+        vec![U40::from(Utc::now().timestamp()); 3]
+    );
+    assert_eq!(user_settings.row_num, 0);
+    assert_eq!(user_settings.use_as_collateral, bitvec![0, 1, 0]);
 
     Ok(())
 }
@@ -902,12 +1130,7 @@ async fn test_calc_hf() -> eyre::Result<()> {
         .clone();
 
     {
-        let (d, _) = &mut *cache.decimals.write().await;
-        *d = Array1::from_vec(vec![
-            10_f64.powf(18_f64),
-            10_f64.powf(6_f64),
-            10_f64.powf(12_f64),
-        ]);
+        let (decimals, _) = &*cache.decimals.read().await;
 
         let (lt, _) = &mut *cache.liquidation_threshold.write().await;
         *lt = Array1::from_vec(vec![0.0, 0.75, 0.8]);
@@ -925,9 +1148,15 @@ async fn test_calc_hf() -> eyre::Result<()> {
             .write()
             .await;
         *col_row = Array1::from_vec(vec![
-            2.as_u256_decimal_18(),
-            10.as_u256_decimal_6(),
-            200.as_u256_decimal_12(),
+            2.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.liquidity.read().await.0[0].index),
+            10.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.liquidity.read().await.0[1].index),
+            200.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.liquidity.read().await.0[2].index),
         ]);
 
         let borrowed = &*cache.borrowed.read().await;
@@ -937,8 +1166,12 @@ async fn test_calc_hf() -> eyre::Result<()> {
             .write()
             .await;
         *bor_row = Array1::from_vec(vec![
-            1.as_u256_decimal_18(),
-            15.as_u256_decimal_6(),
+            1.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+            15.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.variable_borrow.read().await.0[1].index),
             U256::default(),
         ]);
     }
@@ -959,12 +1192,7 @@ async fn test_calc_hf() -> eyre::Result<()> {
     let (cache, _) = generate_cache_and_tokens(3).await?;
 
     {
-        let (d, _) = &mut *cache.decimals.write().await;
-        *d = Array1::from_vec(vec![
-            10_f64.powf(18_f64),
-            10_f64.powf(6_f64),
-            10_f64.powf(12_f64),
-        ]);
+        let (decimals, _) = &*cache.decimals.read().await;
 
         let (lt, _) = &mut *cache.liquidation_threshold.write().await;
         *lt = Array1::from_vec(vec![0.0, 0.75, 0.8]);
@@ -975,52 +1203,46 @@ async fn test_calc_hf() -> eyre::Result<()> {
         let (hf, _) = &mut *cache.health_factors.write().await;
         *hf = Array1::from_vec(vec![0.0; 3]);
 
+        let col = 2
+            .as_u256_decimal_18()
+            .to_ray(decimals[0])
+            .to_scaled(cache.liquidity.read().await.0[0].index);
+        let col2 = 10
+            .as_u256_decimal_6()
+            .to_ray(decimals[1])
+            .to_scaled(cache.liquidity.read().await.0[1].index);
+        let col3 = 200
+            .as_u256_decimal_12()
+            .to_ray(decimals[2])
+            .to_scaled(cache.liquidity.read().await.0[2].index);
+
         let collaterals = &mut *cache.collateral.write().await;
-        collaterals.push(RwLock::new((
-            Array1::from_vec(vec![
-                2.as_u256_decimal_18(),
-                10.as_u256_decimal_6(),
-                200.as_u256_decimal_12(),
-            ]),
-            0,
-            0,
-        )));
-        collaterals.push(RwLock::new((
-            Array1::from_vec(vec![
-                2.as_u256_decimal_18(),
-                10.as_u256_decimal_6(),
-                200.as_u256_decimal_12(),
-            ]),
-            0,
-            0,
-        )));
+        collaterals.push(RwLock::new((Array1::from_vec(vec![col, col2, col3]), 0, 0)));
+        collaterals.push(RwLock::new((Array1::from_vec(vec![col, col2, col3]), 0, 0)));
         let (col_row, _, _) = &mut *collaterals
             .get(0)
             .ok_or_else(|| eyre!("row = 0 not found in collateral"))?
             .write()
             .await;
-        *col_row = Array1::from_vec(vec![
-            2.as_u256_decimal_18(),
-            10.as_u256_decimal_6(),
-            200.as_u256_decimal_12(),
-        ]);
+        *col_row = Array1::from_vec(vec![col, col2, col3]);
+
+        let bor = 1
+            .as_u256_decimal_18()
+            .to_ray(decimals[0])
+            .to_scaled(cache.variable_borrow.read().await.0[0].index);
+        let bor2 = 15
+            .as_u256_decimal_6()
+            .to_ray(decimals[1])
+            .to_scaled(cache.variable_borrow.read().await.0[1].index);
 
         let borrowed = &mut *cache.borrowed.write().await;
         borrowed.push(RwLock::new((
-            Array1::from_vec(vec![
-                1.as_u256_decimal_18(),
-                15.as_u256_decimal_6(),
-                U256::default(),
-            ]),
+            Array1::from_vec(vec![bor, bor2, U256::default()]),
             0,
             0,
         )));
         borrowed.push(RwLock::new((
-            Array1::from_vec(vec![
-                1.as_u256_decimal_18(),
-                15.as_u256_decimal_6(),
-                U256::default(),
-            ]),
+            Array1::from_vec(vec![bor, bor2, U256::default()]),
             0,
             0,
         )));
@@ -1029,23 +1251,28 @@ async fn test_calc_hf() -> eyre::Result<()> {
             .ok_or_else(|| eyre!("row = 0 not found in borrowed"))?
             .write()
             .await;
-        *bor_row = Array1::from_vec(vec![
-            1.as_u256_decimal_18(),
-            15.as_u256_decimal_6(),
-            U256::default(),
-        ]);
+        *bor_row = Array1::from_vec(vec![bor, bor2, U256::default()]);
 
         *cache.collateral_matrix.write().await = Array2::from_elem((0, 3), 0.);
         let col_matrix = &mut *cache.collateral_matrix.write().await;
-        col_matrix.push_row(Array1::from_vec(vec![2.0, 10.0, 200.0]).view())?;
-        col_matrix.push_row(Array1::from_vec(vec![2.0, 10.0, 200.0]).view())?;
-        col_matrix.push_row(Array1::from_vec(vec![2.0, 10.0, 200.0]).view())?;
+        col_matrix.push_row(
+            Array1::from_vec(vec![col.as_f64_ray(), col2.as_f64_ray(), col3.as_f64_ray()]).view(),
+        )?;
+        col_matrix.push_row(
+            Array1::from_vec(vec![col.as_f64_ray(), col2.as_f64_ray(), col3.as_f64_ray()]).view(),
+        )?;
+        col_matrix.push_row(
+            Array1::from_vec(vec![col.as_f64_ray(), col2.as_f64_ray(), col3.as_f64_ray()]).view(),
+        )?;
 
         *cache.borrowed_matrix.write().await = Array2::from_elem((0, 3), 0.);
         let bor_matrix = &mut *cache.borrowed_matrix.write().await;
-        bor_matrix.push_row(Array1::from_vec(vec![1.0, 15.0, 0.0]).view())?;
-        bor_matrix.push_row(Array1::from_vec(vec![1.0, 15.0, 0.0]).view())?;
-        bor_matrix.push_row(Array1::from_vec(vec![1.0, 15.0, 0.0]).view())?;
+        bor_matrix
+            .push_row(Array1::from_vec(vec![bor.as_f64_ray(), bor2.as_f64_ray(), 0.0]).view())?;
+        bor_matrix
+            .push_row(Array1::from_vec(vec![bor.as_f64_ray(), bor2.as_f64_ray(), 0.0]).view())?;
+        bor_matrix
+            .push_row(Array1::from_vec(vec![bor.as_f64_ray(), bor2.as_f64_ray(), 0.0]).view())?;
     }
 
     cache.calc_hf(None, Utc::now().timestamp_millis()).await?;
@@ -1114,7 +1341,7 @@ impl DataProvider for CreateUserDataProvider {
     }
 
     async fn get_reserve_data(&self, _: &Address) -> eyre::Result<ReserveData> {
-        todo!()
+        Err(eyre::eyre!("mock error"))
     }
 
     async fn get_decimals(&self, _: &Address) -> eyre::Result<f64> {
@@ -1142,7 +1369,6 @@ async fn test_create_user() -> eyre::Result<()> {
     let rq_date = Utc::now().timestamp_micros();
 
     let (sync_tx, _) = channel::<SyncRequest>(1);
-    let (hf_tx, _) = channel::<HFRequest>(1);
 
     assert_eq!(cache.contains(&user), true);
 
@@ -1153,7 +1379,6 @@ async fn test_create_user() -> eyre::Result<()> {
         &tokens,
         &user,
         &sync_tx,
-        &hf_tx,
     )
     .await?;
 
@@ -1168,7 +1393,6 @@ async fn test_create_user() -> eyre::Result<()> {
     let user = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
 
     let (sync_tx, mut sync_rc) = channel::<SyncRequest>(1);
-    let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
 
     let sync_handler = task::spawn(async move {
         let msg = sync_rc
@@ -1180,16 +1404,6 @@ async fn test_create_user() -> eyre::Result<()> {
         Ok::<_, eyre::Error>(())
     });
 
-    let hf_handler = task::spawn(async move {
-        let msg = hf_rc
-            .recv()
-            .await
-            .ok_or_else(|| eyre::eyre!("hf channel closed"))?;
-        assert_eq!(HFRequest::User(user.clone(), rq_date), msg);
-
-        Ok::<_, eyre::Error>(())
-    });
-
     let created = create_user(
         rq_date,
         &cache,
@@ -1197,41 +1411,89 @@ async fn test_create_user() -> eyre::Result<()> {
         &tokens,
         &user,
         &sync_tx,
-        &hf_tx,
     )
     .await?;
     let _ = sync_handler.await?;
-    let _ = hf_handler.await?;
 
     assert_eq!(created, true);
 
-    let (collateral, reserve, borrowed) = cache
+    let UserData {
+        reserve_scaled,
+        collateral_scaled,
+        borrowed_scaled,
+        liquidity_indexes,
+        liquidity_rates,
+        variable_borrow_indexes,
+        variable_borrow_rates,
+        last_update_timestamps,
+        user_settings,
+    } = cache
         .get_user_data(dummy_data_provider, &tokens, &user)
         .await?;
 
     assert_eq!(cache.contains(&user), true);
     assert_eq!(cache.users.len(), 1);
 
+    let (decimals, _) = &*cache.decimals.read().await;
+
     assert_eq!(
-        collateral,
-        vec![U256::default(), 20.as_u256_decimal_6(), U256::default()]
-    );
-    assert_eq!(
-        reserve,
+        collateral_scaled,
         vec![
-            10.as_u256_decimal_18(),
             U256::default(),
-            30.as_u256_decimal_12(),
+            20.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.liquidity.read().await.0[1].index),
+            U256::default()
         ]
     );
     assert_eq!(
-        borrowed,
+        reserve_scaled,
         vec![
-            10.as_u256_decimal_18(),
-            20.as_u256_decimal_6(),
-            30.as_u256_decimal_12(),
+            10.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.liquidity.read().await.0[0].index),
+            U256::default(),
+            30.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.liquidity.read().await.0[2].index),
         ]
     );
+    assert_eq!(
+        borrowed_scaled,
+        vec![
+            10.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+            20.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.variable_borrow.read().await.0[1].index),
+            30.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.variable_borrow.read().await.0[2].index),
+        ]
+    );
+    assert_eq!(
+        liquidity_indexes,
+        vec![1045.as_u256(24), 1035.as_u256(24), 1025.as_u256(24)]
+    );
+    assert_eq!(
+        liquidity_rates,
+        vec![45.as_u256(24), 35.as_u256(24), 25.as_u256(24)]
+    );
+    assert_eq!(
+        variable_borrow_indexes,
+        vec![105.as_u256(25), 104.as_u256(25), 103.as_u256(25)]
+    );
+    assert_eq!(
+        variable_borrow_rates,
+        vec![5.as_u256(25), 4.as_u256(25), 3.as_u256(25)]
+    );
+    assert_eq!(
+        last_update_timestamps,
+        vec![U40::from(Utc::now().timestamp()); 3]
+    );
+    assert_eq!(user_settings.row_num, 0);
+    assert_eq!(user_settings.use_as_collateral, bitvec![0, 1, 0]);
 
     // 3 case - error
 
@@ -1245,7 +1507,6 @@ async fn test_create_user() -> eyre::Result<()> {
         &tokens,
         &user,
         &sync_tx,
-        &hf_tx,
     )
     .await;
 
@@ -1280,7 +1541,7 @@ async fn test_supply() -> eyre::Result<()> {
     };
 
     let (sync_tx, mut sync_rc) = channel::<SyncRequest>(1);
-    let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
+    let (hf_tx, _) = channel::<HFRequest>(1);
 
     let sync_handler = task::spawn(async move {
         let msg = sync_rc
@@ -1288,16 +1549,6 @@ async fn test_supply() -> eyre::Result<()> {
             .await
             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
         assert_eq!(SyncRequest::Both(SyncTarget::Row(0), rq_date), msg);
-
-        Ok::<_, eyre::Error>(())
-    });
-
-    let hf_handler = task::spawn(async move {
-        let msg = hf_rc
-            .recv()
-            .await
-            .ok_or_else(|| eyre::eyre!("hf channel closed"))?;
-        assert_eq!(HFRequest::User(user.clone(), rq_date), msg);
 
         Ok::<_, eyre::Error>(())
     });
@@ -1313,31 +1564,47 @@ async fn test_supply() -> eyre::Result<()> {
     )
     .await?;
     let _ = sync_handler.await?;
-    let _ = hf_handler.await?;
 
     assert_eq!(cache.users.len(), 1);
     assert_eq!(cache.users.contains_key(&user), true);
 
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
+    let (decimals, _) = &*cache.decimals.read().await;
 
     assert_eq!(
         collateral,
-        vec![U256::default(), 20.as_u256_decimal_6(), U256::default()]
+        vec![
+            U256::default(),
+            20.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.liquidity.read().await.0[1].index),
+            U256::default()
+        ]
     );
     assert_eq!(
         reserve,
         vec![
-            10.as_u256_decimal_18(),
+            10.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.liquidity.read().await.0[0].index),
             U256::default(),
-            30.as_u256_decimal_12(),
+            30.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.liquidity.read().await.0[2].index),
         ]
     );
     assert_eq!(
         borrowed,
         vec![
-            10.as_u256_decimal_18(),
-            20.as_u256_decimal_6(),
-            30.as_u256_decimal_12(),
+            10.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+            20.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.variable_borrow.read().await.0[1].index),
+            30.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.variable_borrow.read().await.0[2].index),
         ]
     );
 
@@ -1366,7 +1633,7 @@ async fn test_supply() -> eyre::Result<()> {
     };
 
     let (sync_tx, mut sync_rc) = channel::<SyncRequest>(1);
-    let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
+    let (hf_tx, _) = channel::<HFRequest>(1);
 
     let sync_handler = task::spawn(async move {
         let msg = sync_rc
@@ -1381,16 +1648,6 @@ async fn test_supply() -> eyre::Result<()> {
         Ok::<_, eyre::Error>(())
     });
 
-    let hf_handler = task::spawn(async move {
-        let msg = hf_rc
-            .recv()
-            .await
-            .ok_or_else(|| eyre::eyre!("hf channel closed"))?;
-        assert_eq!(HFRequest::User(user.clone(), rq_date), msg);
-
-        Ok::<_, eyre::Error>(())
-    });
-
     assert_eq!(cache.users.len(), 1);
 
     supply(
@@ -1401,7 +1658,6 @@ async fn test_supply() -> eyre::Result<()> {
     )
     .await?;
     let _ = sync_handler.await?;
-    let _ = hf_handler.await?;
 
     assert_eq!(cache.users.len(), 1);
 
@@ -1409,7 +1665,13 @@ async fn test_supply() -> eyre::Result<()> {
 
     assert_eq!(
         collateral,
-        vec![20.as_u256_decimal_18(), U256::default(), U256::default()]
+        vec![
+            20.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.liquidity.read().await.0[0].index),
+            U256::default(),
+            U256::default()
+        ]
     );
     assert_eq!(reserve, vec![U256::default(); 3]);
     assert_eq!(borrowed, vec![U256::default(); 3]);
@@ -1458,7 +1720,13 @@ async fn test_supply() -> eyre::Result<()> {
     assert_eq!(collateral, vec![U256::default(); 3]);
     assert_eq!(
         reserve,
-        vec![U256::default(), 30.as_u256_decimal_6(), U256::default()]
+        vec![
+            U256::default(),
+            30.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.liquidity.read().await.0[1].index),
+            U256::default()
+        ]
     );
     assert_eq!(borrowed, vec![U256::default(); 3]);
 
@@ -1578,7 +1846,7 @@ async fn test_supply() -> eyre::Result<()> {
     }
 
     let (sync_tx, mut sync_rc) = channel::<SyncRequest>(1);
-    let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
+    let (hf_tx, _) = channel::<HFRequest>(1);
 
     let sync_handler = task::spawn(async move {
         let msg = sync_rc
@@ -1586,16 +1854,6 @@ async fn test_supply() -> eyre::Result<()> {
             .await
             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
         assert_eq!(SyncRequest::Both(SyncTarget::Row(0), rq_date), msg);
-
-        Ok::<_, eyre::Error>(())
-    });
-
-    let hf_handler = task::spawn(async move {
-        let msg = hf_rc
-            .recv()
-            .await
-            .ok_or_else(|| eyre::eyre!("hf channel closed"))?;
-        assert_eq!(HFRequest::User(user.clone(), rq_date), msg);
 
         Ok::<_, eyre::Error>(())
     });
@@ -1610,7 +1868,6 @@ async fn test_supply() -> eyre::Result<()> {
     )
     .await?;
     let _ = sync_handler.await?;
-    let _ = hf_handler.await?;
 
     assert_eq!(cache.users.len(), 10);
 
@@ -1618,22 +1875,38 @@ async fn test_supply() -> eyre::Result<()> {
 
     assert_eq!(
         collateral,
-        vec![U256::default(), 20.as_u256_decimal_6(), U256::default()]
+        vec![
+            U256::default(),
+            20.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.liquidity.read().await.0[1].index),
+            U256::default()
+        ]
     );
     assert_eq!(
         reserve,
         vec![
-            10.as_u256_decimal_18(),
+            10.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.liquidity.read().await.0[0].index),
             U256::default(),
             30.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.liquidity.read().await.0[2].index),
         ]
     );
     assert_eq!(
         borrowed,
         vec![
-            10.as_u256_decimal_18(),
-            20.as_u256_decimal_6(),
+            10.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+            20.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.variable_borrow.read().await.0[1].index),
             30.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.variable_borrow.read().await.0[2].index),
         ]
     );
 
@@ -1838,25 +2111,41 @@ async fn test_listen_sync() -> eyre::Result<()> {
         .await
         .map(|(cache, _)| Arc::new(cache))?;
 
-    {
-        let (decimal, _) = &mut *cache.decimals.write().await;
-        *decimal = Array1::from_vec(vec![
-            10_f64.powf(18_f64),
-            10_f64.powf(6_f64),
-            10_f64.powf(12_f64),
-        ]);
+    let (decimals, _) = &*cache.decimals.read().await;
+    let col1 = 1
+        .as_u256_decimal_18()
+        .to_ray(decimals[0])
+        .to_scaled(cache.liquidity.read().await.0[0].index);
+    let col2 = 2
+        .as_u256_decimal_6()
+        .to_ray(decimals[1])
+        .to_scaled(cache.liquidity.read().await.0[1].index);
+    let col3 = 3
+        .as_u256_decimal_12()
+        .to_ray(decimals[2])
+        .to_scaled(cache.liquidity.read().await.0[2].index);
 
+    let bor4 = 4
+        .as_u256_decimal_18()
+        .to_ray(decimals[0])
+        .to_scaled(cache.variable_borrow.read().await.0[0].index);
+    let bor5 = 5
+        .as_u256_decimal_6()
+        .to_ray(decimals[1])
+        .to_scaled(cache.variable_borrow.read().await.0[1].index);
+    let bor6 = 6
+        .as_u256_decimal_12()
+        .to_ray(decimals[2])
+        .to_scaled(cache.variable_borrow.read().await.0[2].index);
+
+    {
         let collaterals = &*cache.collateral.read().await;
         let (col, _, _) = &mut *collaterals
             .get(0)
             .ok_or_else(|| eyre::eyre!("no collaterals"))?
             .write()
             .await;
-        *col = Array1::from_vec(vec![
-            1.as_u256_decimal_18(),
-            2.as_u256_decimal_6(),
-            3.as_u256_decimal_12(),
-        ]);
+        *col = Array1::from_vec(vec![col1, col2, col3]);
 
         let borrowed = &*cache.borrowed.read().await;
         let (bor, _, _) = &mut *borrowed
@@ -1864,11 +2153,7 @@ async fn test_listen_sync() -> eyre::Result<()> {
             .ok_or_else(|| eyre::eyre!("no borrowed"))?
             .write()
             .await;
-        *bor = Array1::from_vec(vec![
-            4.as_u256_decimal_18(),
-            5.as_u256_decimal_6(),
-            6.as_u256_decimal_12(),
-        ]);
+        *bor = Array1::from_vec(vec![bor4, bor5, bor6]);
     }
 
     let senders = listen_sync(cache.clone(), 1, 1).await?;
@@ -1883,14 +2168,20 @@ async fn test_listen_sync() -> eyre::Result<()> {
     let col_matrix = &*cache.collateral_matrix.read().await;
     assert_eq!(
         col_matrix,
-        Array2::from_shape_vec((1, 3), vec![1.0, 2.0, 3.0])?
+        Array2::from_shape_vec(
+            (1, 3),
+            vec![col1.as_f64_ray(), col2.as_f64_ray(), col3.as_f64_ray()]
+        )?
     );
     assert_eq!(col_matrix.nrows(), 1);
 
     let bor_matrix = &*cache.borrowed_matrix.read().await;
     assert_eq!(
         bor_matrix,
-        Array2::from_shape_vec((1, 3), vec![4.0, 5.0, 6.0])?
+        Array2::from_shape_vec(
+            (1, 3),
+            vec![bor4.as_f64_ray(), bor5.as_f64_ray(), bor6.as_f64_ray()]
+        )?
     );
     assert_eq!(bor_matrix.nrows(), 1);
 
@@ -1904,14 +2195,58 @@ async fn test_hf_calc() -> eyre::Result<()> {
         .map(|(cache, _)| Arc::new(cache))?;
     let user = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
 
-    {
-        let (decimal, _) = &mut *cache.decimals.write().await;
-        *decimal = Array1::from_vec(vec![
-            10_f64.powf(18_f64),
-            10_f64.powf(6_f64),
-            10_f64.powf(12_f64),
-        ]);
+    let (decimals, _) = &*cache.decimals.read().await;
+    let col1 = 1
+        .as_u256_decimal_18()
+        .to_ray(decimals[0])
+        .to_scaled(cache.liquidity.read().await.0[0].index);
+    let col2 = 2
+        .as_u256_decimal_6()
+        .to_ray(decimals[1])
+        .to_scaled(cache.liquidity.read().await.0[1].index);
+    let col3 = 3
+        .as_u256_decimal_12()
+        .to_ray(decimals[2])
+        .to_scaled(cache.liquidity.read().await.0[2].index);
+    let col4 = 4
+        .as_u256_decimal_18()
+        .to_ray(decimals[0])
+        .to_scaled(cache.liquidity.read().await.0[0].index);
+    let col5 = 5
+        .as_u256_decimal_6()
+        .to_ray(decimals[1])
+        .to_scaled(cache.liquidity.read().await.0[1].index);
+    let col6 = 6
+        .as_u256_decimal_12()
+        .to_ray(decimals[2])
+        .to_scaled(cache.liquidity.read().await.0[2].index);
 
+    let bor1 = 1
+        .as_u256_decimal_18()
+        .to_ray(decimals[0])
+        .to_scaled(cache.variable_borrow.read().await.0[0].index);
+    let bor2 = 2
+        .as_u256_decimal_6()
+        .to_ray(decimals[1])
+        .to_scaled(cache.variable_borrow.read().await.0[1].index);
+    let bor3 = 3
+        .as_u256_decimal_12()
+        .to_ray(decimals[2])
+        .to_scaled(cache.variable_borrow.read().await.0[2].index);
+    let bor4 = 4
+        .as_u256_decimal_18()
+        .to_ray(decimals[0])
+        .to_scaled(cache.variable_borrow.read().await.0[0].index);
+    let bor5 = 5
+        .as_u256_decimal_6()
+        .to_ray(decimals[1])
+        .to_scaled(cache.variable_borrow.read().await.0[1].index);
+    let bor6 = 6
+        .as_u256_decimal_12()
+        .to_ray(decimals[2])
+        .to_scaled(cache.variable_borrow.read().await.0[2].index);
+
+    {
         let (prices, _) = &mut *cache.prices.write().await;
         *prices = Array1::from_vec(vec![120_000.0, 4000.0, 200.0]);
 
@@ -1924,22 +2259,14 @@ async fn test_hf_calc() -> eyre::Result<()> {
             .ok_or_else(|| eyre::eyre!("no collaterals"))?
             .write()
             .await;
-        *col = Array1::from_vec(vec![
-            1.as_u256_decimal_18(),
-            2.as_u256_decimal_6(),
-            3.as_u256_decimal_12(),
-        ]);
+        *col = Array1::from_vec(vec![col1, col2, col3]);
 
         let (col, _, _) = &mut *collaterals
             .get(1)
             .ok_or_else(|| eyre::eyre!("no collaterals"))?
             .write()
             .await;
-        *col = Array1::from_vec(vec![
-            4.as_u256_decimal_18(),
-            5.as_u256_decimal_6(),
-            6.as_u256_decimal_12(),
-        ]);
+        *col = Array1::from_vec(vec![col4, col5, col6]);
 
         let borrowed = &*cache.borrowed.read().await;
         let (bor, _, _) = &mut *borrowed
@@ -1947,22 +2274,14 @@ async fn test_hf_calc() -> eyre::Result<()> {
             .ok_or_else(|| eyre::eyre!("no borrowed"))?
             .write()
             .await;
-        *bor = Array1::from_vec(vec![
-            4.as_u256_decimal_18(),
-            5.as_u256_decimal_6(),
-            6.as_u256_decimal_12(),
-        ]);
+        *bor = Array1::from_vec(vec![bor4, bor5, bor6]);
 
         let (bor, _, _) = &mut *borrowed
             .get(1)
             .ok_or_else(|| eyre::eyre!("no borrowed"))?
             .write()
             .await;
-        *bor = Array1::from_vec(vec![
-            1.as_u256_decimal_18(),
-            2.as_u256_decimal_6(),
-            3.as_u256_decimal_12(),
-        ]);
+        *bor = Array1::from_vec(vec![bor1, bor2, bor3]);
     }
 
     let senders = listen_hf_calc(cache.clone(), 1, 1).await?;
@@ -1978,40 +2297,38 @@ async fn test_hf_calc() -> eyre::Result<()> {
     }
 
     {
-        // let (collaterals, _, _) = &*cache.collateral.read().await;
         let col_matrix = &mut *cache.collateral_matrix.write().await;
         col_matrix.push_row(
             Array1::from_vec(vec![
-                1.as_u256_decimal_18().as_f64_decimal_18(),
-                2.as_u256_decimal_6().as_f64_decimal_6(),
-                3.as_u256_decimal_12().as_f64_decimal_12(),
+                col1.as_f64_ray(),
+                col2.as_f64_ray(),
+                col3.as_f64_ray(),
             ])
             .view(),
         )?;
         col_matrix.push_row(
             Array1::from_vec(vec![
-                4.as_u256_decimal_18().as_f64_decimal_18(),
-                5.as_u256_decimal_6().as_f64_decimal_6(),
-                6.as_u256_decimal_12().as_f64_decimal_12(),
+                col4.as_f64_ray(),
+                col5.as_f64_ray(),
+                col6.as_f64_ray(),
             ])
             .view(),
         )?;
 
-        // let (borroweds, _, _) = &*cache.borrowed.read().await;
         let bor_matrix = &mut *cache.borrowed_matrix.write().await;
         bor_matrix.push_row(
             Array1::from_vec(vec![
-                4.as_u256_decimal_18().as_f64_decimal_18(),
-                5.as_u256_decimal_6().as_f64_decimal_6(),
-                6.as_u256_decimal_12().as_f64_decimal_12(),
+                bor4.as_f64_ray(),
+                bor5.as_f64_ray(),
+                bor6.as_f64_ray(),
             ])
             .view(),
         )?;
         bor_matrix.push_row(
             Array1::from_vec(vec![
-                1.as_u256_decimal_18().as_f64_decimal_18(),
-                2.as_u256_decimal_6().as_f64_decimal_6(),
-                3.as_u256_decimal_12().as_f64_decimal_12(),
+                bor1.as_f64_ray(),
+                bor2.as_f64_ray(),
+                bor3.as_f64_ray(),
             ])
             .view(),
         )?;
@@ -2104,7 +2421,7 @@ async fn test_withdraw() -> eyre::Result<()> {
     };
 
     let (sync_tx, mut sync_rc) = channel::<SyncRequest>(1);
-    let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
+    let (hf_tx, _) = channel::<HFRequest>(1);
 
     let sync_handler = task::spawn(async move {
         let msg = sync_rc
@@ -2112,16 +2429,6 @@ async fn test_withdraw() -> eyre::Result<()> {
             .await
             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
         assert_eq!(SyncRequest::Both(SyncTarget::Row(0), rq_date), msg);
-
-        Ok::<_, eyre::Error>(())
-    });
-
-    let hf_handler = task::spawn(async move {
-        let msg = hf_rc
-            .recv()
-            .await
-            .ok_or_else(|| eyre::eyre!("hf channel closed"))?;
-        assert_eq!(HFRequest::User(user.clone(), rq_date), msg);
 
         Ok::<_, eyre::Error>(())
     });
@@ -2136,31 +2443,47 @@ async fn test_withdraw() -> eyre::Result<()> {
     )
     .await?;
     let _ = sync_handler.await?;
-    let _ = hf_handler.await?;
 
     assert_eq!(cache.users.len(), 1);
     assert_eq!(cache.users.contains_key(&user), true);
 
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
+    let (decimals, _) = &*cache.decimals.read().await;
 
     assert_eq!(
         collateral,
-        vec![U256::default(), 20.as_u256_decimal_6(), U256::default()]
+        vec![
+            U256::default(),
+            20.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.liquidity.read().await.0[1].index),
+            U256::default()
+        ]
     );
     assert_eq!(
         reserve,
         vec![
-            10.as_u256_decimal_18(),
+            10.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.liquidity.read().await.0[0].index),
             U256::default(),
             30.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.liquidity.read().await.0[2].index),
         ]
     );
     assert_eq!(
         borrowed,
         vec![
-            10.as_u256_decimal_18(),
-            20.as_u256_decimal_6(),
+            10.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+            20.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.variable_borrow.read().await.0[1].index),
             30.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.variable_borrow.read().await.0[2].index),
         ]
     );
 
@@ -2179,7 +2502,9 @@ async fn test_withdraw() -> eyre::Result<()> {
             .write()
             .await;
         *row = Array1::from_vec(vec![
-            100.as_u256_decimal_18(),
+            100.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.liquidity.read().await.0[0].index),
             U256::default(),
             U256::default(),
         ]);
@@ -2204,7 +2529,7 @@ async fn test_withdraw() -> eyre::Result<()> {
     };
 
     let (sync_tx, mut sync_rc) = channel::<SyncRequest>(1);
-    let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
+    let (hf_tx, _) = channel::<HFRequest>(1);
 
     let sync_handler = task::spawn(async move {
         let msg = sync_rc
@@ -2219,16 +2544,6 @@ async fn test_withdraw() -> eyre::Result<()> {
         Ok::<_, eyre::Error>(())
     });
 
-    let hf_handler = task::spawn(async move {
-        let msg = hf_rc
-            .recv()
-            .await
-            .ok_or_else(|| eyre::eyre!("hf channel closed"))?;
-        assert_eq!(HFRequest::User(user.clone(), rq_date), msg);
-
-        Ok::<_, eyre::Error>(())
-    });
-
     assert_eq!(cache.users.len(), 1);
 
     withdraw(
@@ -2239,7 +2554,6 @@ async fn test_withdraw() -> eyre::Result<()> {
     )
     .await?;
     let _ = sync_handler.await?;
-    let _ = hf_handler.await?;
 
     assert_eq!(cache.users.len(), 1);
 
@@ -2247,7 +2561,13 @@ async fn test_withdraw() -> eyre::Result<()> {
 
     assert_eq!(
         collateral,
-        vec![80.as_u256_decimal_18(), U256::default(), U256::default()]
+        vec![
+            80.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.liquidity.read().await.0[0].index),
+            U256::default(),
+            U256::default()
+        ]
     );
     assert_eq!(reserve, vec![U256::default(); 3]);
     assert_eq!(borrowed, vec![U256::default(); 3]);
@@ -2268,7 +2588,9 @@ async fn test_withdraw() -> eyre::Result<()> {
             .await;
         *res = Array1::from_vec(vec![
             U256::default(),
-            100.as_u256_decimal_6(),
+            100.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.liquidity.read().await.0[1].index),
             U256::default(),
         ]);
     }
@@ -2311,7 +2633,13 @@ async fn test_withdraw() -> eyre::Result<()> {
     assert_eq!(collateral, vec![U256::default(); 3]);
     assert_eq!(
         reserve,
-        vec![U256::default(), 70.as_u256_decimal_6(), U256::default()]
+        vec![
+            U256::default(),
+            70.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.liquidity.read().await.0[1].index),
+            U256::default()
+        ]
     );
     assert_eq!(borrowed, vec![U256::default(); 3]);
 
@@ -2432,7 +2760,7 @@ async fn test_withdraw() -> eyre::Result<()> {
     }
 
     let (sync_tx, mut sync_rc) = channel::<SyncRequest>(1);
-    let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
+    let (hf_tx, _) = channel::<HFRequest>(1);
 
     let sync_handler = task::spawn(async move {
         let msg = sync_rc
@@ -2440,16 +2768,6 @@ async fn test_withdraw() -> eyre::Result<()> {
             .await
             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
         assert_eq!(SyncRequest::Both(SyncTarget::Row(0), rq_date), msg);
-
-        Ok::<_, eyre::Error>(())
-    });
-
-    let hf_handler = task::spawn(async move {
-        let msg = hf_rc
-            .recv()
-            .await
-            .ok_or_else(|| eyre::eyre!("hf channel closed"))?;
-        assert_eq!(HFRequest::User(user.clone(), rq_date), msg);
 
         Ok::<_, eyre::Error>(())
     });
@@ -2464,7 +2782,6 @@ async fn test_withdraw() -> eyre::Result<()> {
     )
     .await?;
     let _ = sync_handler.await?;
-    let _ = hf_handler.await?;
 
     assert_eq!(cache.users.len(), 10);
 
@@ -2472,22 +2789,38 @@ async fn test_withdraw() -> eyre::Result<()> {
 
     assert_eq!(
         collateral,
-        vec![U256::default(), 20.as_u256_decimal_6(), U256::default()]
+        vec![
+            U256::default(),
+            20.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.liquidity.read().await.0[1].index),
+            U256::default()
+        ]
     );
     assert_eq!(
         reserve,
         vec![
-            10.as_u256_decimal_18(),
+            10.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.liquidity.read().await.0[0].index),
             U256::default(),
             30.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.liquidity.read().await.0[2].index),
         ]
     );
     assert_eq!(
         borrowed,
         vec![
-            10.as_u256_decimal_18(),
-            20.as_u256_decimal_6(),
+            10.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+            20.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.variable_borrow.read().await.0[1].index),
             30.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.variable_borrow.read().await.0[2].index),
         ]
     );
 
@@ -2521,7 +2854,7 @@ async fn test_borrow() -> eyre::Result<()> {
     };
 
     let (sync_tx, mut sync_rc) = channel::<SyncRequest>(1);
-    let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
+    let (hf_tx, _) = channel::<HFRequest>(1);
 
     let sync_handler = task::spawn(async move {
         let msg = sync_rc
@@ -2529,16 +2862,6 @@ async fn test_borrow() -> eyre::Result<()> {
             .await
             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
         assert_eq!(SyncRequest::Both(SyncTarget::Row(0), rq_date), msg);
-
-        Ok::<_, eyre::Error>(())
-    });
-
-    let hf_handler = task::spawn(async move {
-        let msg = hf_rc
-            .recv()
-            .await
-            .ok_or_else(|| eyre::eyre!("hf channel closed"))?;
-        assert_eq!(HFRequest::User(user.clone(), rq_date), msg);
 
         Ok::<_, eyre::Error>(())
     });
@@ -2553,31 +2876,47 @@ async fn test_borrow() -> eyre::Result<()> {
     )
     .await?;
     let _ = sync_handler.await?;
-    let _ = hf_handler.await?;
 
     assert_eq!(cache.users.len(), 1);
     assert_eq!(cache.users.contains_key(&user), true);
 
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
+    let (decimals, _) = &*cache.decimals.read().await;
 
     assert_eq!(
         collateral,
-        vec![U256::default(), 20.as_u256_decimal_6(), U256::default()]
+        vec![
+            U256::default(),
+            20.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.liquidity.read().await.0[1].index),
+            U256::default()
+        ]
     );
     assert_eq!(
         reserve,
         vec![
-            10.as_u256_decimal_18(),
+            10.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.liquidity.read().await.0[0].index),
             U256::default(),
             30.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.liquidity.read().await.0[2].index),
         ]
     );
     assert_eq!(
         borrowed,
         vec![
-            10.as_u256_decimal_18(),
-            20.as_u256_decimal_6(),
+            10.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+            20.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.variable_borrow.read().await.0[1].index),
             30.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.variable_borrow.read().await.0[2].index),
         ]
     );
 
@@ -2587,6 +2926,7 @@ async fn test_borrow() -> eyre::Result<()> {
     let (cache, tokens) = generate_cache_and_tokens(1)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
+    let (decimals, _) = &*cache.decimals.read().await;
 
     {
         let borrowed = &*cache.borrowed.read().await;
@@ -2596,7 +2936,9 @@ async fn test_borrow() -> eyre::Result<()> {
             .write()
             .await;
         *bor = Array1::from_vec(vec![
-            100.as_u256_decimal_18(),
+            100.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.variable_borrow.read().await.0[0].index),
             U256::default(),
             U256::default(),
         ]);
@@ -2624,7 +2966,7 @@ async fn test_borrow() -> eyre::Result<()> {
     };
 
     let (sync_tx, mut sync_rc) = channel::<SyncRequest>(1);
-    let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
+    let (hf_tx, _) = channel::<HFRequest>(1);
 
     let sync_handler = task::spawn(async move {
         let msg = sync_rc
@@ -2632,16 +2974,6 @@ async fn test_borrow() -> eyre::Result<()> {
             .await
             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
         assert_eq!(SyncRequest::Borrowed(SyncTarget::Cell(0, 0), rq_date), msg);
-
-        Ok::<_, eyre::Error>(())
-    });
-
-    let hf_handler = task::spawn(async move {
-        let msg = hf_rc
-            .recv()
-            .await
-            .ok_or_else(|| eyre::eyre!("hf channel closed"))?;
-        assert_eq!(HFRequest::User(user.clone(), rq_date), msg);
 
         Ok::<_, eyre::Error>(())
     });
@@ -2656,7 +2988,6 @@ async fn test_borrow() -> eyre::Result<()> {
     )
     .await?;
     let _ = sync_handler.await?;
-    let _ = hf_handler.await?;
 
     assert_eq!(cache.users.len(), 1);
 
@@ -2666,7 +2997,13 @@ async fn test_borrow() -> eyre::Result<()> {
     assert_eq!(reserve, vec![U256::default(); 3]);
     assert_eq!(
         borrowed,
-        vec![120.as_u256_decimal_18(), U256::default(), U256::default()]
+        vec![
+            120.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+            U256::default(),
+            U256::default()
+        ]
     );
 
     // 3 case - borrowed skip event
@@ -2689,7 +3026,10 @@ async fn test_borrow() -> eyre::Result<()> {
         reserve: token.clone(),
         user: user.clone(),
         onBehalfOf: user,
-        amount: 30.as_u256_decimal_18(),
+        amount: 30
+            .as_u256_decimal_18()
+            .to_ray(decimals[0])
+            .to_scaled(cache.variable_borrow.read().await.0[0].index),
         interestRateMode: 2,
         borrowRate: U256::from(5_000_000_000_000_000_000_000_0000u128),
         referralCode: 0,
@@ -2730,7 +3070,10 @@ async fn test_borrow() -> eyre::Result<()> {
         reserve: token.clone(),
         user: user.clone(),
         onBehalfOf: user,
-        amount: 40.as_u256_decimal_18(),
+        amount: 40
+            .as_u256_decimal_18()
+            .to_ray(decimals[0])
+            .to_scaled(cache.variable_borrow.read().await.0[0].index),
         interestRateMode: 2,
         borrowRate: U256::from(5_000_000_000_000_000_000_000_0000u128),
         referralCode: 0,
@@ -2747,7 +3090,7 @@ async fn test_borrow() -> eyre::Result<()> {
     }
 
     let (sync_tx, mut sync_rc) = channel::<SyncRequest>(1);
-    let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
+    let (hf_tx, _) = channel::<HFRequest>(1);
 
     let sync_handler = task::spawn(async move {
         let msg = sync_rc
@@ -2755,16 +3098,6 @@ async fn test_borrow() -> eyre::Result<()> {
             .await
             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
         assert_eq!(SyncRequest::Both(SyncTarget::Row(0), rq_date), msg);
-
-        Ok::<_, eyre::Error>(())
-    });
-
-    let hf_handler = task::spawn(async move {
-        let msg = hf_rc
-            .recv()
-            .await
-            .ok_or_else(|| eyre::eyre!("hf channel closed"))?;
-        assert_eq!(HFRequest::User(user.clone(), rq_date), msg);
 
         Ok::<_, eyre::Error>(())
     });
@@ -2779,7 +3112,6 @@ async fn test_borrow() -> eyre::Result<()> {
     )
     .await?;
     let _ = sync_handler.await?;
-    let _ = hf_handler.await?;
 
     assert_eq!(cache.users.len(), 10);
 
@@ -2787,22 +3119,38 @@ async fn test_borrow() -> eyre::Result<()> {
 
     assert_eq!(
         collateral,
-        vec![U256::default(), 20.as_u256_decimal_6(), U256::default()]
+        vec![
+            U256::default(),
+            20.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.liquidity.read().await.0[1].index),
+            U256::default()
+        ]
     );
     assert_eq!(
         reserve,
         vec![
-            10.as_u256_decimal_18(),
+            10.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.liquidity.read().await.0[0].index),
             U256::default(),
             30.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.liquidity.read().await.0[2].index)
         ]
     );
     assert_eq!(
         borrowed,
         vec![
-            10.as_u256_decimal_18(),
-            20.as_u256_decimal_6(),
+            10.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+            20.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.variable_borrow.read().await.0[1].index),
             30.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.variable_borrow.read().await.0[2].index)
         ]
     );
 
@@ -2834,7 +3182,7 @@ async fn test_repay() -> eyre::Result<()> {
     };
 
     let (sync_tx, mut sync_rc) = channel::<SyncRequest>(1);
-    let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
+    let (hf_tx, _) = channel::<HFRequest>(1);
 
     let sync_handler = task::spawn(async move {
         let msg = sync_rc
@@ -2842,16 +3190,6 @@ async fn test_repay() -> eyre::Result<()> {
             .await
             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
         assert_eq!(SyncRequest::Both(SyncTarget::Row(0), rq_date), msg);
-
-        Ok::<_, eyre::Error>(())
-    });
-
-    let hf_handler = task::spawn(async move {
-        let msg = hf_rc
-            .recv()
-            .await
-            .ok_or_else(|| eyre::eyre!("hf channel closed"))?;
-        assert_eq!(HFRequest::User(user.clone(), rq_date), msg);
 
         Ok::<_, eyre::Error>(())
     });
@@ -2866,31 +3204,47 @@ async fn test_repay() -> eyre::Result<()> {
     )
     .await?;
     let _ = sync_handler.await?;
-    let _ = hf_handler.await?;
 
     assert_eq!(cache.users.len(), 1);
     assert_eq!(cache.users.contains_key(&user), true);
 
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
+    let (decimals, _) = &*cache.decimals.read().await;
 
     assert_eq!(
         collateral,
-        vec![U256::default(), 20.as_u256_decimal_6(), U256::default()]
+        vec![
+            U256::default(),
+            20.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.liquidity.read().await.0[1].index),
+            U256::default()
+        ]
     );
     assert_eq!(
         reserve,
         vec![
-            10.as_u256_decimal_18(),
+            10.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.liquidity.read().await.0[0].index),
             U256::default(),
             30.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.liquidity.read().await.0[2].index),
         ]
     );
     assert_eq!(
         borrowed,
         vec![
-            10.as_u256_decimal_18(),
-            20.as_u256_decimal_6(),
+            10.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+            20.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.variable_borrow.read().await.0[1].index),
             30.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.variable_borrow.read().await.0[2].index),
         ]
     );
 
@@ -2909,7 +3263,9 @@ async fn test_repay() -> eyre::Result<()> {
             .write()
             .await;
         *bor = Array1::from_vec(vec![
-            100.as_u256_decimal_18(),
+            100.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.variable_borrow.read().await.0[0].index),
             U256::default(),
             U256::default(),
         ]);
@@ -2935,7 +3291,7 @@ async fn test_repay() -> eyre::Result<()> {
     };
 
     let (sync_tx, mut sync_rc) = channel::<SyncRequest>(1);
-    let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
+    let (hf_tx, _) = channel::<HFRequest>(1);
 
     let sync_handler = task::spawn(async move {
         let msg = sync_rc
@@ -2943,16 +3299,6 @@ async fn test_repay() -> eyre::Result<()> {
             .await
             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
         assert_eq!(SyncRequest::Borrowed(SyncTarget::Cell(0, 0), rq_date), msg);
-
-        Ok::<_, eyre::Error>(())
-    });
-
-    let hf_handler = task::spawn(async move {
-        let msg = hf_rc
-            .recv()
-            .await
-            .ok_or_else(|| eyre::eyre!("hf channel closed"))?;
-        assert_eq!(HFRequest::User(user.clone(), rq_date), msg);
 
         Ok::<_, eyre::Error>(())
     });
@@ -2967,7 +3313,6 @@ async fn test_repay() -> eyre::Result<()> {
     )
     .await?;
     let _ = sync_handler.await?;
-    let _ = hf_handler.await?;
 
     assert_eq!(cache.users.len(), 1);
 
@@ -2977,7 +3322,13 @@ async fn test_repay() -> eyre::Result<()> {
     assert_eq!(reserve, vec![U256::default(); 3]);
     assert_eq!(
         borrowed,
-        vec![90.as_u256_decimal_18(), U256::default(), U256::default()]
+        vec![
+            90.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+            U256::default(),
+            U256::default()
+        ]
     );
 
     // 3 case - borrowed skip event
@@ -3054,7 +3405,7 @@ async fn test_repay() -> eyre::Result<()> {
     }
 
     let (sync_tx, mut sync_rc) = channel::<SyncRequest>(1);
-    let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
+    let (hf_tx, _) = channel::<HFRequest>(1);
 
     let sync_handler = task::spawn(async move {
         let msg = sync_rc
@@ -3062,16 +3413,6 @@ async fn test_repay() -> eyre::Result<()> {
             .await
             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
         assert_eq!(SyncRequest::Both(SyncTarget::Row(0), rq_date), msg);
-
-        Ok::<_, eyre::Error>(())
-    });
-
-    let hf_handler = task::spawn(async move {
-        let msg = hf_rc
-            .recv()
-            .await
-            .ok_or_else(|| eyre::eyre!("hf channel closed"))?;
-        assert_eq!(HFRequest::User(user.clone(), rq_date), msg);
 
         Ok::<_, eyre::Error>(())
     });
@@ -3086,7 +3427,6 @@ async fn test_repay() -> eyre::Result<()> {
     )
     .await?;
     let _ = sync_handler.await?;
-    let _ = hf_handler.await?;
 
     assert_eq!(cache.users.len(), 10);
 
@@ -3094,22 +3434,38 @@ async fn test_repay() -> eyre::Result<()> {
 
     assert_eq!(
         collateral,
-        vec![U256::default(), 20.as_u256_decimal_6(), U256::default()]
+        vec![
+            U256::default(),
+            20.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.liquidity.read().await.0[1].index),
+            U256::default()
+        ]
     );
     assert_eq!(
         reserve,
         vec![
-            10.as_u256_decimal_18(),
+            10.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.liquidity.read().await.0[0].index),
             U256::default(),
             30.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.liquidity.read().await.0[2].index),
         ]
     );
     assert_eq!(
         borrowed,
         vec![
-            10.as_u256_decimal_18(),
-            20.as_u256_decimal_6(),
+            10.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+            20.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.variable_borrow.read().await.0[1].index),
             30.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.variable_borrow.read().await.0[2].index),
         ]
     );
 
@@ -3138,7 +3494,7 @@ async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
     };
 
     let (sync_tx, mut sync_rc) = channel::<SyncRequest>(1);
-    let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
+    let (hf_tx, _) = channel::<HFRequest>(1);
 
     let sync_handler = task::spawn(async move {
         let msg = sync_rc
@@ -3146,16 +3502,6 @@ async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
             .await
             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
         assert_eq!(SyncRequest::Both(SyncTarget::Row(0), rq_date), msg);
-
-        Ok::<_, eyre::Error>(())
-    });
-
-    let hf_handler = task::spawn(async move {
-        let msg = hf_rc
-            .recv()
-            .await
-            .ok_or_else(|| eyre::eyre!("hf channel closed"))?;
-        assert_eq!(HFRequest::User(user.clone(), rq_date), msg);
 
         Ok::<_, eyre::Error>(())
     });
@@ -3170,31 +3516,47 @@ async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
     )
     .await?;
     let _ = sync_handler.await?;
-    let _ = hf_handler.await?;
 
     assert_eq!(cache.users.len(), 1);
     assert_eq!(cache.users.contains_key(&user), true);
 
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
+    let (decimals, _) = &*cache.decimals.read().await;
 
     assert_eq!(
         collateral,
-        vec![U256::default(), 20.as_u256_decimal_6(), U256::default()]
+        vec![
+            U256::default(),
+            20.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.liquidity.read().await.0[1].index),
+            U256::default()
+        ]
     );
     assert_eq!(
         reserve,
         vec![
-            10.as_u256_decimal_18(),
+            10.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.liquidity.read().await.0[0].index),
             U256::default(),
             30.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.liquidity.read().await.0[2].index),
         ]
     );
     assert_eq!(
         borrowed,
         vec![
-            10.as_u256_decimal_18(),
-            20.as_u256_decimal_6(),
+            10.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+            20.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.variable_borrow.read().await.0[1].index),
             30.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.variable_borrow.read().await.0[2].index),
         ]
     );
 
@@ -3215,7 +3577,9 @@ async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
         *res = Array1::from_vec(vec![
             U256::default(),
             U256::default(),
-            30.as_u256_decimal_12(),
+            30.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.liquidity.read().await.0[2].index),
         ]);
     }
 
@@ -3236,7 +3600,7 @@ async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
     };
 
     let (sync_tx, mut sync_rc) = channel::<SyncRequest>(1);
-    let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
+    let (hf_tx, _) = channel::<HFRequest>(1);
 
     let sync_handler = task::spawn(async move {
         let msg = sync_rc
@@ -3251,16 +3615,6 @@ async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
         Ok::<_, eyre::Error>(())
     });
 
-    let hf_handler = task::spawn(async move {
-        let msg = hf_rc
-            .recv()
-            .await
-            .ok_or_else(|| eyre::eyre!("hf channel closed"))?;
-        assert_eq!(HFRequest::User(user.clone(), rq_date), msg);
-
-        Ok::<_, eyre::Error>(())
-    });
-
     assert_eq!(cache.users.len(), 1);
 
     reserve_used_as_collateral_enabled(
@@ -3271,7 +3625,6 @@ async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
     )
     .await?;
     let _ = sync_handler.await?;
-    let _ = hf_handler.await?;
 
     assert_eq!(cache.users.len(), 1);
 
@@ -3279,7 +3632,13 @@ async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
 
     assert_eq!(
         collateral,
-        vec![U256::default(), U256::default(), 30.as_u256_decimal_12()]
+        vec![
+            U256::default(),
+            U256::default(),
+            30.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.liquidity.read().await.0[2].index)
+        ]
     );
     assert_eq!(reserve, vec![U256::default(); 3]);
     assert_eq!(borrowed, vec![U256::default(); 3]);
@@ -3352,7 +3711,7 @@ async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
     }
 
     let (sync_tx, mut sync_rc) = channel::<SyncRequest>(1);
-    let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
+    let (hf_tx, _) = channel::<HFRequest>(1);
 
     let sync_handler = task::spawn(async move {
         let msg = sync_rc
@@ -3360,16 +3719,6 @@ async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
             .await
             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
         assert_eq!(SyncRequest::Both(SyncTarget::Row(0), rq_date), msg);
-
-        Ok::<_, eyre::Error>(())
-    });
-
-    let hf_handler = task::spawn(async move {
-        let msg = hf_rc
-            .recv()
-            .await
-            .ok_or_else(|| eyre::eyre!("hf channel closed"))?;
-        assert_eq!(HFRequest::User(user.clone(), rq_date), msg);
 
         Ok::<_, eyre::Error>(())
     });
@@ -3384,7 +3733,6 @@ async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
     )
     .await?;
     let _ = sync_handler.await?;
-    let _ = hf_handler.await?;
 
     assert_eq!(cache.users.len(), 10);
 
@@ -3392,22 +3740,38 @@ async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
 
     assert_eq!(
         collateral,
-        vec![U256::default(), 20.as_u256_decimal_6(), U256::default()]
+        vec![
+            U256::default(),
+            20.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.liquidity.read().await.0[1].index),
+            U256::default()
+        ]
     );
     assert_eq!(
         reserve,
         vec![
-            10.as_u256_decimal_18(),
+            10.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.liquidity.read().await.0[0].index),
             U256::default(),
             30.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.liquidity.read().await.0[2].index),
         ]
     );
     assert_eq!(
         borrowed,
         vec![
-            10.as_u256_decimal_18(),
-            20.as_u256_decimal_6(),
+            10.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+            20.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.variable_borrow.read().await.0[1].index),
             30.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.variable_borrow.read().await.0[2].index),
         ]
     );
 
@@ -3436,7 +3800,7 @@ async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
     };
 
     let (sync_tx, mut sync_rc) = channel::<SyncRequest>(1);
-    let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
+    let (hf_tx, _) = channel::<HFRequest>(1);
 
     let sync_handler = task::spawn(async move {
         let msg = sync_rc
@@ -3444,16 +3808,6 @@ async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
             .await
             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
         assert_eq!(SyncRequest::Both(SyncTarget::Row(0), rq_date), msg);
-
-        Ok::<_, eyre::Error>(())
-    });
-
-    let hf_handler = task::spawn(async move {
-        let msg = hf_rc
-            .recv()
-            .await
-            .ok_or_else(|| eyre::eyre!("hf channel closed"))?;
-        assert_eq!(HFRequest::User(user.clone(), rq_date), msg);
 
         Ok::<_, eyre::Error>(())
     });
@@ -3468,31 +3822,47 @@ async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
     )
     .await?;
     let _ = sync_handler.await?;
-    let _ = hf_handler.await?;
 
     assert_eq!(cache.users.len(), 1);
     assert_eq!(cache.users.contains_key(&user), true);
 
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
+    let (decimals, _) = &*cache.decimals.read().await;
 
     assert_eq!(
         collateral,
-        vec![U256::default(), 20.as_u256_decimal_6(), U256::default()]
+        vec![
+            U256::default(),
+            20.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.liquidity.read().await.0[1].index),
+            U256::default()
+        ]
     );
     assert_eq!(
         reserve,
         vec![
-            10.as_u256_decimal_18(),
+            10.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.liquidity.read().await.0[0].index),
             U256::default(),
             30.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.liquidity.read().await.0[2].index),
         ]
     );
     assert_eq!(
         borrowed,
         vec![
-            10.as_u256_decimal_18(),
-            20.as_u256_decimal_6(),
+            10.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+            20.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.variable_borrow.read().await.0[1].index),
             30.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.variable_borrow.read().await.0[2].index),
         ]
     );
 
@@ -3513,7 +3883,9 @@ async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
         *col = Array1::from_vec(vec![
             U256::default(),
             U256::default(),
-            30.as_u256_decimal_12(),
+            30.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.liquidity.read().await.0[2].index),
         ]);
     }
 
@@ -3534,7 +3906,7 @@ async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
     };
 
     let (sync_tx, mut sync_rc) = channel::<SyncRequest>(1);
-    let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
+    let (hf_tx, _) = channel::<HFRequest>(1);
 
     let sync_handler = task::spawn(async move {
         let msg = sync_rc
@@ -3549,16 +3921,6 @@ async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
         Ok::<_, eyre::Error>(())
     });
 
-    let hf_handler = task::spawn(async move {
-        let msg = hf_rc
-            .recv()
-            .await
-            .ok_or_else(|| eyre::eyre!("hf channel closed"))?;
-        assert_eq!(HFRequest::User(user.clone(), rq_date), msg);
-
-        Ok::<_, eyre::Error>(())
-    });
-
     assert_eq!(cache.users.len(), 1);
 
     reserve_used_as_collateral_disabled(
@@ -3569,7 +3931,6 @@ async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
     )
     .await?;
     let _ = sync_handler.await?;
-    let _ = hf_handler.await?;
 
     assert_eq!(cache.users.len(), 1);
 
@@ -3577,7 +3938,13 @@ async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
 
     assert_eq!(
         reserve,
-        vec![U256::default(), U256::default(), 30.as_u256_decimal_12()]
+        vec![
+            U256::default(),
+            U256::default(),
+            30.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.liquidity.read().await.0[2].index)
+        ]
     );
     assert_eq!(collateral, vec![U256::default(); 3]);
     assert_eq!(borrowed, vec![U256::default(); 3]);
@@ -3650,7 +4017,7 @@ async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
     }
 
     let (sync_tx, mut sync_rc) = channel::<SyncRequest>(1);
-    let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
+    let (hf_tx, _) = channel::<HFRequest>(1);
 
     let sync_handler = task::spawn(async move {
         let msg = sync_rc
@@ -3658,16 +4025,6 @@ async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
             .await
             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
         assert_eq!(SyncRequest::Both(SyncTarget::Row(0), rq_date), msg);
-
-        Ok::<_, eyre::Error>(())
-    });
-
-    let hf_handler = task::spawn(async move {
-        let msg = hf_rc
-            .recv()
-            .await
-            .ok_or_else(|| eyre::eyre!("hf channel closed"))?;
-        assert_eq!(HFRequest::User(user.clone(), rq_date), msg);
 
         Ok::<_, eyre::Error>(())
     });
@@ -3682,7 +4039,6 @@ async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
     )
     .await?;
     let _ = sync_handler.await?;
-    let _ = hf_handler.await?;
 
     assert_eq!(cache.users.len(), 10);
 
@@ -3690,22 +4046,38 @@ async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
 
     assert_eq!(
         collateral,
-        vec![U256::default(), 20.as_u256_decimal_6(), U256::default()]
+        vec![
+            U256::default(),
+            20.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.liquidity.read().await.0[1].index),
+            U256::default()
+        ]
     );
     assert_eq!(
         reserve,
         vec![
-            10.as_u256_decimal_18(),
+            10.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.liquidity.read().await.0[0].index),
             U256::default(),
             30.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.liquidity.read().await.0[2].index),
         ]
     );
     assert_eq!(
         borrowed,
         vec![
-            10.as_u256_decimal_18(),
-            20.as_u256_decimal_6(),
+            10.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+            20.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.variable_borrow.read().await.0[1].index),
             30.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.variable_borrow.read().await.0[2].index),
         ]
     );
 
@@ -3738,7 +4110,7 @@ async fn test_liquidation_call() -> eyre::Result<()> {
     };
 
     let (sync_tx, mut sync_rc) = channel::<SyncRequest>(1);
-    let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
+    let (hf_tx, _) = channel::<HFRequest>(1);
 
     let sync_handler = task::spawn(async move {
         let msg = sync_rc
@@ -3746,16 +4118,6 @@ async fn test_liquidation_call() -> eyre::Result<()> {
             .await
             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
         assert_eq!(SyncRequest::Both(SyncTarget::Row(0), rq_date), msg);
-
-        Ok::<_, eyre::Error>(())
-    });
-
-    let hf_handler = task::spawn(async move {
-        let msg = hf_rc
-            .recv()
-            .await
-            .ok_or_else(|| eyre::eyre!("hf channel closed"))?;
-        assert_eq!(HFRequest::User(user.clone(), rq_date), msg);
 
         Ok::<_, eyre::Error>(())
     });
@@ -3770,31 +4132,47 @@ async fn test_liquidation_call() -> eyre::Result<()> {
     )
     .await?;
     let _ = sync_handler.await?;
-    let _ = hf_handler.await?;
 
     assert_eq!(cache.users.len(), 1);
     assert_eq!(cache.users.contains_key(&user), true);
 
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
+    let (decimals, _) = &*cache.decimals.read().await;
 
     assert_eq!(
         collateral,
-        vec![U256::default(), 20.as_u256_decimal_6(), U256::default()]
+        vec![
+            U256::default(),
+            20.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.liquidity.read().await.0[1].index),
+            U256::default()
+        ]
     );
     assert_eq!(
         reserve,
         vec![
-            10.as_u256_decimal_18(),
+            10.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.liquidity.read().await.0[0].index),
             U256::default(),
             30.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.liquidity.read().await.0[2].index),
         ]
     );
     assert_eq!(
         borrowed,
         vec![
-            10.as_u256_decimal_18(),
-            20.as_u256_decimal_6(),
+            10.as_u256_decimal_18()
+                .to_ray(decimals[0])
+                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+            20.as_u256_decimal_6()
+                .to_ray(decimals[1])
+                .to_scaled(cache.variable_borrow.read().await.0[1].index),
             30.as_u256_decimal_12()
+                .to_ray(decimals[2])
+                .to_scaled(cache.variable_borrow.read().await.0[2].index),
         ]
     );
 
@@ -3804,6 +4182,7 @@ async fn test_liquidation_call() -> eyre::Result<()> {
     let (cache, tokens) = generate_cache_and_tokens(1)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
+    let (decimal, _) = &*cache.decimals.read().await;
 
     {
         let collateral = &*cache.collateral.read().await;
@@ -3813,7 +4192,9 @@ async fn test_liquidation_call() -> eyre::Result<()> {
             .write()
             .await;
         *col = Array1::from_vec(vec![
-            30.as_u256_decimal_18(),
+            30.as_u256_decimal_18()
+                .to_ray(decimal[0])
+                .to_scaled(cache.liquidity.read().await.0[0].index),
             U256::default(),
             U256::default(),
         ]);
@@ -3826,7 +4207,10 @@ async fn test_liquidation_call() -> eyre::Result<()> {
             .await;
         *bor = Array1::from_vec(vec![
             U256::default(),
-            100_000.as_u256_decimal_6(),
+            100_000
+                .as_u256_decimal_6()
+                .to_ray(decimal[1])
+                .to_scaled(cache.variable_borrow.read().await.0[1].index),
             U256::default(),
         ]);
     }
@@ -3855,7 +4239,7 @@ async fn test_liquidation_call() -> eyre::Result<()> {
     };
 
     let (sync_tx, mut sync_rc) = channel::<SyncRequest>(1);
-    let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
+    let (hf_tx, _) = channel::<HFRequest>(1);
 
     let sync_handler = task::spawn(async move {
         let msg = sync_rc
@@ -3876,16 +4260,6 @@ async fn test_liquidation_call() -> eyre::Result<()> {
         Ok::<_, eyre::Error>(())
     });
 
-    let hf_handler = task::spawn(async move {
-        let msg = hf_rc
-            .recv()
-            .await
-            .ok_or_else(|| eyre::eyre!("hf channel closed"))?;
-        assert_eq!(HFRequest::User(user.clone(), rq_date), msg);
-
-        Ok::<_, eyre::Error>(())
-    });
-
     assert_eq!(cache.users.len(), 1);
 
     liquidation_call(
@@ -3896,7 +4270,6 @@ async fn test_liquidation_call() -> eyre::Result<()> {
     )
     .await?;
     let _ = sync_handler.await?;
-    let _ = hf_handler.await?;
 
     assert_eq!(cache.users.len(), 1);
 
@@ -3908,11 +4281,24 @@ async fn test_liquidation_call() -> eyre::Result<()> {
     );
     assert_eq!(
         collateral,
-        vec![20.as_u256_decimal_18(), U256::default(), U256::default()]
+        vec![
+            20.as_u256_decimal_18()
+                .to_ray(decimal[0])
+                .to_scaled(cache.liquidity.read().await.0[0].index),
+            U256::default(),
+            U256::default()
+        ]
     );
     assert_eq!(
         borrowed,
-        vec![U256::default(), 50_000.as_u256_decimal_6(), U256::default()]
+        vec![
+            U256::default(),
+            50_000
+                .as_u256_decimal_6()
+                .to_ray(decimal[1])
+                .to_scaled(cache.variable_borrow.read().await.0[1].index),
+            U256::default()
+        ]
     );
 
     // 3 case - liquidation_call skip event
@@ -3997,7 +4383,7 @@ async fn test_liquidation_call() -> eyre::Result<()> {
     }
 
     let (sync_tx, mut sync_rc) = channel::<SyncRequest>(1);
-    let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
+    let (hf_tx, _) = channel::<HFRequest>(1);
 
     let sync_handler = task::spawn(async move {
         let msg = sync_rc
@@ -4005,16 +4391,6 @@ async fn test_liquidation_call() -> eyre::Result<()> {
             .await
             .ok_or_else(|| eyre::eyre!("sync channel closed"))?;
         assert_eq!(SyncRequest::Both(SyncTarget::Row(0), rq_date), msg);
-
-        Ok::<_, eyre::Error>(())
-    });
-
-    let hf_handler = task::spawn(async move {
-        let msg = hf_rc
-            .recv()
-            .await
-            .ok_or_else(|| eyre::eyre!("hf channel closed"))?;
-        assert_eq!(HFRequest::User(user.clone(), rq_date), msg);
 
         Ok::<_, eyre::Error>(())
     });
@@ -4029,7 +4405,6 @@ async fn test_liquidation_call() -> eyre::Result<()> {
     )
     .await?;
     let _ = sync_handler.await?;
-    let _ = hf_handler.await?;
 
     assert_eq!(cache.users.len(), 10);
 
@@ -4037,22 +4412,38 @@ async fn test_liquidation_call() -> eyre::Result<()> {
 
     assert_eq!(
         collateral,
-        vec![U256::default(), 20.as_u256_decimal_6(), U256::default()]
+        vec![
+            U256::default(),
+            20.as_u256_decimal_6()
+                .to_ray(decimal[1])
+                .to_scaled(cache.liquidity.read().await.0[1].index),
+            U256::default()
+        ]
     );
     assert_eq!(
         reserve,
         vec![
-            10.as_u256_decimal_18(),
+            10.as_u256_decimal_18()
+                .to_ray(decimal[0])
+                .to_scaled(cache.liquidity.read().await.0[0].index),
             U256::default(),
             30.as_u256_decimal_12()
+                .to_ray(decimal[2])
+                .to_scaled(cache.liquidity.read().await.0[2].index),
         ]
     );
     assert_eq!(
         borrowed,
         vec![
-            10.as_u256_decimal_18(),
-            20.as_u256_decimal_6(),
+            10.as_u256_decimal_18()
+                .to_ray(decimal[0])
+                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+            20.as_u256_decimal_6()
+                .to_ray(decimal[1])
+                .to_scaled(cache.variable_borrow.read().await.0[1].index),
             30.as_u256_decimal_12()
+                .to_ray(decimal[2])
+                .to_scaled(cache.variable_borrow.read().await.0[2].index),
         ]
     );
 
@@ -4085,29 +4476,249 @@ async fn test_u256_to_f64() -> eyre::Result<()> {
 }
 
 #[tokio::test]
+async fn test_reserve_data_updated() -> eyre::Result<()> {
+    let (cache, tokens) = generate_cache_and_tokens(1)
+        .await
+        .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
+    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+
+    let token = Address::from_str("0x1Ac54C113cefD1792CbFcF41B711824d657eb61D")?;
+
+    let event = ReserveDataUpdated {
+        reserve: token,
+        liquidityRate: 1045.as_u256(24),
+        stableBorrowRate: 105.as_u256(25),
+        variableBorrowRate: 105.as_u256(25),
+        liquidityIndex: 1045.as_u256(24),
+        variableBorrowIndex: 105.as_u256(25),
+    };
+
+    let rq_date = Utc::now().timestamp_micros();
+
+    let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
+
+    let hf_handler = task::spawn(async move {
+        let msg = hf_rc
+            .recv()
+            .await
+            .ok_or_else(|| eyre::eyre!("hf channel closed"))?;
+        assert_eq!(HFRequest::Full(rq_date), msg);
+
+        Ok::<_, eyre::Error>(())
+    });
+
+    sleep(Duration::from_secs(5)).await;
+
+    reserve_data_updated(
+        cache.clone(),
+        dummy_data_provider,
+        tokens.clone(),
+        (event, hf_tx, RqDate(rq_date)),
+    )
+    .await?;
+    let _ = hf_handler.await?;
+
+    let (liquidity, _) = &*cache.liquidity.read().await;
+    let (li1, li2, li3) = (
+        U256::from(1045.as_u256(24)),
+        U256::from(1035000057434360730593607306_u128),
+        U256::from(1025000040628170979198376459_u128),
+    );
+
+    assert_eq!(liquidity[0].index, li1);
+    assert_eq!(liquidity[0].rate, 1045.as_u256(24));
+    assert_ne!(liquidity[0].last_update, rq_date);
+
+    assert_eq!(liquidity[1].index, li2);
+    assert_eq!(liquidity[1].rate, 35.as_u256(25));
+    assert_ne!(liquidity[1].last_update, rq_date);
+
+    assert_eq!(liquidity[2].index, li3);
+    assert_eq!(liquidity[2].rate, 25.as_u256(25));
+    assert_ne!(liquidity[2].last_update, rq_date);
+
+    let (liquidity_index, _) = &*cache.liquidity_index.read().await;
+    assert_eq!(
+        liquidity_index,
+        Array1::from_vec(vec![li1.as_f64_ray(), li2.as_f64_ray(), li3.as_f64_ray()])
+    );
+
+    let (vb, _) = &*cache.variable_borrow.read().await;
+    let (vbi1, vbi2, vbi3) = (
+        U256::from(105.as_u256(25)),
+        U256::from(1040000065956367326230339929_u128),
+        U256::from(1030000048991628614916286150_u128),
+    );
+
+    assert_eq!(vb[0].index, vbi1);
+    assert_eq!(vb[0].rate, 105.as_u256(25));
+    assert_ne!(vb[0].last_update, rq_date);
+
+    assert_eq!(vb[1].index, vbi2);
+    assert_eq!(vb[1].rate, 4.as_u256(26));
+    assert_ne!(vb[1].last_update, rq_date);
+
+    assert_eq!(vb[2].index, vbi3);
+    assert_eq!(vb[2].rate, 3.as_u256(26));
+    assert_ne!(vb[2].last_update, rq_date);
+
+    let (vbi, _) = &*cache.variable_borrow_index.read().await;
+    assert_eq!(
+        vbi,
+        Array1::from_vec(vec![
+            vbi1.as_f64_ray(),
+            vbi2.as_f64_ray(),
+            vbi3.as_f64_ray()
+        ])
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_ray_ops() -> eyre::Result<()> {
-    // value = scaled_value * (index / 1e27)
-    // scaled_value = value * (1e27 / index)
+    let decimals = 1_000_000.0;
+    let value = U256::from(20) * U256::from(decimals);
 
-    // we get it when create a new user
-    let value = U256::from(115.6638746432_f64 * 10_f64.powi(27));
-    let index = U256::from(3.2324232 * 10_f64.powi(27));
+    let liquidity_index = U256::from(104) * U256::from(10).pow(U256::from(25));
+    let amount = value.to_ray(decimals);
+    let amount_scaled = amount.to_scaled(liquidity_index);
+    let amount_scaled_expected = U256::from(19_230_769_230_000_000_000_000_000_000_u128);
 
-    let scaled_value = value.to_scaled(index);
-    let scaled_value_as_f = scaled_value.as_f64(10_f64.powi(27)) as f32;
+    let amount_scaled_as_f64 = amount_scaled.as_f64_ray();
+    let amount_scaled_expected_as_f64 = amount_scaled_expected.as_f64_ray();
 
-    let scaled_value_expected = U256::from(35.7824046 * 10_f64.powi(27));
-    let scaled_value_expected_as_f = scaled_value_expected.as_f64(10_f64.powi(27)) as f32;
+    assert_eq!(
+        amount_scaled_as_f64 as f32,
+        amount_scaled_expected_as_f64 as f32
+    );
 
-    assert_eq!(scaled_value_as_f, scaled_value_expected_as_f);
+    Ok(())
+}
 
-    let current = scaled_value.to_current(index);
-    let current_as_f = current.as_f64(10_f64.powi(27)) as f32;
+#[tokio::test]
+async fn test_some_numbers() -> eyre::Result<()> {
+    const DECIMALS_18: f64 = 1e18;
+    let mut total = 1
+        .as_u256_decimal_18()
+        .to_ray(DECIMALS_18)
+        .to_scaled(1045.as_u256(24));
 
-    let current_expected = scaled_value_expected.to_current(index);
-    let current_expected_as_f = current_expected.as_f64(10_f64.powi(27)) as f32;
+    total -= 1
+        .as_u256_decimal_18()
+        .to_ray(DECIMALS_18)
+        .to_scaled(1051.as_u256(24));
 
-    assert_eq!(current_as_f, current_expected_as_f);
+    total += 10
+        .as_u256_decimal_18()
+        .to_ray(DECIMALS_18)
+        .to_scaled(1054.as_u256(24));
+
+    assert_eq!(total, U256::from(9493129047280486755506052494_u128));
+
+    let mut total = 1
+        .as_u256_decimal_18()
+        .to_ray(DECIMALS_18)
+        .to_scaled(105.as_u256(25));
+
+    total += 10
+        .as_u256_decimal_18()
+        .to_ray(DECIMALS_18)
+        .to_scaled(1057.as_u256(24));
+
+    total -= 10
+        .as_u256_decimal_18()
+        .to_ray(DECIMALS_18)
+        .to_scaled(1058.as_u256(24));
+
+    let dt = U256::from(1);
+    let dt_spy = dt.ray_div(U256::from(31_536_000));
+    let vbi_new = 106.as_u256(25).ray_mul(
+        U256::from(1_000_000_000_000_000_000_000_000_000_u128)
+            + U256::from(6.as_u256(26)).ray_mul(dt_spy),
+    );
+
+    total -= 1
+        .as_u256_decimal_18()
+        .to_ray(DECIMALS_18)
+        .to_scaled(vbi_new);
+
+    assert_eq!(total, U256::from(17926840264096303005033358_u128));
+
+    const DECIMALS_6: f64 = 1e6;
+    let mut total = 2
+        .as_u256_decimal_6()
+        .to_ray(DECIMALS_6)
+        .to_scaled(1035.as_u256(24));
+
+    total += 2
+        .as_u256_decimal_6()
+        .to_ray(DECIMALS_6)
+        .to_scaled(1035.as_u256(24));
+
+    total -= 1
+        .as_u256_decimal_6()
+        .to_ray(DECIMALS_6)
+        .to_scaled(1036.as_u256(24));
+
+    assert_eq!(total, U256::from(2899483334265942961595135509_u128));
+
+    let mut total = 1
+        .as_u256_decimal_6()
+        .to_ray(DECIMALS_6)
+        .to_scaled(104.as_u256(25));
+
+    total += 20
+        .as_u256_decimal_6()
+        .to_ray(DECIMALS_6)
+        .to_scaled(1042.as_u256(24));
+
+    total -= 20
+        .as_u256_decimal_6()
+        .to_ray(DECIMALS_6)
+        .to_scaled(1043.as_u256(24));
+
+    assert_eq!(total, U256::from(979941009923361879460760034_u128));
+
+    const DECIMALS_12: f64 = 1e12;
+    let mut total = 3
+        .as_u256_decimal_12()
+        .to_ray(DECIMALS_12)
+        .to_scaled(1025.as_u256(24));
+
+    total += 30
+        .as_u256_decimal_12()
+        .to_ray(DECIMALS_12)
+        .to_scaled(1025.as_u256(24));
+
+    total -= 13
+        .as_u256_decimal_12()
+        .to_ray(DECIMALS_12)
+        .to_scaled(1026.as_u256(24));
+
+    total -= 10
+        .as_u256_decimal_12()
+        .to_ray(DECIMALS_12)
+        .to_scaled(1029.as_u256(24));
+
+    assert_eq!(total, U256::from(9806383665596156754365865996_u128));
+
+    let mut total = 1
+        .as_u256_decimal_12()
+        .to_ray(DECIMALS_12)
+        .to_scaled(103.as_u256(25));
+
+    total += 30
+        .as_u256_decimal_12()
+        .to_ray(DECIMALS_12)
+        .to_scaled(1032.as_u256(24));
+
+    total -= 30
+        .as_u256_decimal_12()
+        .to_ray(DECIMALS_12)
+        .to_scaled(1033.as_u256(24));
+
+    assert_eq!(total, U256::from(999014897193691932320573917_u128));
 
     Ok(())
 }

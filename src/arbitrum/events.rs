@@ -4,12 +4,13 @@ use crate::arbitrum::arbitrum::IL2Pool::{
     ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
 use crate::arbitrum::arbitrum::{
-    Cache, DataProvider, F64Converter, HFRequest, RqDate, SyncRequest, SyncTarget, TimeStamp,
-    Token, Tokens,
+    Cache, DataProvider, F64Converter, HFRequest, RayOperations, RqDate, Scaler, SyncRequest, SyncTarget,
+    TimeStamp, Token, TokenDetails, Tokens, RAY,
 };
 use alloy_primitives::{Address, U256};
-use chrono::Utc;
+use chrono::{Datelike, Duration, Utc};
 use eyre::eyre;
+use std::ops::Add;
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
 use tracing::debug;
@@ -21,7 +22,6 @@ pub(in crate::arbitrum) async fn create_user<P>(
     tokens: &Tokens,
     user: &Address,
     sync_tx: &Sender<SyncRequest>,
-    hf_tx: &Sender<HFRequest>,
 ) -> eyre::Result<bool>
 where
     P: DataProvider + 'static,
@@ -53,7 +53,6 @@ where
                         rq_date,
                     ))
                     .await?;
-                hf_tx.send(HFRequest::User(user.clone(), rq_date)).await?;
                 return Ok(true);
             }
         }
@@ -73,7 +72,6 @@ async fn handle_event<P, F1, R1, F2, R2>(
     tokens: &Tokens,
     provider: Arc<P>,
     sync_tx: &Sender<SyncRequest>,
-    hf_tx: &Sender<HFRequest>,
     rq_date: TimeStamp,
     last_sync: TimeStamp,
     last_modified: TimeStamp,
@@ -113,7 +111,6 @@ where
                     rq_date,
                 ))
                 .await?;
-            hf_tx.send(HFRequest::User(user.clone(), rq_date)).await?;
 
             debug!("{}", {
                 let received = Utc::now().timestamp_micros();
@@ -147,7 +144,7 @@ pub(crate) async fn supply<P>(
 where
     P: DataProvider + 'static,
 {
-    let (event, sync_tx, hf_tx, RqDate(rq_date)) = event;
+    let (event, sync_tx, _, RqDate(rq_date)) = event;
 
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
@@ -166,7 +163,6 @@ where
         &tokens,
         &event.onBehalfOf,
         &sync_tx,
-        &hf_tx,
     )
     .await?
     {
@@ -188,6 +184,7 @@ where
         .get(&event.reserve)
         .ok_or_else(|| eyre!("token = {:?} not found", event.reserve))?
         .order;
+    let (decimals, _) = &*cache.decimals.read().await;
     let now = Utc::now().timestamp_micros();
 
     if user_settings.use_as_collateral[idx] {
@@ -202,7 +199,7 @@ where
             (*last_sync, *last_modified)
         };
 
-        let (c, s_tx, h_tx) = (cache.clone(), sync_tx.clone(), hf_tx.clone());
+        let (c, s_tx) = (cache.clone(), sync_tx.clone());
         let new_event = async move || {
             debug!("supply: collateral new event user = {}", event.onBehalfOf);
 
@@ -212,7 +209,10 @@ where
                 .ok_or_else(|| eyre!("can't get row = {} from collateral", row_num))?
                 .write()
                 .await;
-            col[idx] += event.amount;
+            col[idx] += event
+                .amount
+                .to_ray(decimals[idx])
+                .to_scaled(c.liquidity.read().await.0[idx].index);
             *last_modified = now;
 
             s_tx.send(SyncRequest::Collateral(
@@ -220,8 +220,6 @@ where
                 rq_date,
             ))
             .await?;
-            h_tx.send(HFRequest::User(event.onBehalfOf, rq_date))
-                .await?;
 
             Ok(())
         };
@@ -241,7 +239,6 @@ where
             &tokens,
             provider.clone(),
             &sync_tx,
-            &hf_tx,
             rq_date,
             last_sync,
             last_modified,
@@ -271,7 +268,10 @@ where
                 .ok_or_else(|| eyre!("can't get row = {} from reserve", row_num))?
                 .write()
                 .await;
-            res[idx] += event.amount;
+            res[idx] += event
+                .amount
+                .to_ray(decimals[idx])
+                .to_scaled(c.liquidity.read().await.0[idx].index);
             *last_modified = now;
 
             Ok(())
@@ -292,7 +292,6 @@ where
             &tokens,
             provider.clone(),
             &sync_tx,
-            &hf_tx,
             rq_date,
             last_sync,
             last_modified,
@@ -326,7 +325,7 @@ pub(crate) async fn withdraw<P>(
 where
     P: DataProvider + 'static,
 {
-    let (event, sync_tx, hf_tx, RqDate(rq_date)) = event;
+    let (event, sync_tx, _, RqDate(rq_date)) = event;
 
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
@@ -345,7 +344,6 @@ where
         &tokens,
         &event.user,
         &sync_tx,
-        &hf_tx,
     )
     .await?
     {
@@ -367,6 +365,7 @@ where
         .get(&event.reserve)
         .ok_or_else(|| eyre!("token = {:?} not found", event.reserve))?
         .order;
+    let (decimals, _) = &*cache.decimals.read().await;
     let now = Utc::now().timestamp_micros();
 
     if user_settings.use_as_collateral[idx] {
@@ -381,7 +380,7 @@ where
             (*last_sync, *last_modified)
         };
 
-        let (c, s_tx, h_tx) = (cache.clone(), sync_tx.clone(), hf_tx.clone());
+        let (c, s_tx) = (cache.clone(), sync_tx.clone());
         let new_event = async move || {
             debug!("withdraw: collateral new event user = {}", event.user);
 
@@ -391,7 +390,10 @@ where
                 .ok_or_else(|| eyre!("can't get row = {} from collateral", row_num))?
                 .write()
                 .await;
-            col[idx] -= event.amount;
+            col[idx] -= event
+                .amount
+                .to_ray(decimals[idx])
+                .to_scaled(c.liquidity.read().await.0[idx].index);
             *last_modified = now;
 
             s_tx.send(SyncRequest::Collateral(
@@ -399,7 +401,6 @@ where
                 rq_date,
             ))
             .await?;
-            h_tx.send(HFRequest::User(event.user, rq_date)).await?;
 
             Ok(())
         };
@@ -419,7 +420,6 @@ where
             &tokens,
             provider.clone(),
             &sync_tx,
-            &hf_tx,
             rq_date,
             last_sync,
             last_modified,
@@ -449,7 +449,10 @@ where
                 .ok_or_else(|| eyre!("can't get row = {} from reserve", row_num))?
                 .write()
                 .await;
-            res[idx] -= event.amount;
+            res[idx] -= event
+                .amount
+                .to_ray(decimals[idx])
+                .to_scaled(c.liquidity.read().await.0[idx].index);
             *last_modified = now;
 
             Ok(())
@@ -470,7 +473,6 @@ where
             &tokens,
             provider.clone(),
             &sync_tx,
-            &hf_tx,
             rq_date,
             last_sync,
             last_modified,
@@ -504,7 +506,7 @@ pub(crate) async fn borrow<P>(
 where
     P: DataProvider + 'static,
 {
-    let (event, sync_tx, hf_tx, RqDate(rq_date)) = event;
+    let (event, sync_tx, _, RqDate(rq_date)) = event;
 
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
@@ -523,7 +525,6 @@ where
         &tokens,
         &event.user,
         &sync_tx,
-        &hf_tx,
     )
     .await?
     {
@@ -545,6 +546,7 @@ where
         .get(&event.reserve)
         .ok_or_else(|| eyre!("token = {:?} not found", event.reserve))?
         .order;
+    let (decimals, _) = &*cache.decimals.read().await;
     let now = Utc::now().timestamp_micros();
 
     let (last_sync, last_modified) = {
@@ -558,7 +560,7 @@ where
         (*last_sync, *last_modified)
     };
 
-    let (c, s_tx, h_tx) = (cache.clone(), sync_tx.clone(), hf_tx.clone());
+    let (c, s_tx) = (cache.clone(), sync_tx.clone());
     let new_event = async move || {
         debug!("borrow: new event user = {}", event.user);
 
@@ -568,7 +570,10 @@ where
             .ok_or_else(|| eyre!("can't get row = {} from borrowed", row_num))?
             .write()
             .await;
-        bor[idx] += event.amount;
+        bor[idx] += event
+            .amount
+            .to_ray(decimals[idx])
+            .to_scaled(c.variable_borrow.read().await.0[idx].index);
         *last_modified = now;
 
         s_tx.send(SyncRequest::Borrowed(
@@ -576,7 +581,6 @@ where
             rq_date,
         ))
         .await?;
-        h_tx.send(HFRequest::User(event.user, rq_date)).await?;
 
         Ok(())
     };
@@ -596,7 +600,6 @@ where
         &tokens,
         provider.clone(),
         &sync_tx,
-        &hf_tx,
         rq_date,
         last_sync,
         last_modified,
@@ -629,7 +632,7 @@ pub(crate) async fn repay<P>(
 where
     P: DataProvider + 'static,
 {
-    let (event, sync_tx, hf_tx, RqDate(rq_date)) = event;
+    let (event, sync_tx, _, RqDate(rq_date)) = event;
 
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
@@ -648,7 +651,6 @@ where
         &tokens,
         &event.user,
         &sync_tx,
-        &hf_tx,
     )
     .await?
     {
@@ -670,6 +672,7 @@ where
         .get(&event.reserve)
         .ok_or_else(|| eyre!("token = {:?} not found", event.reserve))?
         .order;
+    let (decimals, _) = &*cache.decimals.read().await;
     let now = Utc::now().timestamp_micros();
 
     let (last_sync, last_modified) = {
@@ -683,7 +686,7 @@ where
         (*last_sync, *last_modified)
     };
 
-    let (c, s_tx, h_tx) = (cache.clone(), sync_tx.clone(), hf_tx.clone());
+    let (c, s_tx) = (cache.clone(), sync_tx.clone());
     let new_event = async move || {
         debug!("repay: new event user = {}", event.user);
 
@@ -693,7 +696,10 @@ where
             .ok_or_else(|| eyre!("can't get row = {} from borrowed", row_num))?
             .write()
             .await;
-        bor[idx] -= event.amount;
+        bor[idx] -= event
+            .amount
+            .to_ray(decimals[idx])
+            .to_scaled(c.variable_borrow.read().await.0[idx].index);
         *last_modified = now;
 
         s_tx.send(SyncRequest::Borrowed(
@@ -701,7 +707,6 @@ where
             rq_date,
         ))
         .await?;
-        h_tx.send(HFRequest::User(event.user, rq_date)).await?;
 
         Ok(())
     };
@@ -721,7 +726,6 @@ where
         &tokens,
         provider.clone(),
         &sync_tx,
-        &hf_tx,
         rq_date,
         last_sync,
         last_modified,
@@ -759,7 +763,7 @@ pub(crate) async fn reserve_used_as_collateral_enabled<P>(
 where
     P: DataProvider + 'static,
 {
-    let (event, sync_tx, hf_tx, RqDate(rq_date)) = event;
+    let (event, sync_tx, _, RqDate(rq_date)) = event;
 
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
@@ -778,7 +782,6 @@ where
         &tokens,
         &event.user,
         &sync_tx,
-        &hf_tx,
     )
     .await?
     {
@@ -813,7 +816,7 @@ where
         (*last_sync, *last_modified)
     };
 
-    let (c, s_tx, h_tx) = (cache.clone(), sync_tx.clone(), hf_tx.clone());
+    let (c, s_tx) = (cache.clone(), sync_tx.clone());
     let new_event = async move || {
         debug!(
             "reserve_used_as_collateral_enabled: new event user = {}",
@@ -850,7 +853,6 @@ where
             rq_date,
         ))
         .await?;
-        h_tx.send(HFRequest::User(event.user, rq_date)).await?;
 
         Ok(())
     };
@@ -870,7 +872,6 @@ where
         &tokens,
         provider.clone(),
         &sync_tx,
-        &hf_tx,
         rq_date,
         last_sync,
         last_modified,
@@ -908,7 +909,7 @@ pub(crate) async fn reserve_used_as_collateral_disabled<P>(
 where
     P: DataProvider + 'static,
 {
-    let (event, sync_tx, hf_tx, RqDate(rq_date)) = event;
+    let (event, sync_tx, _, RqDate(rq_date)) = event;
 
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
@@ -927,7 +928,6 @@ where
         &tokens,
         &event.user,
         &sync_tx,
-        &hf_tx,
     )
     .await?
     {
@@ -962,7 +962,7 @@ where
         (*last_sync, *last_modified)
     };
 
-    let (c, s_tx, h_tx) = (cache.clone(), sync_tx.clone(), hf_tx.clone());
+    let (c, s_tx) = (cache.clone(), sync_tx.clone());
     let new_event = async move || {
         debug!(
             "reserve_used_as_collateral_disabled: new event user = {}",
@@ -999,7 +999,6 @@ where
             rq_date,
         ))
         .await?;
-        h_tx.send(HFRequest::User(event.user, rq_date)).await?;
 
         Ok(())
     };
@@ -1019,7 +1018,6 @@ where
         &tokens,
         provider.clone(),
         &sync_tx,
-        &hf_tx,
         rq_date,
         last_sync,
         last_modified,
@@ -1057,7 +1055,7 @@ pub(crate) async fn liquidation_call<P>(
 where
     P: DataProvider + 'static,
 {
-    let (event, sync_tx, hf_tx, RqDate(rq_date)) = event;
+    let (event, sync_tx, _, RqDate(rq_date)) = event;
 
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
@@ -1076,7 +1074,6 @@ where
         &tokens,
         &event.user,
         &sync_tx,
-        &hf_tx,
     )
     .await?
     {
@@ -1094,6 +1091,7 @@ where
         .ok_or_else(|| eyre!("user = {:?} not found", event.user))?
         .clone();
     let row_num = user_settings.row_num;
+    let (decimals, _) = &*cache.decimals.read().await;
     let now = Utc::now().timestamp_micros();
 
     let bor_idx = tokens
@@ -1117,7 +1115,7 @@ where
         (*last_sync, *last_modified)
     };
 
-    let (c, s_tx, h_tx) = (cache.clone(), sync_tx.clone(), hf_tx.clone());
+    let (c, s_tx) = (cache.clone(), sync_tx.clone());
     let new_event = async move || {
         debug!("liquidation_call: new event user = {}", event.user);
 
@@ -1137,8 +1135,14 @@ where
             .await;
         *last_modified = now;
 
-        bor[bor_idx] -= event.debtToCover;
-        col[col_idx] -= event.liquidatedCollateralAmount;
+        bor[bor_idx] -= event
+            .debtToCover
+            .to_ray(decimals[bor_idx])
+            .to_scaled(c.variable_borrow.read().await.0[bor_idx].index);
+        col[col_idx] -= event
+            .liquidatedCollateralAmount
+            .to_ray(decimals[col_idx])
+            .to_scaled(c.liquidity.read().await.0[col_idx].index);
 
         s_tx.send(SyncRequest::Collateral(
             SyncTarget::Cell(row_num, col_idx),
@@ -1150,7 +1154,6 @@ where
             rq_date,
         ))
         .await?;
-        h_tx.send(HFRequest::User(event.user, rq_date)).await?;
 
         Ok(())
     };
@@ -1170,7 +1173,6 @@ where
         &tokens,
         provider.clone(),
         &sync_tx,
-        &hf_tx,
         rq_date,
         last_sync,
         last_modified,
@@ -1196,15 +1198,100 @@ where
 
 pub(crate) async fn reserve_data_updated<P>(
     cache: Arc<Cache>,
-    provider: Arc<P>,
+    _: Arc<P>,
     tokens: Arc<Tokens>,
     event: (ReserveDataUpdated, Sender<HFRequest>, RqDate),
 ) -> eyre::Result<()>
 where
     P: DataProvider + 'static,
 {
-    debug!("reserve_data_updated: called");
-    // let (event, hf_tx, rq_date) = event;
+    let (event, hf_tx, RqDate(rq_date)) = event;
+
+    debug!("{}", {
+        let received = Utc::now().timestamp_micros();
+        format!(
+            "reserve_data_updated: rq_date = {}, received = {}, delta = {} μs",
+            rq_date,
+            received,
+            received - rq_date
+        )
+    });
+
+    let now = Utc::now().timestamp_micros();
+
+    let idx = tokens
+        .get(&event.reserve)
+        .ok_or_else(|| eyre::eyre!("token not found"))?
+        .order;
+
+    {
+        let (li, _) = &mut *cache.liquidity.write().await;
+        (li[idx].index, li[idx].rate, li[idx].last_update) =
+            (event.liquidityIndex, event.liquidityRate, now);
+    }
+
+    {
+        let (li, _) = &mut *cache.liquidity_index.write().await;
+        li[idx] = event.liquidityIndex.as_f64_ray();
+    }
+
+    {
+        let (vbi, _) = &mut *cache.variable_borrow.write().await;
+        (vbi[idx].index, vbi[idx].rate, vbi[idx].last_update) =
+            (event.variableBorrowIndex, event.variableBorrowRate, now);
+    }
+
+    {
+        let (vbi, _) = &mut *cache.variable_borrow_index.write().await;
+        vbi[idx] = event.variableBorrowIndex.as_f64_ray();
+    }
+
+    {
+        let one_ray: U256 = U256::from(RAY);
+        let seconds_per_year = U256::from(31_536_000);
+
+        let (li, li_last_modified) = &mut *cache.liquidity.write().await;
+        let (lii, lii_last_modified) = &mut *cache.liquidity_index.write().await;
+
+        let (vbi, vbi_last_modified) = &mut *cache.variable_borrow.write().await;
+        let (vbii, vbii_last_modified) = &mut *cache.variable_borrow_index.write().await;
+
+        for (_, TokenDetails { order, .. }) in tokens.iter() {
+            let idx2 = order.clone();
+            if idx == idx2 {
+                continue;
+            }
+
+            let dt = U256::from(now.saturating_sub(li[idx2].last_update) / 1_000_000);
+            let dt_spy = dt.ray_div(seconds_per_year);
+            let li_new = li[idx2]
+                .index
+                .ray_mul(one_ray + li[idx2].rate.ray_mul(dt_spy));
+            (li[idx2].index, li[idx2].last_update) = (li_new, now);
+
+            lii[idx2] = li_new.as_f64_ray();
+
+            let dt = U256::from(now.saturating_sub(vbi[idx2].last_update) / 1_000_000);
+
+            let dt_spy = dt.ray_div(seconds_per_year);
+            let vbi_new = vbi[idx2]
+                .index
+                .ray_mul(one_ray + vbi[idx2].rate.ray_mul(dt_spy));
+            (vbi[idx2].index, vbi[idx2].last_update) = (vbi_new, now);
+
+            vbii[idx2] = vbi_new.as_f64_ray();
+        }
+
+        (
+            *li_last_modified,
+            *lii_last_modified,
+            *vbi_last_modified,
+            *vbii_last_modified,
+        ) = (now, now, now, now);
+    }
+
+    hf_tx.send(HFRequest::Full(rq_date)).await?;
+
     Ok(())
 }
 
