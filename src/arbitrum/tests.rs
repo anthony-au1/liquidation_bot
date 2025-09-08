@@ -5,10 +5,10 @@ use crate::arbitrum::arbitrum::IL2Pool::{
     ReserveUsedAsCollateralDisabled, ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
 use crate::arbitrum::arbitrum::{
-    liquidation_threshold_update, listen_events, listen_hf_calc, listen_price_update, listen_sync, setup, AaveEvents, Cache,
-    DataProvider, F64Converter, HFRequest, Index, RayOperations, ReserveData, RqDate, Scaler,
-    SyncRequest, SyncTarget, Token, TokenDetails, UserData,
-    UserReserveData, UserSettings,
+    AaveEvents, Cache, DataProvider, F64Converter, HFRequest, Index, RayOperations, ReserveData,
+    RqDate, Scaler, SyncRequest, SyncTarget, Token, TokenDetails, UserData, UserReserveData,
+    UserSettings, liquidation_threshold_update, listen_events, listen_hf_calc, listen_price_update,
+    listen_sync, setup,
 };
 use crate::arbitrum::events::{
     answer_updated, borrow, create_user, liquidation_call, repay, reserve_data_updated,
@@ -28,8 +28,8 @@ use std::fmt::Debug;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc::channel;
 use tokio::sync::RwLock;
+use tokio::sync::mpsc::channel;
 use tokio::task;
 use tokio::time::sleep;
 
@@ -4663,6 +4663,23 @@ async fn test_some_numbers() -> eyre::Result<()> {
 
     assert_eq!(total, U256::from(2899483334265942961595135509_u128));
 
+    let mut total = 1
+        .as_u256_decimal_6()
+        .to_ray(DECIMALS_6)
+        .to_scaled(104.as_u256(25));
+
+    total += 20
+        .as_u256_decimal_6()
+        .to_ray(DECIMALS_6)
+        .to_scaled(1042.as_u256(24));
+
+    total -= 20
+        .as_u256_decimal_6()
+        .to_ray(DECIMALS_6)
+        .to_scaled(1043.as_u256(24));
+
+    assert_eq!(total, U256::from(979941009923361879460760034_u128));
+
     const DECIMALS_12: f64 = 1e12;
     let mut total = 3
         .as_u256_decimal_12()
@@ -4685,6 +4702,23 @@ async fn test_some_numbers() -> eyre::Result<()> {
         .to_scaled(1029.as_u256(24));
 
     assert_eq!(total, U256::from(9806383665596156754365865996_u128));
+
+    let mut total = 1
+        .as_u256_decimal_12()
+        .to_ray(DECIMALS_12)
+        .to_scaled(103.as_u256(25));
+
+    total += 30
+        .as_u256_decimal_12()
+        .to_ray(DECIMALS_12)
+        .to_scaled(1032.as_u256(24));
+
+    total -= 30
+        .as_u256_decimal_12()
+        .to_ray(DECIMALS_12)
+        .to_scaled(1033.as_u256(24));
+
+    assert_eq!(total, U256::from(999014897193691932320573917_u128));
 
     Ok(())
 }

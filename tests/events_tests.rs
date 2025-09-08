@@ -951,23 +951,44 @@ async fn test_events() -> eyre::Result<()> {
 
         let dt = U256::from(1);
         let dt_spy = dt.ray_div(U256::from(31_536_000));
-        let vbi_new = 106.as_u256(25)
-            .ray_mul(U256::from(RAY) + U256::from(6.as_u256(26))
-                .ray_mul(dt_spy));
+        let vbi_new = 106
+            .as_u256(25)
+            .ray_mul(U256::from(RAY) + U256::from(6.as_u256(26)).ray_mul(dt_spy));
 
         bor1 -= 1
             .as_u256_decimal_18()
             .to_ray(decimals[0])
             .to_scaled(vbi_new);
 
-        let bor2 = 1
+        let mut bor2 = 1
             .as_u256_decimal_6()
             .to_ray(decimals[1])
-            .to_scaled(expected.variable_borrow.read().await.0[1].index);
-        let bor3 = 1
+            .to_scaled(104.as_u256(25));
+
+        bor2 += 20
+            .as_u256_decimal_6()
+            .to_ray(decimals[1])
+            .to_scaled(1042.as_u256(24));
+
+        bor2 -= 20
+            .as_u256_decimal_6()
+            .to_ray(decimals[1])
+            .to_scaled(1043.as_u256(24));
+
+        let mut bor3 = 1
             .as_u256_decimal_12()
             .to_ray(decimals[2])
-            .to_scaled(expected.variable_borrow.read().await.0[2].index);
+            .to_scaled(103.as_u256(25));
+
+        bor3 += 30
+            .as_u256_decimal_12()
+            .to_ray(decimals[2])
+            .to_scaled(1032.as_u256(24));
+
+        bor3 -= 30
+            .as_u256_decimal_12()
+            .to_ray(decimals[2])
+            .to_scaled(1033.as_u256(24));
 
         let borroweds = &mut *expected.borrowed.write().await;
         borroweds.push(RwLock::new((
@@ -983,7 +1004,7 @@ async fn test_events() -> eyre::Result<()> {
         )?;
 
         let (hf, last_modified) = &mut *expected.health_factors.write().await;
-        *hf = Array1::from_vec(vec![5.3983777272783815]);
+        *hf = Array1::from_vec(vec![5.266444865107627]);
         *last_modified = now;
     }
 
