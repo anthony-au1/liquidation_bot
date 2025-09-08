@@ -1126,7 +1126,6 @@ async fn test_events() -> eyre::Result<()> {
         assert!(last_sync < last_sync_expected);
         assert!(last_modified < last_modified_expected);
         assert_eq!(bor, bor_expected);
-        // assert!(compare_arrays(bor, bor_expected));
     }
 
     {
@@ -1145,14 +1144,4 @@ async fn test_events() -> eyre::Result<()> {
     }
 
     Ok(())
-}
-
-fn compare_arrays(a: &Array1<U256>, b: &Array1<U256>) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-
-    a.iter()
-        .zip(b.iter())
-        .all(|(a, b)| a.abs_diff(*b) < U256::from(10))
 }
