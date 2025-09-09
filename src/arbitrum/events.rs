@@ -4,8 +4,8 @@ use crate::arbitrum::arbitrum::IL2Pool::{
     ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
 use crate::arbitrum::arbitrum::{
-    Cache, DataProvider, F64Converter, HFRequest, RayOperations, RqDate, Scaler, SyncRequest, SyncTarget,
-    TimeStamp, Token, TokenDetails, Tokens, RAY,
+    Cache, DataProvider, F64Converter, HFRequest, RAY, RayOperations, RqDate, Scaler, SyncRequest,
+    SyncTarget, TimeStamp, Token, TokenDetails, Tokens,
 };
 use alloy_primitives::{Address, U256};
 use chrono::{Datelike, Duration, Utc};
@@ -85,16 +85,17 @@ where
     F2: FnOnce() -> R2,
     R2: Future<Output = eyre::Result<()>> + Send,
 {
+    let sync_requested = Utc::now().timestamp_micros() - last_sync > 86_400_000_000;
     match rq_date {
-        t if t > last_modified => {
+        t if !sync_requested && t > last_modified => {
             // new event
             new_event().await?;
         }
-        t if t <= last_sync => {
+        t if !sync_requested && t <= last_sync => {
             // skip event
             skip_event().await?;
         }
-        t if t > last_sync && t <= last_modified => {
+        t if sync_requested || (t > last_sync && t <= last_modified) => {
             // sync user
             debug!("supply: sync_user user = {:?}", user);
             cache.sync_user(&user, &tokens, provider).await?;

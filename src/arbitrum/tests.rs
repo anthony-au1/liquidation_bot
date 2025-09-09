@@ -5,10 +5,10 @@ use crate::arbitrum::arbitrum::IL2Pool::{
     ReserveUsedAsCollateralDisabled, ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
 use crate::arbitrum::arbitrum::{
-    liquidation_threshold_update, listen_events, listen_hf_calc, listen_price_update, listen_sync, setup, AaveEvents, Cache,
-    DataProvider, F64Converter, HFRequest, Index, RayOperations, ReserveData, RqDate, Scaler,
-    SyncRequest, SyncTarget, Token, TokenDetails, UserData,
-    UserReserveData, UserSettings,
+    AaveEvents, Cache, DataProvider, F64Converter, HFRequest, Index, RayOperations, ReserveData,
+    RqDate, Scaler, SyncRequest, SyncTarget, Token, TokenDetails, UserData, UserReserveData,
+    UserSettings, liquidation_threshold_update, listen_events, listen_hf_calc, listen_price_update,
+    listen_sync, setup,
 };
 use crate::arbitrum::events::{
     answer_updated, borrow, create_user, liquidation_call, repay, reserve_data_updated,
@@ -28,8 +28,8 @@ use std::fmt::Debug;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc::channel;
 use tokio::sync::RwLock;
+use tokio::sync::mpsc::channel;
 use tokio::task;
 use tokio::time::sleep;
 
@@ -1837,12 +1837,13 @@ async fn test_supply() -> eyre::Result<()> {
 
     {
         let collateral = &*cache.collateral.read().await;
-        let (_, _, last_modified) = &mut *collateral
+        let (_, last_sync, last_modified) = &mut *collateral
             .get(0)
             .ok_or_else(|| eyre!("can't get row = 0 from collateral"))?
             .write()
             .await;
         *last_modified = Utc::now().timestamp_micros();
+        *last_sync = Utc::now().timestamp_micros() - 1 - 24 * 60 * 60 * 1000_000;
     }
 
     let (sync_tx, mut sync_rc) = channel::<SyncRequest>(1);
