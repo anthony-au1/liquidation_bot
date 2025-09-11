@@ -21,7 +21,7 @@ use chrono::Utc;
 use dashmap::DashMap;
 use eyre::eyre;
 use futures::future::try_join_all;
-use ndarray::{concatenate, Array1, Array2, Axis, Ix1, OwnedRepr};
+use ndarray::{concatenate, Array1, Array2, Axis};
 use std::collections::HashMap;
 use std::default::Default;
 use std::sync::Arc;
@@ -29,7 +29,7 @@ use std::time::Duration;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::RwLock;
 use tokio::{task, time, try_join};
-use tracing::{debug, error};
+use tracing::{debug, error, info};
 
 pub const WS_URL: &str = "wss://arb-mainnet.g.alchemy.com/v2/9DDcCoPPxnq-aSjQ8k79vxfLvrhBAXjQ";
 const L2_POOL_ADDRESS: &str = "0x794a61358D6845594F94dc1DB02A252b5b4814aD";
@@ -471,8 +471,17 @@ where
 
     let w_num = 4;
     let bound = 1000;
+    let lq_lookup_tx = liquidation_lookup(
+        cache.clone(),
+        liquidation(cache.clone(), w_num, bound).await?,
+        bound,
+    )
+    .await?;
     let (mut sync_counter, sync_senders) = (0, listen_sync(cache.clone(), w_num, bound).await?);
-    let (mut hf_counter, hf_senders) = (0, listen_hf_calc(cache.clone(), w_num, bound).await?);
+    let (mut hf_counter, hf_senders) = (
+        0,
+        listen_hf_calc(cache.clone(), lq_lookup_tx, w_num, bound).await?,
+    );
 
     liquidation_threshold_update(
         cache.clone(),
@@ -989,20 +998,25 @@ pub(crate) enum HFRequest {
 
 pub(crate) async fn listen_hf_calc(
     cache: Arc<Cache>,
+    lq_lookup_tx: Sender<()>,
     workers: usize,
     bound: usize,
 ) -> eyre::Result<Vec<Sender<HFRequest>>> {
     let mut senders = Vec::with_capacity(workers);
     for _ in 0..workers {
         let (tx, mut rc) = channel::<HFRequest>(bound);
-        let cache = cache.clone();
+        let (cache, lq_lookup_tx) = (cache.clone(), lq_lookup_tx.clone());
         task::spawn(async move {
             loop {
                 debug!("listen_hf_calc: created thread");
 
                 match listen_hf_calc_handler(&cache, &mut rc).await {
-                    Ok(_) => debug!("listen_hf_calc: Ok"),
-                    Err(e) => debug!("listen_hf_calc: error = {:?}", e),
+                    Ok(_) => {
+                        if let Err(e) = lq_lookup_tx.send(()).await {
+                            error!("listen_hf_calc: error = {:?}", e);
+                        }
+                    }
+                    Err(e) => error!("listen_hf_calc: error = {:?}", e),
                 }
             }
         });
@@ -1017,8 +1031,10 @@ async fn listen_hf_calc_handler(cache: &Cache, rc: &mut Receiver<HFRequest>) -> 
         match hf_rq {
             HFRequest::User(user, rq_date) => match cache.calc_hf(Some(&user), rq_date).await {
                 Ok(_) => {
-                    let (hf, _) = &*cache.health_factors.read().await;
-                    debug!("listen_hf_calc: user = {}, hf = {}", user, hf);
+                    debug!("listen_hf_calc: user = {}, hf = {}", user, {
+                        let (hf, _) = &*cache.health_factors.read().await;
+                        hf.clone()
+                    });
                 }
                 Err(e) => {
                     error!("listen_hf_calc: user = {}, error = {:?}", user, e)
@@ -1026,8 +1042,10 @@ async fn listen_hf_calc_handler(cache: &Cache, rc: &mut Receiver<HFRequest>) -> 
             },
             HFRequest::Full(rq_date) => match cache.calc_hf(None, rq_date).await {
                 Ok(_) => {
-                    let (hf, _) = &*cache.health_factors.read().await;
-                    debug!("listen_hf_calc: hf = {}", hf);
+                    debug!("listen_hf_calc: hf = {}", {
+                        let (hf, _) = &*cache.health_factors.read().await;
+                        hf.clone()
+                    });
                 }
                 Err(e) => error!("listen_hf_calc: error = {:?}", e),
             },
@@ -1035,6 +1053,61 @@ async fn listen_hf_calc_handler(cache: &Cache, rc: &mut Receiver<HFRequest>) -> 
     }
 
     Ok(())
+}
+
+async fn liquidation_lookup(
+    cache: Arc<Cache>,
+    lq_txs: Vec<Sender<usize>>,
+    bound: usize,
+) -> eyre::Result<Sender<()>> {
+    let (lq_lookup_tx, mut lq_lookup_rc) = channel::<()>(bound);
+    task::spawn(async move {
+        loop {
+            debug!("liquidation_lookup: check if we have any liquidation opportunities");
+
+            let (workers, mut counter) = (lq_txs.len(), 0);
+            while let Some(_) = lq_lookup_rc.recv().await {
+                let (hf, _) = &*cache.health_factors.read().await;
+                for (i, &v) in hf.iter().enumerate() {
+                    if v < 1.0 {
+                        let lq_tx = lq_txs[counter % workers].clone();
+                        if let Err(e) = lq_tx.send(i).await {
+                            error!("failed to send index {}: {:?}", i, e);
+                        }
+                        counter = counter.wrapping_add(1);
+                    }
+                }
+            }
+        }
+    });
+
+    Ok(lq_lookup_tx)
+}
+
+async fn liquidation(
+    cache: Arc<Cache>,
+    workers: usize,
+    bound: usize,
+) -> eyre::Result<Vec<Sender<usize>>> {
+    let mut senders = Vec::with_capacity(workers);
+
+    for _ in 0..workers {
+        let (lq_tx, mut lq_rc) = channel::<usize>(bound);
+        let cache = cache.clone();
+        task::spawn(async move {
+            loop {
+                debug!("liquidation: waiting for liquidation");
+
+                while let Some(i) = lq_rc.recv().await {
+                    let (hf, _) = &*cache.health_factors.read().await;
+                    info!("liquidation: index {}, hf = {}", i, hf[i]);
+                }
+            }
+        });
+        senders.push(lq_tx);
+    }
+
+    Ok(senders)
 }
 
 pub type UserDetails = DashMap<Address, UserSettings>;
@@ -1244,11 +1317,7 @@ impl Cache {
                 .zip(liquidity_rates.iter())
                 .zip(last_update_timestamps.iter())
                 .map(|((li, lr), lu)| {
-                    Index::new(
-                        li.clone(),
-                        lr.clone(),
-                        lu.to::<i64>() * 1_000_000,
-                    )
+                    Index::new(li.clone(), lr.clone(), lu.to::<i64>() * 1_000_000)
                 })
                 .collect::<Vec<_>>();
             (*indexes, *last_modified) = (Array1::from(idx), now);
@@ -1271,11 +1340,7 @@ impl Cache {
                 .zip(variable_borrow_rates.iter())
                 .zip(last_update_timestamps.iter())
                 .map(|((vbi, vbr), lu)| {
-                    Index::new(
-                        vbi.clone(),
-                        vbr.clone(),
-                        lu.to::<i64>() * 1_000_000,
-                    )
+                    Index::new(vbi.clone(), vbr.clone(), lu.to::<i64>() * 1_000_000)
                 })
                 .collect::<Vec<_>>();
             (*indexes, *last_modified) = (Array1::from(idx), now);

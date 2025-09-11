@@ -4723,3 +4723,17 @@ async fn test_some_numbers() -> eyre::Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn test_hf_lookup() -> eyre::Result<()> {
+    let hf = Array1::from_vec(vec![4.1, 0.9, 0.0, 2.1, 0.99, 1.1, 1.0]);
+    let result = hf
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &v)| if v < 1.0 { Some(i) } else { None })
+        .collect::<Vec<_>>();
+
+    assert_eq!(result, vec![1, 2, 4]);
+
+    Ok(())
+}
