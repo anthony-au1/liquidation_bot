@@ -8,9 +8,8 @@ use crate::arbitrum::arbitrum::{
     TimeStamp, Token, TokenDetails, Tokens, RAY,
 };
 use alloy_primitives::{Address, U256};
-use chrono::{Datelike, Duration, Utc};
+use chrono::Utc;
 use eyre::eyre;
-use std::ops::Add;
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
 use tracing::debug;
@@ -85,16 +84,17 @@ where
     F2: FnOnce() -> R2,
     R2: Future<Output = eyre::Result<()>> + Send,
 {
+    let sync_requested = Utc::now().timestamp_micros() - last_sync > 86_400_000_000;
     match rq_date {
-        t if t > last_modified => {
+        t if !sync_requested && t > last_modified => {
             // new event
             new_event().await?;
         }
-        t if t <= last_sync => {
+        t if !sync_requested && t <= last_sync => {
             // skip event
             skip_event().await?;
         }
-        t if t > last_sync && t <= last_modified => {
+        t if sync_requested || (t > last_sync && t <= last_modified) => {
             // sync user
             debug!("supply: sync_user user = {:?}", user);
             cache.sync_user(&user, &tokens, provider).await?;

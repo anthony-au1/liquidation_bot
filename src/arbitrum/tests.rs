@@ -5,10 +5,10 @@ use crate::arbitrum::arbitrum::IL2Pool::{
     ReserveUsedAsCollateralDisabled, ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
 use crate::arbitrum::arbitrum::{
-    liquidation_threshold_update, listen_events, listen_hf_calc, listen_price_update, listen_sync, setup, AaveEvents, Cache,
-    DataProvider, F64Converter, HFRequest, Index, RayOperations, ReserveData, RqDate, Scaler,
-    SyncRequest, SyncTarget, Token, TokenDetails, UserData,
-    UserReserveData, UserSettings,
+    AaveEvents, Cache, DataProvider, F64Converter, HFRequest, Index, RayOperations, ReserveData,
+    RqDate, Scaler, SyncRequest, SyncTarget, Token, TokenDetails, UserData, UserReserveData,
+    UserSettings, liquidation, liquidation_lookup, liquidation_threshold_update, listen_events,
+    listen_hf_calc, listen_price_update, listen_sync, setup,
 };
 use crate::arbitrum::events::{
     answer_updated, borrow, create_user, liquidation_call, repay, reserve_data_updated,
@@ -28,8 +28,8 @@ use std::fmt::Debug;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc::channel;
 use tokio::sync::RwLock;
+use tokio::sync::mpsc::channel;
 use tokio::task;
 use tokio::time::sleep;
 
@@ -1837,12 +1837,13 @@ async fn test_supply() -> eyre::Result<()> {
 
     {
         let collateral = &*cache.collateral.read().await;
-        let (_, _, last_modified) = &mut *collateral
+        let (_, last_sync, last_modified) = &mut *collateral
             .get(0)
             .ok_or_else(|| eyre!("can't get row = 0 from collateral"))?
             .write()
             .await;
         *last_modified = Utc::now().timestamp_micros();
+        *last_sync = Utc::now().timestamp_micros() - 1 - 24 * 60 * 60 * 1000_000;
     }
 
     let (sync_tx, mut sync_rc) = channel::<SyncRequest>(1);
@@ -2284,7 +2285,23 @@ async fn test_hf_calc() -> eyre::Result<()> {
         *bor = Array1::from_vec(vec![bor1, bor2, bor3]);
     }
 
-    let senders = listen_hf_calc(cache.clone(), 1, 1).await?;
+    let (lq_lookup_tx, mut lq_lookup_rc) = channel::<()>(1);
+    let lq_lookup_handler = task::spawn(async move {
+        let mut call_counter = 0;
+        for _ in 0..2 {
+            let msg = lq_lookup_rc
+                .recv()
+                .await
+                .ok_or_else(|| eyre::eyre!("lq_lookup channel closed"))?;
+            assert_eq!((), msg);
+
+            call_counter += 1;
+        }
+
+        Ok::<_, eyre::Error>(call_counter)
+    });
+
+    let senders = listen_hf_calc(cache.clone(), lq_lookup_tx, 1, 1).await?;
     let sender = senders.get(0).ok_or_else(|| eyre::eyre!("senders empty"))?;
     let rq_date = Utc::now().timestamp_micros();
     sender.send(HFRequest::User(user.clone(), rq_date)).await?;
@@ -2335,8 +2352,11 @@ async fn test_hf_calc() -> eyre::Result<()> {
     }
 
     sender.send(HFRequest::Full(rq_date)).await?;
+    let call_counter = lq_lookup_handler.await??;
 
     sleep(Duration::from_secs(1)).await;
+
+    assert_eq!(call_counter, 2);
 
     let (hf, _) = &*cache.health_factors.read().await;
     assert_eq!(
@@ -4719,6 +4739,42 @@ async fn test_some_numbers() -> eyre::Result<()> {
         .to_scaled(1033.as_u256(24));
 
     assert_eq!(total, U256::from(999014897193691932320573917_u128));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_hf_lookup() -> eyre::Result<()> {
+    let hf = Array1::from_vec(vec![4.1, 0.9, 0.0, 2.1, 0.99, 1.1, 1.0]);
+    let result = hf
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &v)| if v < 1.0 { Some(i) } else { None })
+        .collect::<Vec<_>>();
+
+    assert_eq!(result, vec![1, 2, 4]);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_lq_lookup() -> eyre::Result<()> {
+    let (cache, _) = generate_cache_and_tokens(1).await?;
+    let cache = Arc::new(cache);
+
+    {
+        *cache.health_factors.write().await = (
+            Array1::from_vec(vec![5.3, 0.99, 1.0, 10.1, 0.58, 0.33, 20.1, 5.444, 8.01, 0.1]),
+            Utc::now().timestamp_micros(),
+        );
+    }
+
+    let senders = liquidation(cache.clone(), 4, 1000).await?;
+    let lq_lookup_tx = liquidation_lookup(cache.clone(), senders, 1000).await?;
+
+    lq_lookup_tx.send(()).await?;
+
+    sleep(Duration::from_secs(1)).await;
 
     Ok(())
 }
