@@ -1010,11 +1010,9 @@ pub(crate) async fn listen_hf_calc(
             loop {
                 debug!("listen_hf_calc: created thread");
 
-                match listen_hf_calc_handler(&cache, &mut rc).await {
+                match listen_hf_calc_handler(&cache, &mut rc, &lq_lookup_tx).await {
                     Ok(_) => {
-                        if let Err(e) = lq_lookup_tx.send(()).await {
-                            error!("listen_hf_calc: error = {:?}", e);
-                        }
+                        debug!("listen_hf_calc: Ok");
                     }
                     Err(e) => error!("listen_hf_calc: error = {:?}", e),
                 }
@@ -1026,7 +1024,11 @@ pub(crate) async fn listen_hf_calc(
     Ok(senders)
 }
 
-async fn listen_hf_calc_handler(cache: &Cache, rc: &mut Receiver<HFRequest>) -> eyre::Result<()> {
+async fn listen_hf_calc_handler(
+    cache: &Cache,
+    rc: &mut Receiver<HFRequest>,
+    lq_lookup_tx: &Sender<()>,
+) -> eyre::Result<()> {
     while let Some(hf_rq) = rc.recv().await {
         match hf_rq {
             HFRequest::User(user, rq_date) => match cache.calc_hf(Some(&user), rq_date).await {
@@ -1050,6 +1052,8 @@ async fn listen_hf_calc_handler(cache: &Cache, rc: &mut Receiver<HFRequest>) -> 
                 Err(e) => error!("listen_hf_calc: error = {:?}", e),
             },
         }
+
+        lq_lookup_tx.send(()).await?;
     }
 
     Ok(())

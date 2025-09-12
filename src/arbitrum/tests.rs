@@ -5,10 +5,10 @@ use crate::arbitrum::arbitrum::IL2Pool::{
     ReserveUsedAsCollateralDisabled, ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
 use crate::arbitrum::arbitrum::{
-    AaveEvents, Cache, DataProvider, F64Converter, HFRequest, Index, RayOperations, ReserveData,
-    RqDate, Scaler, SyncRequest, SyncTarget, Token, TokenDetails, UserData, UserReserveData,
-    UserSettings, liquidation_threshold_update, listen_events, listen_hf_calc, listen_price_update,
-    listen_sync, setup,
+    liquidation_threshold_update, listen_events, listen_hf_calc, listen_price_update, listen_sync, setup, AaveEvents, Cache,
+    DataProvider, F64Converter, HFRequest, Index, RayOperations, ReserveData, RqDate, Scaler,
+    SyncRequest, SyncTarget, Token, TokenDetails, UserData,
+    UserReserveData, UserSettings,
 };
 use crate::arbitrum::events::{
     answer_updated, borrow, create_user, liquidation_call, repay, reserve_data_updated,
@@ -28,8 +28,8 @@ use std::fmt::Debug;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
 use tokio::sync::mpsc::channel;
+use tokio::sync::RwLock;
 use tokio::task;
 use tokio::time::sleep;
 
@@ -2285,7 +2285,23 @@ async fn test_hf_calc() -> eyre::Result<()> {
         *bor = Array1::from_vec(vec![bor1, bor2, bor3]);
     }
 
-    let senders = listen_hf_calc(cache.clone(), 1, 1).await?;
+    let (lq_lookup_tx, mut lq_lookup_rc) = channel::<()>(1);
+    let lq_lookup_handler = task::spawn(async move {
+        let mut call_counter = 0;
+        for _ in 0..2 {
+            let msg = lq_lookup_rc
+                .recv()
+                .await
+                .ok_or_else(|| eyre::eyre!("lq_lookup channel closed"))?;
+            assert_eq!((), msg);
+
+            call_counter += 1;
+        }
+
+        Ok::<_, eyre::Error>(call_counter)
+    });
+
+    let senders = listen_hf_calc(cache.clone(), lq_lookup_tx, 1, 1).await?;
     let sender = senders.get(0).ok_or_else(|| eyre::eyre!("senders empty"))?;
     let rq_date = Utc::now().timestamp_micros();
     sender.send(HFRequest::User(user.clone(), rq_date)).await?;
@@ -2336,8 +2352,11 @@ async fn test_hf_calc() -> eyre::Result<()> {
     }
 
     sender.send(HFRequest::Full(rq_date)).await?;
+    let call_counter = lq_lookup_handler.await??;
 
     sleep(Duration::from_secs(1)).await;
+
+    assert_eq!(call_counter, 2);
 
     let (hf, _) = &*cache.health_factors.read().await;
     assert_eq!(
