@@ -1059,7 +1059,7 @@ async fn listen_hf_calc_handler(
     Ok(())
 }
 
-async fn liquidation_lookup(
+pub(crate) async fn liquidation_lookup(
     cache: Arc<Cache>,
     lq_txs: Vec<Sender<usize>>,
     bound: usize,
@@ -1088,7 +1088,7 @@ async fn liquidation_lookup(
     Ok(lq_lookup_tx)
 }
 
-async fn liquidation(
+pub(crate) async fn liquidation(
     cache: Arc<Cache>,
     workers: usize,
     bound: usize,

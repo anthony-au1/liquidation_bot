@@ -5,10 +5,10 @@ use crate::arbitrum::arbitrum::IL2Pool::{
     ReserveUsedAsCollateralDisabled, ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
 use crate::arbitrum::arbitrum::{
-    liquidation_threshold_update, listen_events, listen_hf_calc, listen_price_update, listen_sync, setup, AaveEvents, Cache,
-    DataProvider, F64Converter, HFRequest, Index, RayOperations, ReserveData, RqDate, Scaler,
-    SyncRequest, SyncTarget, Token, TokenDetails, UserData,
-    UserReserveData, UserSettings,
+    AaveEvents, Cache, DataProvider, F64Converter, HFRequest, Index, RayOperations, ReserveData,
+    RqDate, Scaler, SyncRequest, SyncTarget, Token, TokenDetails, UserData, UserReserveData,
+    UserSettings, liquidation, liquidation_lookup, liquidation_threshold_update, listen_events,
+    listen_hf_calc, listen_price_update, listen_sync, setup,
 };
 use crate::arbitrum::events::{
     answer_updated, borrow, create_user, liquidation_call, repay, reserve_data_updated,
@@ -28,8 +28,8 @@ use std::fmt::Debug;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc::channel;
 use tokio::sync::RwLock;
+use tokio::sync::mpsc::channel;
 use tokio::task;
 use tokio::time::sleep;
 
@@ -4753,6 +4753,28 @@ async fn test_hf_lookup() -> eyre::Result<()> {
         .collect::<Vec<_>>();
 
     assert_eq!(result, vec![1, 2, 4]);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_lq_lookup() -> eyre::Result<()> {
+    let (cache, _) = generate_cache_and_tokens(1).await?;
+    let cache = Arc::new(cache);
+
+    {
+        *cache.health_factors.write().await = (
+            Array1::from_vec(vec![5.3, 0.99, 1.0, 10.1, 0.58, 0.33, 20.1, 5.444, 8.01, 0.1]),
+            Utc::now().timestamp_micros(),
+        );
+    }
+
+    let senders = liquidation(cache.clone(), 4, 1000).await?;
+    let lq_lookup_tx = liquidation_lookup(cache.clone(), senders, 1000).await?;
+
+    lq_lookup_tx.send(()).await?;
+
+    sleep(Duration::from_secs(1)).await;
 
     Ok(())
 }
