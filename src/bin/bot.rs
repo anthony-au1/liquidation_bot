@@ -3,17 +3,18 @@ extern crate core;
 use liquidation_bot;
 
 use alloy::providers::{ProviderBuilder, WsConnect};
-use alloy_primitives::Address;
-use axum::extract::State;
-use axum::http::StatusCode;
 use axum::routing::get;
-use axum::{Json, Router};
-use bitvec::order::Lsb0;
-use bitvec::prelude::BitVec;
+use axum::Router;
 use clap::{Parser, Subcommand};
 use liquidation_bot::arbitrum::arbitrum::AaveDataProvider;
-use liquidation_bot::arbitrum::arbitrum::{Cache, WS_URL, start};
-use serde::Serialize;
+use liquidation_bot::arbitrum::arbitrum::{start, Cache, WS_URL};
+use liquidation_bot::arbitrum::stats::{
+    get_borrowed_matrix_state, get_borrowed_state, get_collateral_matrix_state,
+    get_collateral_state, get_decimals_state, get_full_state, get_health_factors_state,
+    get_liquidation_threshold_state, get_liquidity_index_state, get_liquidity_state,
+    get_prices_state, get_reserve_state, get_users_state, get_variable_borrow_index_state,
+    get_variable_borrow_state,
+};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing::info;
@@ -57,7 +58,27 @@ async fn main() -> eyre::Result<()> {
             let cache = Arc::new(Cache::default());
 
             let app = Router::new()
-                .route("/state", get(get_full_state))
+                .route("/full_state", get(get_full_state))
+                .route("/users", get(get_users_state))
+                .route("/decimals", get(get_decimals_state))
+                .route("/reserve", get(get_reserve_state))
+                .route("/collateral", get(get_collateral_state))
+                .route("/collateral_matrix", get(get_collateral_matrix_state))
+                .route("/borrowed", get(get_borrowed_state))
+                .route("/borrowed_matrix", get(get_borrowed_matrix_state))
+                .route("/liquidity", get(get_liquidity_state))
+                .route("/liquidity_index", get(get_liquidity_index_state))
+                .route("/variable_borrow", get(get_variable_borrow_state))
+                .route(
+                    "/variable_borrow_index",
+                    get(get_variable_borrow_index_state),
+                )
+                .route(
+                    "/liquidation_threshold",
+                    get(get_liquidation_threshold_state),
+                )
+                .route("/prices", get(get_prices_state))
+                .route("/health_factors", get(get_health_factors_state))
                 .with_state(cache.clone());
             let listener = TcpListener::bind("0.0.0.0:3000").await?;
             let data_provider = Arc::new(AaveDataProvider::new(&provider)?);
@@ -77,55 +98,4 @@ async fn main() -> eyre::Result<()> {
     }
 
     Ok(())
-}
-
-#[derive(Serialize)]
-struct FullState {
-    users: Vec<User>,
-    users_num: usize,
-    decimals: Vec<f64>,
-}
-
-#[derive(Serialize)]
-struct User {
-    name: Address,
-    row: usize,
-    use_as_collateral: Vec<bool>,
-}
-
-impl User {
-    fn new(name: Address, row: usize, use_as_collateral: BitVec<usize, Lsb0>) -> Self {
-        let use_as_collateral = use_as_collateral.iter().by_vals().collect();
-
-        Self {
-            name,
-            row,
-            use_as_collateral,
-        }
-    }
-}
-
-async fn get_full_state(State(cache): State<Arc<Cache>>) -> (StatusCode, Json<FullState>) {
-    let users = cache
-        .users
-        .iter()
-        .map(|entry| {
-            User::new(
-                entry.key().clone(),
-                entry.value().row_num,
-                entry.value().use_as_collateral.clone(),
-            )
-        })
-        .collect::<Vec<_>>();
-
-    let users_num = *cache.users_num.read().await;
-    let decimals = {
-        let (decimals, _) = &*cache.decimals.read().await;
-        decimals.to_vec()
-    };
-
-
-    let full_state = FullState { users, users_num, decimals };
-
-    (StatusCode::CREATED, Json(full_state))
 }
