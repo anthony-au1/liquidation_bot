@@ -1,6 +1,6 @@
 use crate::arbitrum::arbitrum::IAaveOracle::IAaveOracleInstance;
 use crate::arbitrum::arbitrum::IAaveProtocolDataProvider::{
-    getReserveDataReturn, getUserReserveDataReturn, IAaveProtocolDataProviderInstance, TokenData,
+    IAaveProtocolDataProviderInstance, TokenData, getReserveDataReturn, getUserReserveDataReturn,
 };
 use crate::arbitrum::arbitrum::IChainlinkAggregator::IChainlinkAggregatorEvents;
 use crate::arbitrum::arbitrum::IL2Pool::IL2PoolEvents;
@@ -14,21 +14,20 @@ use alloy::rpc::types::Filter;
 use alloy::sol;
 use alloy::sol_types::SolEventInterface;
 use alloy_primitives::aliases::U40;
-use alloy_primitives::private::serde::Serialize;
-use alloy_primitives::{Sign, I256, U256, U512};
+use alloy_primitives::{I256, Sign, U256, U512};
 use async_trait::async_trait;
 use bitvec::prelude::*;
 use chrono::Utc;
 use dashmap::DashMap;
 use eyre::eyre;
 use futures::future::try_join_all;
-use ndarray::{concatenate, Array1, Array2, Axis};
+use ndarray::{Array1, Array2, Axis, concatenate};
 use std::collections::HashMap;
 use std::default::Default;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::RwLock;
+use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::{task, time, try_join};
 use tracing::{debug, error, info};
 

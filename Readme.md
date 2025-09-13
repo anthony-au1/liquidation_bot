@@ -46,6 +46,38 @@
 `cargo build --target x86_64-unknown-linux-gnu` - build for a different platform
 
 
+## Stats 
+
+`curl http://localhost:3000/full_state | jq` - full stats
+
+`curl http://localhost:3000/users | jq` - users
+
+`curl http://localhost:3000/decimals | jq` - decimals
+
+`curl http://localhost:3000/reserve | jq` - reserve
+
+`curl http://localhost:3000/collateral | jq` - collateral
+
+`curl http://localhost:3000/collateral_matrix | jq` - collateral matrix
+
+`curl http://localhost:3000/borrowed | jq` - borrowed
+
+`curl http://localhost:3000/borrowed_matrix | jq` - borrowed matrix
+
+`curl http://localhost:3000/liquidity | jq` - liquidity
+
+`curl http://localhost:3000/liquidity_index | jq` - liquidity index
+
+`curl http://localhost:3000/variable_borrow | jq` - variable borrow
+
+`curl http://localhost:3000/variable_borrow_index | jq` - variable borrow index
+
+`curl http://localhost:3000/liquidation_threshold | jq` - liquidation threshold
+
+`curl http://localhost:3000/prices | jq` - prices
+
+`curl http://localhost:3000/health_factors | jq` - health factors
+
 
 
 **Future Improvements**
