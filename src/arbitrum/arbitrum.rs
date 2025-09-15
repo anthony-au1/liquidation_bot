@@ -723,11 +723,6 @@ where
     let mut tokens = HashMap::new();
     let mut order = 0;
     for token in token_data {
-        debug!(
-            "setup: token symbol = {}, token address = {}",
-            token.symbol, token.tokenAddress
-        );
-
         let (asset_source, decimals) = try_join!(
             provider.get_source_of_asset(&token.tokenAddress),
             provider.get_decimals(&token.tokenAddress),
@@ -735,7 +730,10 @@ where
 
         let price_decimals = provider.get_price_decimals(&asset_source).await?;
 
-        debug!("setup: token asset_address = {}", asset_source);
+        debug!(
+            "setup: token symbol = {}, token address = {}, decimals = {}, price_source = {}, price_decimals = {}",
+            token.symbol, token.tokenAddress, decimals, asset_source, price_decimals
+        );
 
         tokens.insert(
             token.tokenAddress,
