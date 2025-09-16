@@ -5,10 +5,10 @@ use crate::arbitrum::arbitrum::IL2Pool::{
     ReserveUsedAsCollateralDisabled, ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
 use crate::arbitrum::arbitrum::{
+    liquidation, liquidation_lookup, liquidation_threshold_update, listen_events, listen_hf_calc, listen_price_update, listen_sync, setup,
     AaveEvents, Cache, DataProvider, F64Converter, HFRequest, Index, RayOperations, ReserveData,
-    RqDate, Scaler, SyncRequest, SyncTarget, Token, TokenDetails, UserData, UserReserveData,
-    UserSettings, liquidation, liquidation_lookup, liquidation_threshold_update, listen_events,
-    listen_hf_calc, listen_price_update, listen_sync, setup,
+    RqDate, Scaler, SyncRequest, SyncTarget, Token,
+    TokenDetails, UserData, UserReserveData, UserSettings,
 };
 use crate::arbitrum::events::{
     answer_updated, borrow, create_user, liquidation_call, repay, reserve_data_updated,
@@ -28,8 +28,8 @@ use std::fmt::Debug;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
 use tokio::sync::mpsc::channel;
+use tokio::sync::RwLock;
 use tokio::task;
 use tokio::time::sleep;
 
@@ -292,6 +292,44 @@ impl DataProvider for DummyDataProvider {
         };
 
         Ok(decimals)
+    }
+
+    async fn get_asset_prices(&self, tokens: Vec<Address>) -> eyre::Result<Vec<U256>> {
+        let mut prices = Vec::with_capacity(tokens.len());
+
+        for (idx, token) in tokens.iter().enumerate() {
+            prices[idx] = match token {
+                t if *t == Address::from_str("0x1Ac54C113cefD1792CbFcF41B711824d657eb61D")? => {
+                    U256::from(101) * U256::from(10).pow(U256::from(18))
+                }
+                t if *t == Address::from_str("0x1Af54C113cefD1792CbFcF41B711834d657ea61D")? => {
+                    U256::from(102) * U256::from(10).pow(U256::from(6))
+                }
+                t if *t == Address::from_str("0x1Af54C113cefD1792CbFcF41B711824d657eb61D")? => {
+                    U256::from(103) * U256::from(10).pow(U256::from(12))
+                }
+                _ => U256::from(101) * U256::from(10).pow(U256::from(18)),
+            }
+        }
+
+        Ok(prices)
+    }
+
+    async fn get_asset_price(&self, token: &Address) -> eyre::Result<U256> {
+        let price = match token {
+            t if *t == Address::from_str("0x1Ac54C113cefD1792CbFcF41B711824d657eb61D")? => {
+                U256::from(101) * U256::from(10).pow(U256::from(18))
+            }
+            t if *t == Address::from_str("0x1Af54C113cefD1792CbFcF41B711834d657ea61D")? => {
+                U256::from(102) * U256::from(10).pow(U256::from(6))
+            }
+            t if *t == Address::from_str("0x1Af54C113cefD1792CbFcF41B711824d657eb61D")? => {
+                U256::from(103) * U256::from(10).pow(U256::from(12))
+            }
+            _ => U256::from(101) * U256::from(10).pow(U256::from(18)),
+        };
+
+        Ok(price)
     }
 }
 
@@ -1349,6 +1387,14 @@ impl DataProvider for CreateUserDataProvider {
     }
 
     async fn get_price_decimals(&self, _: &Address) -> eyre::Result<f64> {
+        todo!()
+    }
+
+    async fn get_asset_prices(&self, _: Vec<Address>) -> eyre::Result<Vec<U256>> {
+        todo!()
+    }
+
+    async fn get_asset_price(&self, _: &Address) -> eyre::Result<U256> {
         todo!()
     }
 }
@@ -4764,7 +4810,9 @@ async fn test_lq_lookup() -> eyre::Result<()> {
 
     {
         *cache.health_factors.write().await = (
-            Array1::from_vec(vec![5.3, 0.99, 1.0, 10.1, 0.58, 0.33, 20.1, 5.444, 8.01, 0.1]),
+            Array1::from_vec(vec![
+                5.3, 0.99, 1.0, 10.1, 0.58, 0.33, 20.1, 5.444, 8.01, 0.1,
+            ]),
             Utc::now().timestamp_micros(),
         );
     }

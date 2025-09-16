@@ -310,6 +310,44 @@ impl DataProvider for SharedDataProvider {
 
         Ok(decimals)
     }
+
+    async fn get_asset_prices(&self, tokens: Vec<Address>) -> eyre::Result<Vec<U256>> {
+        let mut prices = vec![U256::default(); tokens.len()];
+
+        for (idx, token) in tokens.iter().enumerate() {
+            prices[idx] = match token {
+                t if *t == Address::from_str(AAVE)? => {
+                    U256::from(1712) * U256::from(10).pow(U256::from(18))
+                }
+                t if *t == Address::from_str(USDC)? => {
+                    U256::from(281) * U256::from(10).pow(U256::from(6))
+                }
+                t if *t == Address::from_str(DAI)? => {
+                    U256::from(401) * U256::from(10).pow(U256::from(12))
+                }
+                _ => U256::from(1712) * U256::from(10).pow(U256::from(18)),
+            }
+        }
+
+        Ok(prices)
+    }
+
+    async fn get_asset_price(&self, token: &Address) -> eyre::Result<U256> {
+        let price = match token {
+            t if *t == Address::from_str(AAVE)? => {
+                U256::from(1712) * U256::from(10).pow(U256::from(18))
+            }
+            t if *t == Address::from_str(USDC)? => {
+                U256::from(281) * U256::from(10).pow(U256::from(6))
+            }
+            t if *t == Address::from_str(DAI)? => {
+                U256::from(401) * U256::from(10).pow(U256::from(12))
+            }
+            _ => U256::from(1712) * U256::from(10).pow(U256::from(18)),
+        };
+
+        Ok(price)
+    }
 }
 
 struct DummyDataProvider {
@@ -782,6 +820,14 @@ impl DataProvider for DummyDataProvider {
         self.shared_data_provider
             .get_price_decimals(price_source)
             .await
+    }
+
+    async fn get_asset_prices(&self, tokens: Vec<Address>) -> eyre::Result<Vec<U256>> {
+        self.shared_data_provider.get_asset_prices(tokens).await
+    }
+
+    async fn get_asset_price(&self, token: &Address) -> eyre::Result<U256> {
+        self.shared_data_provider.get_asset_price(token).await
     }
 }
 

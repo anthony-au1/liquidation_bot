@@ -84,5 +84,5 @@
 
 
 
-1. check debugs
-2. we need some kind api to check status, to see cache and etc
+1. get init prices
+2. answer updated is not firing
