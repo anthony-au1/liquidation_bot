@@ -21,6 +21,8 @@ pub struct FullState {
     pub users_num: usize,
 
     pub decimals: Vec<f64>,
+    pub tokens: Vec<Address>,
+    pub price_decimals: Vec<f64>,
 
     pub reserve: Vec<Vec<U256>>,
     pub collateral: Vec<Vec<U256>>,
@@ -106,6 +108,30 @@ pub async fn get_decimals_state(State(cache): State<Arc<Cache>>) -> (StatusCode,
     let decimals = get_decimals(cache).await;
 
     (StatusCode::OK, Json(decimals))
+}
+
+async fn get_tokens(cache: Arc<Cache>) -> Vec<Address> {
+    let (tokens, _) = &*cache.tokens.read().await;
+    tokens.to_vec()
+}
+
+pub async fn get_tokens_state(State(cache): State<Arc<Cache>>) -> (StatusCode, Json<Vec<Address>>) {
+    let tokens = get_tokens(cache).await;
+
+    (StatusCode::OK, Json(tokens))
+}
+
+async fn get_price_decimals(cache: Arc<Cache>) -> Vec<f64> {
+    let (price_decimals, _) = &*cache.price_decimals.read().await;
+    price_decimals.to_vec()
+}
+
+pub async fn get_price_decimals_state(
+    State(cache): State<Arc<Cache>>,
+) -> (StatusCode, Json<Vec<f64>>) {
+    let price_decimals = get_price_decimals(cache).await;
+
+    (StatusCode::OK, Json(price_decimals))
 }
 
 async fn get_reserve(cache: Arc<Cache>) -> Vec<Vec<U256>> {
@@ -292,6 +318,8 @@ pub async fn get_health_factors_state(
 pub async fn get_full_state(State(cache): State<Arc<Cache>>) -> (StatusCode, Json<FullState>) {
     let (users, users_num) = get_users(cache.clone()).await;
     let decimals = get_decimals(cache.clone()).await;
+    let tokens = get_tokens(cache.clone()).await;
+    let price_decimals = get_price_decimals(cache.clone()).await;
     let reserve = get_reserve(cache.clone()).await;
     let collateral = get_collateral(cache.clone()).await;
     let collateral_matrix = get_collateral_matrix(cache.clone()).await;
@@ -309,6 +337,8 @@ pub async fn get_full_state(State(cache): State<Arc<Cache>>) -> (StatusCode, Jso
         users,
         users_num,
         decimals,
+        tokens,
+        price_decimals,
         reserve,
         collateral,
         collateral_matrix,

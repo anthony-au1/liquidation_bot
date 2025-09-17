@@ -211,6 +211,15 @@ pub trait DataProvider: Send + Sync {
     async fn get_price_decimals(&self, price_source: &Address) -> eyre::Result<f64>;
     async fn get_asset_prices(&self, tokens: Vec<Address>) -> eyre::Result<Vec<U256>>;
     async fn get_asset_price(&self, token: &Address) -> eyre::Result<U256>;
+    async fn listen_prices_update<F, Fut>(
+        &self,
+        tokens: &Vec<Address>,
+        price_decimals: &Vec<f64>,
+        callback: F,
+    ) -> eyre::Result<()>
+    where
+        F: Fn(Vec<f64>) -> Fut + Send + 'static,
+        Fut: Future<Output = eyre::Result<()>> + Send;
 }
 
 pub struct ReserveData {
@@ -441,6 +450,31 @@ where
 
         Ok(price)
     }
+
+    async fn listen_prices_update<F, Fut>(
+        &self,
+        tokens: &Vec<Address>,
+        price_decimals: &Vec<f64>,
+        callback: F,
+    ) -> eyre::Result<()>
+    where
+        F: Fn(Vec<f64>) -> Fut + Send + 'static,
+        Fut: Future<Output = eyre::Result<()>> + Send,
+    {
+        let mut block_stream = self.provider.subscribe_blocks().await?;
+        while let Ok(_) = block_stream.recv().await {
+            let prices = self
+                .get_asset_prices(tokens.clone())
+                .await?
+                .iter()
+                .enumerate()
+                .map(|(idx, price)| price.as_f64(price_decimals[idx]))
+                .collect();
+            callback(prices).await?;
+        }
+
+        Ok(())
+    }
 }
 
 pub(crate) type Tokens = HashMap<Address, TokenDetails>;
@@ -487,7 +521,6 @@ where
 
     let (tx_events, mut rc_events) = channel::<AaveEvents>(1000_000);
     listen_events(provider.clone(), tx_events.clone()).await?;
-    listen_price_update(provider.clone(), &tokens, tx_events).await?;
 
     let w_num = 4;
     let bound = 1000;
@@ -507,6 +540,14 @@ where
         cache.clone(),
         tokens.clone(),
         provider.clone(),
+        hf_senders[hf_counter % w_num].clone(),
+    )
+    .await?;
+    hf_counter = hf_counter.wrapping_add(1);
+
+    listen_prices_update(
+        provider.clone(),
+        cache.clone(),
         hf_senders[hf_counter % w_num].clone(),
     )
     .await?;
@@ -824,54 +865,49 @@ where
     Ok(())
 }
 
-pub(crate) async fn listen_price_update<P>(
+pub(crate) async fn listen_prices_update<P>(
     provider: Arc<P>,
-    tokens: &Tokens,
-    tx: Sender<AaveEvents>,
+    cache: Arc<Cache>,
+    hf_tx: Sender<HFRequest>,
 ) -> eyre::Result<()>
 where
     P: DataProvider + 'static,
 {
-    for (token, TokenDetails { price_source, .. }) in tokens {
-        let (token, price_source, provider, tx) = (
-            token.clone(),
-            price_source.clone(),
-            provider.clone(),
-            tx.clone(),
-        );
-        task::spawn(async move {
-            loop {
-                debug!("listen_price_update: created thread");
+    task::spawn(async move {
+        debug!("listen_prices_update: created thread");
 
-                let tx = tx.clone();
-                match provider
-                    .listen_price_update(&price_source, move |data| {
-                        let tx = tx.clone();
-                        async move {
-                            match data {
-                                IChainlinkAggregatorEvents::AnswerUpdated(_) => {
-                                    debug!("listen_price_update: answer updated event")
-                                }
-                            }
+        let tokens = {
+            let (tokens, _) = &*cache.tokens.read().await;
+            &tokens.to_vec()
+        };
+        let price_decimals = {
+            let (price_decimals, _) = &*cache.price_decimals.read().await;
+            &price_decimals.to_vec()
+        };
 
-                            tx.send(AaveEvents::IChainlinkAggregatorEvents(
-                                data,
-                                token,
-                                Utc::now().timestamp_micros(),
-                            ))
-                            .await?;
+        loop {
+            let hf_tx = hf_tx.clone();
+            let cache = cache.clone();
+            match provider
+                .listen_prices_update(&tokens, &price_decimals, move |prices| {
+                    let hf_tx = hf_tx.clone();
+                    let cache = cache.clone();
+                    async move {
+                        let now = Utc::now().timestamp_micros();
 
-                            Ok(())
-                        }
-                    })
-                    .await
-                {
-                    Ok(_) => debug!("listen_price_update: Ok"),
-                    Err(e) => debug!("listen_price_update: error = {:?}", e),
-                }
+                        *cache.prices.write().await = (Array1::from_vec(prices), now);
+                        hf_tx.send(HFRequest::Full(now)).await?;
+
+                        Ok(())
+                    }
+                })
+                .await
+            {
+                Ok(_) => debug!("listen_prices_update: Ok"),
+                Err(e) => debug!("listen_prices_update: error = {:?}", e),
             }
-        });
-    }
+        }
+    });
 
     Ok(())
 }
@@ -1137,6 +1173,7 @@ pub type Array = RwLock<(Array1<f64>, TimeStamp)>;
 pub type Arrays = RwLock<Vec<RwLock<(Array1<U256>, TimeStamp, TimeStamp)>>>;
 pub type Matrix = RwLock<Array2<f64>>;
 pub type Indexes = RwLock<(Array1<Index>, TimeStamp)>;
+pub type Addresses = RwLock<(Array1<Address>, TimeStamp)>;
 
 #[derive(Default, Debug, Clone)]
 pub struct Index {
@@ -1215,6 +1252,9 @@ pub struct Cache {
     pub users_num: RwLock<usize>,
     pub decimals: Array,
 
+    pub tokens: Addresses,
+    pub price_decimals: Array,
+
     pub reserve: Arrays,
     pub collateral: Arrays,
     pub collateral_matrix: Matrix,
@@ -1243,19 +1283,29 @@ impl Cache {
 
         let now = Utc::now().timestamp_micros();
 
-        let mut decimals = vec![0.0; token_num];
+        let (mut decimals, mut price_decimals, mut token_addresses) = (
+            vec![0.0; token_num],
+            vec![0.0; token_num],
+            vec![Address::default(); token_num],
+        );
         for (
-            _,
+            token_address,
             TokenDetails {
                 order,
                 decimals: dec,
+                price_decimals: pd,
                 ..
             },
         ) in tokens
         {
             decimals[*order] = *dec;
+            price_decimals[*order] = *pd;
+            token_addresses[*order] = token_address.clone();
         }
         *self.decimals.write().await = (Array1::from_vec(decimals), now);
+
+        *self.tokens.write().await = (Array1::from_vec(token_addresses.clone()), now);
+        *self.price_decimals.write().await = (Array1::from_vec(price_decimals.clone()), now);
 
         *self.liquidity.write().await = (Array1::from_elem(token_num, Index::default()), now);
         *self.liquidity_index.write().await = (Array1::from_elem(token_num, 0.0), now);
@@ -1265,28 +1315,12 @@ impl Cache {
         *self.liquidation_threshold.write().await = (Array1::from_elem(token_num, 0.0), now);
         *self.health_factors.write().await = (Array1::from_elem(0, 0.0), now);
 
-        let (mut token_addresses, mut prices) =
-            (vec![Address::default(); token_num], vec![0.0; token_num]);
-        tokens.iter().for_each(
-            |(
-                token_address,
-                TokenDetails {
-                    order,
-                    price_decimals,
-                    ..
-                },
-            )| {
-                let idx = order.clone();
-                token_addresses[idx] = token_address.clone();
-                prices[idx] = price_decimals.clone();
-            },
-        );
         let prices = provider
             .get_asset_prices(token_addresses)
             .await?
             .iter()
             .enumerate()
-            .map(|(idx, price)| price.as_f64(prices[idx]))
+            .map(|(idx, price)| price.as_f64(price_decimals[idx]))
             .collect();
         *self.prices.write().await = (Array1::from_vec(prices), now);
 
