@@ -5,13 +5,13 @@ use crate::arbitrum::arbitrum::IL2Pool::{
     ReserveUsedAsCollateralDisabled, ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
 use crate::arbitrum::arbitrum::{
-    liquidation, liquidation_lookup, liquidation_threshold_update, listen_events, listen_hf_calc, listen_price_update, listen_sync, setup,
+    liquidation, liquidation_lookup, liquidation_threshold_update, listen_events, listen_hf_calc, listen_sync, setup,
     AaveEvents, Cache, DataProvider, F64Converter, HFRequest, Index, RayOperations, ReserveData,
-    RqDate, Scaler, SyncRequest, SyncTarget, Token,
+    RqDate, Scaler, SyncRequest, SyncTarget,
     TokenDetails, UserData, UserReserveData, UserSettings,
 };
 use crate::arbitrum::events::{
-    answer_updated, borrow, create_user, liquidation_call, repay, reserve_data_updated,
+    borrow, create_user, liquidation_call, repay, reserve_data_updated,
     reserve_used_as_collateral_disabled, reserve_used_as_collateral_enabled, supply, withdraw,
 };
 use alloy_primitives::aliases::U40;

@@ -1,11 +1,10 @@
 use crate::arbitrum::arbitrum::IAaveOracle::IAaveOracleInstance;
 use crate::arbitrum::arbitrum::IAaveProtocolDataProvider::{
-    IAaveProtocolDataProviderInstance, TokenData, getReserveDataReturn, getUserReserveDataReturn,
+    getReserveDataReturn, getUserReserveDataReturn, IAaveProtocolDataProviderInstance, TokenData,
 };
-use crate::arbitrum::arbitrum::IChainlinkAggregator::IChainlinkAggregatorEvents;
 use crate::arbitrum::arbitrum::IL2Pool::IL2PoolEvents;
 use crate::arbitrum::events::{
-    answer_updated, borrow, liquidation_call, repay, reserve_data_updated,
+    borrow, liquidation_call, repay, reserve_data_updated,
     reserve_used_as_collateral_disabled, reserve_used_as_collateral_enabled, supply, withdraw,
 };
 use alloy::primitives::{Address, Log};
@@ -14,20 +13,20 @@ use alloy::rpc::types::Filter;
 use alloy::sol;
 use alloy::sol_types::SolEventInterface;
 use alloy_primitives::aliases::U40;
-use alloy_primitives::{I256, Sign, U256, U512};
+use alloy_primitives::{Sign, I256, U256, U512};
 use async_trait::async_trait;
 use bitvec::prelude::*;
 use chrono::Utc;
 use dashmap::DashMap;
 use eyre::eyre;
 use futures::future::try_join_all;
-use ndarray::{Array1, Array2, Axis, concatenate};
+use ndarray::{concatenate, Array1, Array2, Axis};
 use std::collections::HashMap;
 use std::default::Default;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::RwLock;
-use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::{task, time, try_join};
 use tracing::{debug, error, info};
 
@@ -192,14 +191,6 @@ pub trait DataProvider: Send + Sync {
     where
         F: Fn(IL2PoolEvents) -> Fut + Send + 'static,
         Fut: Future<Output = eyre::Result<()>> + Send;
-    async fn listen_price_update<F, Fut>(
-        &self,
-        price_source: &Address,
-        callback: F,
-    ) -> eyre::Result<()>
-    where
-        F: Fn(IChainlinkAggregatorEvents) -> Fut + Send + 'static,
-        Fut: Future<Output = eyre::Result<()>> + Send;
     async fn get_reserve_configuration_data(&self, token: &Address) -> eyre::Result<f64>;
     async fn get_user_reserve_data(
         &self,
@@ -333,31 +324,6 @@ where
 
         while let Ok(log) = stream.recv().await {
             if let Ok(Log { data, .. }) = IL2PoolEvents::decode_log(log.as_ref()) {
-                callback(data).await?;
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn listen_price_update<F, Fut>(
-        &self,
-        price_source: &Address,
-        callback: F,
-    ) -> eyre::Result<()>
-    where
-        F: Fn(IChainlinkAggregatorEvents) -> Fut + Send + 'static,
-        Fut: Future<Output = eyre::Result<()>> + Send,
-    {
-        let chain_link_aggregator =
-            IChainlinkAggregator::new(price_source.clone(), self.provider.clone());
-        let filter = Filter::new().address(chain_link_aggregator.address().clone());
-        let mut stream = self.provider.subscribe_logs(&filter).await?;
-
-        while let Ok(log) = stream.recv().await {
-            debug!("listen_price_update: price update happened {:?}", log);
-
-            if let Ok(Log { data, .. }) = IChainlinkAggregatorEvents::decode_log(log.as_ref()) {
                 callback(data).await?;
             }
         }
@@ -506,7 +472,6 @@ impl TokenDetails {
     }
 }
 
-pub(crate) struct Token(pub(crate) Address);
 pub(crate) struct RqDate(pub(crate) TimeStamp);
 
 pub async fn start<P>(cache: Arc<Cache>, provider: Arc<P>) -> eyre::Result<()>
@@ -625,15 +590,6 @@ where
         reserve_data_updated,
     )
     .await?;
-    let answer_updated_txs = Cache::subscribe(
-        cache.clone(),
-        w_num,
-        bound,
-        provider.clone(),
-        tokens.clone(),
-        answer_updated,
-    )
-    .await?;
 
     #[derive(Default)]
     struct EventCounter {
@@ -645,7 +601,6 @@ where
         reserve_used_as_collateral_disabled: usize,
         liquidation_call: usize,
         reserve_data_updated: usize,
-        answer_updated: usize,
     }
     let mut counters = EventCounter::default();
     while let Some(event) = rc_events.recv().await {
@@ -754,20 +709,6 @@ where
                     counters.reserve_data_updated = counters.reserve_data_updated.wrapping_add(1);
                 }
             },
-            AaveEvents::IChainlinkAggregatorEvents(event, token, rq_date) => match event {
-                IChainlinkAggregatorEvents::AnswerUpdated(ev) => {
-                    debug!("start: answer updated");
-                    answer_updated_txs[counters.answer_updated % w_num]
-                        .send((
-                            ev,
-                            Token(token),
-                            hf_senders[hf_counter % w_num].clone(),
-                            RqDate(rq_date),
-                        ))
-                        .await?;
-                    counters.answer_updated = counters.answer_updated.wrapping_add(1);
-                }
-            },
         }
         hf_counter = hf_counter.wrapping_add(1);
     }
@@ -810,7 +751,6 @@ pub type TimeStamp = i64;
 
 pub(crate) enum AaveEvents {
     IL2PoolEvents(IL2PoolEvents, TimeStamp),
-    IChainlinkAggregatorEvents(IChainlinkAggregatorEvents, Address, TimeStamp),
 }
 
 pub(crate) async fn listen_events<P>(provider: Arc<P>, tx: Sender<AaveEvents>) -> eyre::Result<()>
@@ -895,8 +835,16 @@ where
                     async move {
                         let now = Utc::now().timestamp_micros();
 
-                        *cache.prices.write().await = (Array1::from_vec(prices), now);
-                        hf_tx.send(HFRequest::Full(now)).await?;
+                        {
+                            let (prices_current, _) = &mut *cache.prices.write().await;
+                            let prices = Array1::from_vec(prices);
+
+                            if *prices_current != prices {
+                                *prices_current = prices;
+
+                                hf_tx.send(HFRequest::Full(now)).await?;
+                            }
+                        }
 
                         Ok(())
                     }
