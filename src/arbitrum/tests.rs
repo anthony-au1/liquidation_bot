@@ -1,21 +1,20 @@
 use crate::arbitrum::arbitrum::IAaveProtocolDataProvider::TokenData;
-use crate::arbitrum::arbitrum::IChainlinkAggregator::{AnswerUpdated, IChainlinkAggregatorEvents};
 use crate::arbitrum::arbitrum::IL2Pool::{
     Borrow, IL2PoolEvents, LiquidationCall, Repay, ReserveDataUpdated,
     ReserveUsedAsCollateralDisabled, ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
 use crate::arbitrum::arbitrum::{
-    liquidation, liquidation_lookup, liquidation_threshold_update, listen_events, listen_hf_calc, listen_sync, setup,
+    liquidation, liquidation_lookup, liquidation_threshold_update, listen_events, listen_hf_calc, listen_prices_update, listen_sync, setup,
     AaveEvents, Cache, DataProvider, F64Converter, HFRequest, Index, RayOperations, ReserveData,
-    RqDate, Scaler, SyncRequest, SyncTarget,
-    TokenDetails, UserData, UserReserveData, UserSettings,
+    RqDate, Scaler, SyncRequest, SyncTarget, TokenDetails,
+    UserData, UserReserveData, UserSettings,
 };
 use crate::arbitrum::events::{
     borrow, create_user, liquidation_call, repay, reserve_data_updated,
     reserve_used_as_collateral_disabled, reserve_used_as_collateral_enabled, supply, withdraw,
 };
 use alloy_primitives::aliases::U40;
-use alloy_primitives::{Address, I256, U256};
+use alloy_primitives::{Address, U256};
 use async_trait::async_trait;
 use bitvec::bitvec;
 use bitvec::order::Lsb0;
@@ -139,47 +138,6 @@ impl DataProvider for DummyDataProvider {
             referralCode: 0,
         };
         callback(IL2PoolEvents::Supply(event)).await
-    }
-
-    async fn listen_price_update<F, Fut>(
-        &self,
-        price_source: &Address,
-        callback: F,
-    ) -> eyre::Result<()>
-    where
-        F: Fn(IChainlinkAggregatorEvents) -> Fut + Send + 'static,
-        Fut: Future<Output = eyre::Result<()>> + Send,
-    {
-        let (_, tokens) = generate_cache_and_tokens(0).await?;
-
-        let name = tokens
-            .iter()
-            .find(
-                |(
-                    _,
-                    TokenDetails {
-                        price_source: ps, ..
-                    },
-                )| ps == price_source,
-            )
-            .map(|(_, TokenDetails { name, .. })| name.clone())
-            .ok_or_else(|| eyre!("Price update not found for asset {:?}", price_source))?;
-
-        let current = match &name[..] {
-            "AAVE" => 161_230_000_000_i128,
-            "USDC" => 261_230_000_000_i128,
-            "DAI" => 361_230_000_000_i128,
-            _ => 561_230_000_000_i128,
-        };
-
-        let event = AnswerUpdated {
-            // 161230000000 / 10^8 = 1612.30 USD
-            current: I256::try_from(current)?,
-            roundId: U256::from(0),
-            timestamp: U256::from(Utc::now().timestamp()),
-        };
-
-        callback(IChainlinkAggregatorEvents::AnswerUpdated(event)).await
     }
 
     async fn get_reserve_configuration_data(&self, token: &Address) -> eyre::Result<f64> {
@@ -331,6 +289,21 @@ impl DataProvider for DummyDataProvider {
 
         Ok(price)
     }
+
+    async fn listen_prices_update<F, Fut>(
+        &self,
+        _: &Vec<Address>,
+        _: &Vec<f64>,
+        callback: F,
+    ) -> eyre::Result<()>
+    where
+        F: Fn(Vec<f64>) -> Fut + Send + 'static,
+        Fut: Future<Output = eyre::Result<()>> + Send,
+    {
+        callback(vec![1612.3, 261.23, 361.23]).await?;
+
+        Ok(())
+    }
 }
 
 async fn generate_cache_and_tokens(
@@ -420,6 +393,22 @@ async fn generate_cache_and_tokens(
             10_f64.powf(18_f64),
             10_f64.powf(6_f64),
             10_f64.powf(12_f64),
+        ]),
+        now,
+    );
+    *cache.tokens.write().await = (
+        Array1::from_vec(vec![
+            Address::from_str("0x1Ac54C113cefD1792CbFcF41B711824d657eb61D")?,
+            Address::from_str("0x1Af54C113cefD1792CbFcF41B711834d657ea61D")?,
+            Address::from_str("0x1Af54C113cefD1792CbFcF41B711824d657eb61D")?,
+        ]),
+        now,
+    );
+    *cache.price_decimals.write().await = (
+        Array1::from_vec(vec![
+            10_f64.powf(8_f64),
+            10_f64.powf(6_f64),
+            10_f64.powf(8_f64),
         ]),
         now,
     );
@@ -1358,14 +1347,6 @@ impl DataProvider for CreateUserDataProvider {
         todo!()
     }
 
-    async fn listen_price_update<F, Fut>(&self, _: &Address, _: F) -> eyre::Result<()>
-    where
-        F: Fn(IChainlinkAggregatorEvents) -> Fut + Send + 'static,
-        Fut: Future<Output = eyre::Result<()>> + Send,
-    {
-        todo!()
-    }
-
     async fn get_reserve_configuration_data(&self, _: &Address) -> eyre::Result<f64> {
         todo!()
     }
@@ -1395,6 +1376,19 @@ impl DataProvider for CreateUserDataProvider {
     }
 
     async fn get_asset_price(&self, _: &Address) -> eyre::Result<U256> {
+        todo!()
+    }
+
+    async fn listen_prices_update<F, Fut>(
+        &self,
+        _: &Vec<Address>,
+        _: &Vec<f64>,
+        _: F,
+    ) -> eyre::Result<()>
+    where
+        F: Fn(Vec<f64>) -> Fut + Send + 'static,
+        Fut: Future<Output = eyre::Result<()>> + Send,
+    {
         todo!()
     }
 }
@@ -2013,15 +2007,7 @@ async fn test_listen_events() -> eyre::Result<()> {
             .await
             .ok_or_else(|| eyre::eyre!("event channel closed"))?;
 
-        let pool_events = {
-            if let AaveEvents::IL2PoolEvents(_, _) = event {
-                true
-            } else {
-                false
-            }
-        };
-
-        assert_eq!(pool_events, true);
+        assert!(matches!(event, AaveEvents::IL2PoolEvents(_, _)));
 
         if let AaveEvents::IL2PoolEvents(event, _) = event {
             let supply = {
@@ -2050,58 +2036,29 @@ async fn test_listen_events() -> eyre::Result<()> {
 }
 
 #[tokio::test]
-async fn test_listen_price_update() -> eyre::Result<()> {
+async fn test_listen_prices_update() -> eyre::Result<()> {
     let dummy_data_provider = Arc::new(DummyDataProvider::new());
-    let (_, tokens) = generate_cache_and_tokens(0).await?;
-    let (event_tx, mut event_rc) = channel::<AaveEvents>(1);
 
-    let tokens = Arc::new(tokens);
-    let t = tokens.clone();
-    let event_handler = task::spawn(async move {
-        for _ in 0..3 {
-            let event = event_rc
-                .recv()
-                .await
-                .ok_or_else(|| eyre::eyre!("event channel closed"))?;
+    let cache = generate_cache_and_tokens(1)
+        .await
+        .map(|(cache, _)| Arc::new(cache))?;
 
-            let agg_events = {
-                if let AaveEvents::IChainlinkAggregatorEvents(_, _, _) = event {
-                    true
-                } else {
-                    false
-                }
-            };
-
-            assert_eq!(agg_events, true);
-
-            if let AaveEvents::IChainlinkAggregatorEvents(
-                IChainlinkAggregatorEvents::AnswerUpdated(au),
-                token,
-                _,
-            ) = event
-            {
-                let name = t
-                    .get(&token)
-                    .ok_or_else(|| eyre::eyre!("token not found"))?
-                    .name
-                    .clone();
-
-                let new_price = match &name[..] {
-                    "AAVE" => 161_230_000_000_i128,
-                    "USDC" => 261_230_000_000_i128,
-                    "DAI" => 361_230_000_000_i128,
-                    _ => 561_230_000_000_i128,
-                };
-
-                assert_eq!(au.current, alloy_primitives::I256::try_from(new_price)?);
-            }
-        }
+    let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
+    let hf_handler = task::spawn(async move {
+        let msg = hf_rc
+            .recv()
+            .await
+            .ok_or_else(|| eyre::eyre!("hf channel closed"))?;
+        assert!(matches!(msg, HFRequest::Full(_)));
 
         Ok::<_, eyre::Error>(())
     });
 
-    listen_price_update(dummy_data_provider, &tokens, event_tx).await?;
-    let _ = event_handler.await?;
+    listen_prices_update(dummy_data_provider, cache.clone(), hf_tx).await?;
+    let _ = hf_handler.await?;
+
+    let (prices, _) = &*cache.prices.read().await;
+    assert_eq!(prices.to_vec(), vec![1612.3, 261.23, 361.23]);
 
     Ok(())
 }
@@ -2409,56 +2366,6 @@ async fn test_hf_calc() -> eyre::Result<()> {
         hf,
         Array1::from_vec(vec![0.20041899441340782, 3.042768273716952])
     );
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_answer_updated() -> eyre::Result<()> {
-    let (cache, tokens) = generate_cache_and_tokens(1)
-        .await
-        .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
-
-    let token = Address::from_str("0x1Ac54C113cefD1792CbFcF41B711824d657eb61D")?;
-
-    let event = AnswerUpdated {
-        current: alloy_primitives::I256::try_from(999_001_612_300_000_000_000_000_000_i128)?,
-        roundId: U256::from(0),
-        timestamp: U256::from(Utc::now().timestamp()),
-    };
-    let rq_date = Utc::now().timestamp_micros();
-
-    let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
-
-    let hf_handler = task::spawn(async move {
-        let msg = hf_rc
-            .recv()
-            .await
-            .ok_or_else(|| eyre::eyre!("hf channel closed"))?;
-        assert_eq!(HFRequest::Full(rq_date), msg);
-
-        Ok::<_, eyre::Error>(())
-    });
-
-    answer_updated(
-        cache.clone(),
-        dummy_data_provider,
-        tokens.clone(),
-        (event, Token(token.clone()), hf_tx, RqDate(rq_date)),
-    )
-    .await?;
-    let _ = hf_handler.await?;
-
-    let idx = tokens
-        .get(&token)
-        .ok_or_else(|| eyre::eyre!("no token = {:?}", token))?
-        .order;
-
-    let (prices, last_modified) = &*cache.prices.read().await;
-
-    assert_eq!(prices[idx] as f32, 999_001_612.30);
-    assert_eq!(*last_modified, rq_date);
 
     Ok(())
 }

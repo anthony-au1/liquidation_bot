@@ -1,14 +1,11 @@
 use alloy_primitives::aliases::U40;
-use alloy_primitives::{Address, I256, U256, U512};
+use alloy_primitives::{Address, U256, U512};
 use async_trait::async_trait;
 use bitvec::bitvec;
 use bitvec::prelude::Lsb0;
 use chrono::Utc;
 use eyre::eyre;
 use liquidation_bot::arbitrum::arbitrum::IAaveProtocolDataProvider::TokenData;
-use liquidation_bot::arbitrum::arbitrum::IChainlinkAggregator::{
-    AnswerUpdated, IChainlinkAggregatorEvents,
-};
 use liquidation_bot::arbitrum::arbitrum::IL2Pool::{
     Borrow, IL2PoolEvents, LiquidationCall, Repay, ReserveDataUpdated,
     ReserveUsedAsCollateralDisabled, ReserveUsedAsCollateralEnabled, Supply, Withdraw,
@@ -197,14 +194,6 @@ impl DataProvider for SharedDataProvider {
         unimplemented!("listen_events not implemented")
     }
 
-    async fn listen_price_update<F, Fut>(&self, _: &Address, _: F) -> eyre::Result<()>
-    where
-        F: Fn(IChainlinkAggregatorEvents) -> Fut + Send + 'static,
-        Fut: Future<Output = eyre::Result<()>> + Send,
-    {
-        unimplemented!("listen_price_update not implemented")
-    }
-
     async fn get_reserve_configuration_data(&self, token: &Address) -> eyre::Result<f64> {
         let lt = match token {
             addr if *addr == Address::from_str(AAVE)? => 0.78,
@@ -347,6 +336,19 @@ impl DataProvider for SharedDataProvider {
         };
 
         Ok(price)
+    }
+
+    async fn listen_prices_update<F, Fut>(
+        &self,
+        _: &Vec<Address>,
+        _: &Vec<f64>,
+        _: F,
+    ) -> eyre::Result<()>
+    where
+        F: Fn(Vec<f64>) -> Fut + Send + 'static,
+        Fut: Future<Output = eyre::Result<()>> + Send,
+    {
+        unimplemented!("listen_prices_update not implemented")
     }
 }
 
@@ -728,70 +730,6 @@ impl DataProvider for DummyDataProvider {
         }
     }
 
-    async fn listen_price_update<F, Fut>(
-        &self,
-        price_source: &Address,
-        callback: F,
-    ) -> eyre::Result<()>
-    where
-        F: Fn(IChainlinkAggregatorEvents) -> Fut + Send + 'static,
-        Fut: Future<Output = eyre::Result<()>> + Send,
-    {
-        sleep(Duration::from_secs(3)).await;
-
-        let current = match price_source {
-            ps if *ps == Address::from_str(AAVE_PRICE_SOURCE)? => {
-                let count = {
-                    let mut count = self.listen_price_update_call_counter.lock().await;
-                    *count += 1;
-                    *count
-                };
-
-                match count {
-                    1 => 161_230_000_000_000_000_0000_i128,
-                    2 => 131_230_000_000_000_000_0000_i128,
-                    _ => 171_230_000_000_000_000_0000_i128,
-                }
-            }
-            ps if *ps == Address::from_str(USDC_PRICE_SOURCE)? => {
-                let count = {
-                    let mut count = self.listen_price_update_call_counter2.lock().await;
-                    *count += 1;
-                    *count
-                };
-
-                match count {
-                    1 => 261_230_000_0_i128,
-                    2 => 231_230_000_0_i128,
-                    _ => 281_230_000_0_i128,
-                }
-            }
-            ps if *ps == Address::from_str(DAI_PRICE_SOURCE)? => {
-                let count = {
-                    let mut count = self.listen_price_update_call_counter3.lock().await;
-                    *count += 1;
-                    *count
-                };
-
-                match count {
-                    1 => 361_230_000_000_000_0_i128,
-                    2 => 311_230_000_000_000_0_i128,
-                    _ => 401_230_000_000_000_0_i128,
-                }
-            }
-            _ => return Err(eyre!("price_source = {:?} not found", price_source)),
-        };
-
-        let event = AnswerUpdated {
-            // 161230000000 / 10^8 = 1612.30 USD
-            current: I256::try_from(current)?,
-            roundId: U256::default(),
-            timestamp: U256::from(Utc::now().timestamp()),
-        };
-
-        callback(IChainlinkAggregatorEvents::AnswerUpdated(event)).await
-    }
-
     async fn get_reserve_configuration_data(&self, token: &Address) -> eyre::Result<f64> {
         self.shared_data_provider
             .get_reserve_configuration_data(token)
@@ -828,6 +766,71 @@ impl DataProvider for DummyDataProvider {
 
     async fn get_asset_price(&self, token: &Address) -> eyre::Result<U256> {
         self.shared_data_provider.get_asset_price(token).await
+    }
+
+    async fn listen_prices_update<F, Fut>(
+        &self,
+        tokens: &Vec<Address>,
+        price_decimals: &Vec<f64>,
+        callback: F,
+    ) -> eyre::Result<()>
+    where
+        F: Fn(Vec<f64>) -> Fut + Send + 'static,
+        Fut: Future<Output = eyre::Result<()>> + Send,
+    {
+        sleep(Duration::from_secs(3)).await;
+
+        let mut prices = vec![];
+        for (idx, token) in tokens.iter().enumerate() {
+            let current = match token {
+                ps if *ps == Address::from_str(AAVE)? => {
+                    let count = {
+                        let mut count = self.listen_price_update_call_counter.lock().await;
+                        *count += 1;
+                        *count
+                    };
+
+                    match count {
+                        1 => 161_230_000_000_000_000_0000_i128,
+                        2 => 131_230_000_000_000_000_0000_i128,
+                        _ => 171_230_000_000_000_000_0000_i128,
+                    }
+                }
+                ps if *ps == Address::from_str(USDC)? => {
+                    let count = {
+                        let mut count = self.listen_price_update_call_counter2.lock().await;
+                        *count += 1;
+                        *count
+                    };
+
+                    match count {
+                        1 => 261_230_000_0_i128,
+                        2 => 231_230_000_0_i128,
+                        _ => 281_230_000_0_i128,
+                    }
+                }
+                ps if *ps == Address::from_str(DAI)? => {
+                    let count = {
+                        let mut count = self.listen_price_update_call_counter3.lock().await;
+                        *count += 1;
+                        *count
+                    };
+
+                    match count {
+                        1 => 361_230_000_000_000_0_i128,
+                        2 => 311_230_000_000_000_0_i128,
+                        _ => 401_230_000_000_000_0_i128,
+                    }
+                }
+                _ => return Err(eyre!("token = {:?} not found", token)),
+            };
+
+            prices.push(U256::from(current).as_f64(price_decimals[idx]));
+        }
+
+        callback(prices).await?;
+
+        Ok(())
     }
 }
 
