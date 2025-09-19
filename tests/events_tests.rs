@@ -1053,7 +1053,7 @@ async fn test_events() -> eyre::Result<()> {
         )?;
 
         let (hf, last_modified) = &mut *expected.health_factors.write().await;
-        *hf = Array1::from_vec(vec![5.266444865107627]);
+        *hf = Array1::from_vec(vec![7.671151755633927]);
         *last_modified = now;
     }
 
