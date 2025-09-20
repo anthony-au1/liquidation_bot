@@ -24,11 +24,11 @@ pub struct FullState {
     pub tokens: Vec<Address>,
     pub price_decimals: Vec<f64>,
 
-    pub reserve: Vec<Vec<U256>>,
-    pub collateral: Vec<Vec<U256>>,
+    pub reserve: Vec<Vec<String>>,
+    pub collateral: Vec<Vec<String>>,
     pub collateral_matrix: Vec<Vec<f64>>,
 
-    pub borrowed: Vec<Vec<U256>>,
+    pub borrowed: Vec<Vec<String>>,
     pub borrowed_matrix: Vec<Vec<f64>>,
 
     pub liquidity: Vec<IndexRate>,
@@ -65,12 +65,12 @@ impl User {
 
 #[derive(Serialize)]
 pub struct IndexRate {
-    pub index: U256,
-    pub rate: U256,
+    pub index: String,
+    pub rate: String,
 }
 
 impl IndexRate {
-    fn new(index: U256, rate: U256) -> Self {
+    fn new(index: String, rate: String) -> Self {
         Self { index, rate }
     }
 }
@@ -134,37 +134,39 @@ pub async fn get_price_decimals_state(
     (StatusCode::OK, Json(price_decimals))
 }
 
-async fn get_reserve(cache: Arc<Cache>) -> Vec<Vec<U256>> {
+async fn get_reserve(cache: Arc<Cache>) -> Vec<Vec<String>> {
     let mut reserve_vec = vec![];
     let reserves = &*cache.reserve.read().await;
     for res_lock in reserves {
         let (res, _, _) = &*res_lock.read().await;
-        reserve_vec.push(res.to_vec());
+        let values = res.iter().map(U256::to_string).collect();
+        reserve_vec.push(values);
     }
     reserve_vec
 }
 
 pub async fn get_reserve_state(
     State(cache): State<Arc<Cache>>,
-) -> (StatusCode, Json<Vec<Vec<U256>>>) {
+) -> (StatusCode, Json<Vec<Vec<String>>>) {
     let reserve = get_reserve(cache).await;
 
     (StatusCode::OK, Json(reserve))
 }
 
-async fn get_collateral(cache: Arc<Cache>) -> Vec<Vec<U256>> {
+async fn get_collateral(cache: Arc<Cache>) -> Vec<Vec<String>> {
     let mut collateral_vec = vec![];
     let collaterals = &*cache.collateral.read().await;
     for col_lock in collaterals {
         let (col, _, _) = &*col_lock.read().await;
-        collateral_vec.push(col.to_vec());
+        let values = col.iter().map(U256::to_string).collect();
+        collateral_vec.push(values);
     }
     collateral_vec
 }
 
 pub async fn get_collateral_state(
     State(cache): State<Arc<Cache>>,
-) -> (StatusCode, Json<Vec<Vec<U256>>>) {
+) -> (StatusCode, Json<Vec<Vec<String>>>) {
     let collateral = get_collateral(cache).await;
 
     (StatusCode::OK, Json(collateral))
@@ -186,19 +188,20 @@ pub async fn get_collateral_matrix_state(
     (StatusCode::OK, Json(collateral_matrix))
 }
 
-async fn get_borrowed(cache: Arc<Cache>) -> Vec<Vec<U256>> {
+async fn get_borrowed(cache: Arc<Cache>) -> Vec<Vec<String>> {
     let mut borrowed_vec = vec![];
     let borrowed = &*cache.borrowed.read().await;
     for bor_lock in borrowed {
         let (bor, _, _) = &*bor_lock.read().await;
-        borrowed_vec.push(bor.to_vec());
+        let values = bor.iter().map(U256::to_string).collect();
+        borrowed_vec.push(values);
     }
     borrowed_vec
 }
 
 pub async fn get_borrowed_state(
     State(cache): State<Arc<Cache>>,
-) -> (StatusCode, Json<Vec<Vec<U256>>>) {
+) -> (StatusCode, Json<Vec<Vec<String>>>) {
     let borrowed = get_borrowed(cache).await;
 
     (StatusCode::OK, Json(borrowed))
@@ -224,7 +227,7 @@ async fn get_liquidity(cache: Arc<Cache>) -> Vec<IndexRate> {
     let (indexes, _) = &*cache.liquidity.read().await;
     indexes
         .iter()
-        .map(|Index { index, rate, .. }| IndexRate::new(*index, *rate))
+        .map(|Index { index, rate, .. }| IndexRate::new(index.to_string(), rate.to_string()))
         .collect::<Vec<_>>()
 }
 
@@ -253,7 +256,7 @@ async fn get_variable_borrow(cache: Arc<Cache>) -> Vec<IndexRate> {
     let (indexes, _) = &*cache.variable_borrow.read().await;
     indexes
         .iter()
-        .map(|Index { index, rate, .. }| IndexRate::new(*index, *rate))
+        .map(|Index { index, rate, .. }| IndexRate::new(index.to_string(), rate.to_string()))
         .collect::<Vec<_>>()
 }
 
