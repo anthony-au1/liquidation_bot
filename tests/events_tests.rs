@@ -11,7 +11,7 @@ use liquidation_bot::arbitrum::arbitrum::IL2Pool::{
     ReserveUsedAsCollateralDisabled, ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
 use liquidation_bot::arbitrum::arbitrum::{
-    start, Cache, DataProvider, Index, ReserveData, UserReserveData, UserSettings,
+    start, Cache, DataProvider, Index, ReserveData, UserAccountData, UserReserveData, UserSettings,
 };
 use ndarray::{Array1, Array2};
 use std::fmt::Debug;
@@ -349,6 +349,10 @@ impl DataProvider for SharedDataProvider {
         Fut: Future<Output = eyre::Result<()>> + Send,
     {
         unimplemented!("listen_prices_update not implemented")
+    }
+
+    async fn get_user_account_data(&self, _: &Address) -> eyre::Result<UserAccountData> {
+        unimplemented!("get_user_account_data not implemented")
     }
 }
 
@@ -831,6 +835,10 @@ impl DataProvider for DummyDataProvider {
         callback(prices).await?;
 
         Ok(())
+    }
+
+    async fn get_user_account_data(&self, user: &Address) -> eyre::Result<UserAccountData> {
+        self.shared_data_provider.get_user_account_data(user).await
     }
 }
 

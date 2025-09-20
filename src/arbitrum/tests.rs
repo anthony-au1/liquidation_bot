@@ -3,12 +3,7 @@ use crate::arbitrum::arbitrum::IL2Pool::{
     Borrow, IL2PoolEvents, LiquidationCall, Repay, ReserveDataUpdated,
     ReserveUsedAsCollateralDisabled, ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
-use crate::arbitrum::arbitrum::{
-    liquidation, liquidation_lookup, liquidation_threshold_update, listen_events, listen_hf_calc, listen_prices_update, listen_sync, setup,
-    AaveEvents, Cache, DataProvider, F64Converter, HFRequest, Index, RayOperations, ReserveData,
-    RqDate, Scaler, SyncRequest, SyncTarget, TokenDetails,
-    UserData, UserReserveData, UserSettings,
-};
+use crate::arbitrum::arbitrum::{liquidation, liquidation_lookup, liquidation_threshold_update, listen_events, listen_hf_calc, listen_prices_update, listen_sync, setup, AaveEvents, Cache, DataProvider, F64Converter, HFRequest, Index, RayOperations, ReserveData, RqDate, Scaler, SyncRequest, SyncTarget, TokenDetails, UserAccountData, UserData, UserReserveData, UserSettings};
 use crate::arbitrum::events::{
     borrow, create_user, liquidation_call, repay, reserve_data_updated,
     reserve_used_as_collateral_disabled, reserve_used_as_collateral_enabled, supply, withdraw,
@@ -303,6 +298,10 @@ impl DataProvider for DummyDataProvider {
         callback(vec![1612.3, 261.23, 361.23]).await?;
 
         Ok(())
+    }
+
+    async fn get_user_account_data(&self, _: &Address) -> eyre::Result<UserAccountData> {
+        unimplemented!("get_user_account_data not implemented");
     }
 }
 
@@ -1389,6 +1388,10 @@ impl DataProvider for CreateUserDataProvider {
         F: Fn(Vec<f64>) -> Fut + Send + 'static,
         Fut: Future<Output = eyre::Result<()>> + Send,
     {
+        todo!()
+    }
+
+    async fn get_user_account_data(&self, _: &Address) -> eyre::Result<UserAccountData> {
         todo!()
     }
 }

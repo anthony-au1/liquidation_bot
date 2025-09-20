@@ -2,10 +2,12 @@ use crate::arbitrum::arbitrum::IAaveOracle::IAaveOracleInstance;
 use crate::arbitrum::arbitrum::IAaveProtocolDataProvider::{
     getReserveDataReturn, getUserReserveDataReturn, IAaveProtocolDataProviderInstance, TokenData,
 };
-use crate::arbitrum::arbitrum::IL2Pool::IL2PoolEvents;
+use crate::arbitrum::arbitrum::IL2Pool::{
+    getUserAccountDataReturn, IL2PoolEvents, IL2PoolInstance,
+};
 use crate::arbitrum::events::{
-    borrow, liquidation_call, repay, reserve_data_updated,
-    reserve_used_as_collateral_disabled, reserve_used_as_collateral_enabled, supply, withdraw,
+    borrow, liquidation_call, repay, reserve_data_updated, reserve_used_as_collateral_disabled,
+    reserve_used_as_collateral_enabled, supply, withdraw,
 };
 use alloy::primitives::{Address, Log};
 use alloy::providers::Provider;
@@ -211,6 +213,36 @@ pub trait DataProvider: Send + Sync {
     where
         F: Fn(Vec<f64>) -> Fut + Send + 'static,
         Fut: Future<Output = eyre::Result<()>> + Send;
+    async fn get_user_account_data(&self, user: &Address) -> eyre::Result<UserAccountData>;
+}
+
+pub struct UserAccountData {
+    pub total_collateral_base: U256,
+    pub total_debt_base: U256,
+    pub available_borrows_base: U256,
+    pub current_liquidation_threshold: U256,
+    pub ltv: U256,
+    pub health_factor: U256,
+}
+
+impl UserAccountData {
+    pub fn new(
+        total_collateral_base: U256,
+        total_debt_base: U256,
+        available_borrows_base: U256,
+        current_liquidation_threshold: U256,
+        ltv: U256,
+        health_factor: U256,
+    ) -> Self {
+        Self {
+            total_collateral_base,
+            total_debt_base,
+            available_borrows_base,
+            current_liquidation_threshold,
+            ltv,
+            health_factor,
+        }
+    }
 }
 
 pub struct ReserveData {
@@ -265,6 +297,7 @@ where
 {
     pub(in crate::arbitrum) aave_protocol_data_provider: IAaveProtocolDataProviderInstance<P>,
     pub(in crate::arbitrum) aave_oracle: IAaveOracleInstance<P>,
+    pub(in crate::arbitrum) aave_l2_pool: IL2PoolInstance<P>,
     pub(in crate::arbitrum) provider: P,
 }
 
@@ -280,9 +313,12 @@ where
 
         let aave_oracle = IAaveOracle::new(AAVE_ORACLE_ADDRESS.parse()?, provider.clone());
 
+        let aave_l2_pool = IL2Pool::new(L2_POOL_ADDRESS.parse()?, provider.clone());
+
         Ok(Self {
             aave_protocol_data_provider,
             aave_oracle,
+            aave_l2_pool,
             provider: provider.clone(),
         })
     }
@@ -440,6 +476,30 @@ where
         }
 
         Ok(())
+    }
+
+    async fn get_user_account_data(&self, user: &Address) -> eyre::Result<UserAccountData> {
+        let getUserAccountDataReturn {
+            totalCollateralBase: total_collateral_base,
+            totalDebtBase: total_debt_base,
+            availableBorrowsBase: available_borrows_base,
+            currentLiquidationThreshold: current_liquidation_threshold,
+            ltv,
+            healthFactor: health_factor,
+        } = self
+            .aave_l2_pool
+            .getUserAccountData(user.clone())
+            .call()
+            .await?;
+
+        Ok(UserAccountData::new(
+            total_collateral_base,
+            total_debt_base,
+            available_borrows_base,
+            current_liquidation_threshold,
+            ltv,
+            health_factor,
+        ))
     }
 }
 

@@ -1,7 +1,8 @@
 use crate::arbitrum::arbitrum::{Cache, Index};
 use alloy::transports::http::reqwest::StatusCode;
 use alloy_primitives::{Address, U256};
-use axum::extract::State;
+use axum::extract::{Path, State};
+use axum::response::IntoResponse;
 use axum::Json;
 use bitvec::order::Lsb0;
 use bitvec::prelude::BitVec;
@@ -75,6 +76,36 @@ impl IndexRate {
     }
 }
 
+async fn get_user(row_num: usize, cache: Arc<Cache>) -> Option<User> {
+    cache.users.iter().find_map(|entry| {
+        if entry.row_num == row_num {
+            Some(User::new(
+                entry.key().clone(),
+                entry.value().row_num,
+                entry.value().use_as_collateral.clone(),
+            ))
+        } else {
+            None
+        }
+    })
+}
+
+pub async fn get_user_state(
+    Path(row_num): Path<usize>,
+    State(cache): State<Arc<Cache>>,
+) -> impl IntoResponse {
+    let user = get_user(row_num, cache).await;
+
+    match user {
+        Some(u) => (StatusCode::OK, Json(u)).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            format!("User for row {} not found", row_num),
+        )
+            .into_response(),
+    }
+}
+
 async fn get_users(cache: Arc<Cache>) -> (Vec<User>, usize) {
     let users = cache
         .users
@@ -134,7 +165,30 @@ pub async fn get_price_decimals_state(
     (StatusCode::OK, Json(price_decimals))
 }
 
-async fn get_reserve(cache: Arc<Cache>) -> Vec<Vec<String>> {
+async fn get_reserve(row_num: usize, cache: Arc<Cache>) -> Option<Vec<String>> {
+    let reserve = &*cache.reserve.read().await;
+    let row_lock = reserve.get(row_num)?;
+    let (row, _, _) = &*row_lock.read().await;
+    Some(row.iter().map(U256::to_string).collect())
+}
+
+pub async fn get_reserve_state(
+    Path(row_num): Path<usize>,
+    State(cache): State<Arc<Cache>>,
+) -> impl IntoResponse {
+    let reserve = get_reserve(row_num, cache).await;
+
+    match reserve {
+        Some(r) => (StatusCode::OK, Json(r)).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            format!("reserve for row {} not found", row_num),
+        )
+            .into_response(),
+    }
+}
+
+async fn get_reserve_all(cache: Arc<Cache>) -> Vec<Vec<String>> {
     let mut reserve_vec = vec![];
     let reserves = &*cache.reserve.read().await;
     for res_lock in reserves {
@@ -145,15 +199,38 @@ async fn get_reserve(cache: Arc<Cache>) -> Vec<Vec<String>> {
     reserve_vec
 }
 
-pub async fn get_reserve_state(
+pub async fn get_reserve_all_state(
     State(cache): State<Arc<Cache>>,
 ) -> (StatusCode, Json<Vec<Vec<String>>>) {
-    let reserve = get_reserve(cache).await;
+    let reserve = get_reserve_all(cache).await;
 
     (StatusCode::OK, Json(reserve))
 }
 
-async fn get_collateral(cache: Arc<Cache>) -> Vec<Vec<String>> {
+async fn get_collateral(row_num: usize, cache: Arc<Cache>) -> Option<Vec<String>> {
+    let collateral = &*cache.collateral.read().await;
+    let col_lock = collateral.get(row_num)?;
+    let (row, _, _) = &*col_lock.read().await;
+    Some(row.iter().map(U256::to_string).collect())
+}
+
+pub async fn get_collateral_state(
+    Path(row_num): Path<usize>,
+    State(cache): State<Arc<Cache>>,
+) -> impl IntoResponse {
+    let collateral = get_collateral(row_num, cache).await;
+
+    match collateral {
+        Some(c) => (StatusCode::OK, Json(c)).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            format!("collateral for row {} not found", row_num),
+        )
+            .into_response(),
+    }
+}
+
+async fn get_collateral_all(cache: Arc<Cache>) -> Vec<Vec<String>> {
     let mut collateral_vec = vec![];
     let collaterals = &*cache.collateral.read().await;
     for col_lock in collaterals {
@@ -164,12 +241,37 @@ async fn get_collateral(cache: Arc<Cache>) -> Vec<Vec<String>> {
     collateral_vec
 }
 
-pub async fn get_collateral_state(
+pub async fn get_collateral_all_state(
     State(cache): State<Arc<Cache>>,
 ) -> (StatusCode, Json<Vec<Vec<String>>>) {
-    let collateral = get_collateral(cache).await;
+    let collateral = get_collateral_all(cache).await;
 
     (StatusCode::OK, Json(collateral))
+}
+
+async fn get_collateral_matrix_row(row_num: usize, cache: Arc<Cache>) -> Option<Vec<f64>> {
+    let collateral = &*cache.collateral_matrix.read().await;
+    collateral
+        .rows()
+        .into_iter()
+        .nth(row_num)
+        .map(|row| row.to_vec())
+}
+
+pub async fn get_collateral_matrix_row_state(
+    Path(row_num): Path<usize>,
+    State(cache): State<Arc<Cache>>,
+) -> impl IntoResponse {
+    let collateral_matrix_row = get_collateral_matrix_row(row_num, cache).await;
+
+    match collateral_matrix_row {
+        Some(c) => (StatusCode::OK, Json(c)).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            format!("collateral for row {} not found", row_num),
+        )
+            .into_response(),
+    }
 }
 
 async fn get_collateral_matrix(cache: Arc<Cache>) -> Vec<Vec<f64>> {
@@ -188,7 +290,30 @@ pub async fn get_collateral_matrix_state(
     (StatusCode::OK, Json(collateral_matrix))
 }
 
-async fn get_borrowed(cache: Arc<Cache>) -> Vec<Vec<String>> {
+async fn get_borrowed(row_num: usize, cache: Arc<Cache>) -> Option<Vec<String>> {
+    let borrowed = &*cache.borrowed.read().await;
+    let bor_lock = borrowed.get(row_num)?;
+    let (row, _, _) = &*bor_lock.read().await;
+    Some(row.iter().map(U256::to_string).collect())
+}
+
+pub async fn get_borrowed_state(
+    Path(row_num): Path<usize>,
+    State(cache): State<Arc<Cache>>,
+) -> impl IntoResponse {
+    let borrowed = get_borrowed(row_num, cache).await;
+
+    match borrowed {
+        Some(b) => (StatusCode::OK, Json(b)).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            format!("borrowed for row {} not found", row_num),
+        )
+            .into_response(),
+    }
+}
+
+async fn get_borrowed_all(cache: Arc<Cache>) -> Vec<Vec<String>> {
     let mut borrowed_vec = vec![];
     let borrowed = &*cache.borrowed.read().await;
     for bor_lock in borrowed {
@@ -199,12 +324,38 @@ async fn get_borrowed(cache: Arc<Cache>) -> Vec<Vec<String>> {
     borrowed_vec
 }
 
-pub async fn get_borrowed_state(
+pub async fn get_borrowed_all_state(
     State(cache): State<Arc<Cache>>,
 ) -> (StatusCode, Json<Vec<Vec<String>>>) {
-    let borrowed = get_borrowed(cache).await;
+    let borrowed = get_borrowed_all(cache).await;
 
     (StatusCode::OK, Json(borrowed))
+}
+
+async fn get_borrowed_matrix_row(row_num: usize, cache: Arc<Cache>) -> Option<Vec<f64>> {
+    let borrowed = &*cache.borrowed_matrix.read().await;
+
+    borrowed
+        .rows()
+        .into_iter()
+        .nth(row_num)
+        .map(|row| row.to_vec())
+}
+
+pub async fn get_borrowed_matrix_row_state(
+    Path(row_num): Path<usize>,
+    State(cache): State<Arc<Cache>>,
+) -> impl IntoResponse {
+    let borrowed_matrix_row = get_borrowed_matrix_row(row_num, cache).await;
+
+    match borrowed_matrix_row {
+        Some(c) => (StatusCode::OK, Json(c)).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            format!("borrowed for row {} not found", row_num),
+        )
+            .into_response(),
+    }
 }
 
 async fn get_borrowed_matrix(cache: Arc<Cache>) -> Vec<Vec<f64>> {
@@ -323,10 +474,10 @@ pub async fn get_full_state(State(cache): State<Arc<Cache>>) -> (StatusCode, Jso
     let decimals = get_decimals(cache.clone()).await;
     let tokens = get_tokens(cache.clone()).await;
     let price_decimals = get_price_decimals(cache.clone()).await;
-    let reserve = get_reserve(cache.clone()).await;
-    let collateral = get_collateral(cache.clone()).await;
+    let reserve = get_reserve_all(cache.clone()).await;
+    let collateral = get_collateral_all(cache.clone()).await;
     let collateral_matrix = get_collateral_matrix(cache.clone()).await;
-    let borrowed = get_borrowed(cache.clone()).await;
+    let borrowed = get_borrowed_all(cache.clone()).await;
     let borrowed_matrix = get_borrowed_matrix(cache.clone()).await;
     let liquidity = get_liquidity(cache.clone()).await;
     let liquidity_index = get_liquidity_index(cache.clone()).await;
