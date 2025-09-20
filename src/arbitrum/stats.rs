@@ -1,4 +1,5 @@
-use crate::arbitrum::arbitrum::{Cache, Index};
+use crate::arbitrum::arbitrum::{Cache, IL2Pool, Index};
+use alloy::providers::Provider;
 use alloy::transports::http::reqwest::StatusCode;
 use alloy_primitives::{Address, U256};
 use axum::extract::{Path, State};
@@ -9,6 +10,15 @@ use bitvec::prelude::BitVec;
 use ndarray::Axis;
 use serde::Serialize;
 use std::sync::Arc;
+
+#[derive(Clone)]
+pub struct AppState<P>
+where
+    P: Provider + Clone + Send + Sync + 'static,
+{
+    pub cache: Arc<Cache>,
+    pub provider: Arc<P>,
+}
 
 #[derive(Serialize)]
 pub struct UserState {
@@ -508,4 +518,25 @@ pub async fn get_full_state(State(cache): State<Arc<Cache>>) -> (StatusCode, Jso
     };
 
     (StatusCode::OK, Json(full_state))
+}
+
+const L2_POOL_ADDRESS: &str = "0x794a61358D6845594F94dc1DB02A252b5b4814aD";
+
+pub async fn get_user_account_data_state<P>(
+    Path(user): Path<Address>,
+    State(state): State<AppState<P>>,
+) -> (StatusCode, Json<String>)
+where
+    P: Provider + Clone + Send + Sync + 'static,
+{
+    let aave_l2_pool = IL2Pool::new(L2_POOL_ADDRESS.parse().unwrap(), state.provider.clone());
+    let hf = aave_l2_pool
+        .getUserAccountData(user.clone())
+        .call()
+        .await
+        .unwrap()
+        .healthFactor
+        .to_string();
+
+    (StatusCode::OK, Json(hf))
 }
