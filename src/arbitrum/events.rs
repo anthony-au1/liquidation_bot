@@ -1,11 +1,10 @@
-use crate::arbitrum::arbitrum::IChainlinkAggregator::AnswerUpdated;
 use crate::arbitrum::arbitrum::IL2Pool::{
     Borrow, LiquidationCall, Repay, ReserveDataUpdated, ReserveUsedAsCollateralDisabled,
     ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
 use crate::arbitrum::arbitrum::{
     Cache, DataProvider, F64Converter, HFRequest, RayOperations, RqDate, Scaler, SyncRequest, SyncTarget,
-    TimeStamp, Token, TokenDetails, Tokens, RAY,
+    TimeStamp, TokenDetails, Tokens, RAY,
 };
 use alloy_primitives::{Address, U256};
 use chrono::Utc;
@@ -1288,42 +1287,6 @@ where
             *vbi_last_modified,
             *vbii_last_modified,
         ) = (now, now, now, now);
-    }
-
-    hf_tx.send(HFRequest::Full(rq_date)).await?;
-
-    Ok(())
-}
-
-pub(crate) async fn answer_updated<P>(
-    cache: Arc<Cache>,
-    _: Arc<P>,
-    tokens: Arc<Tokens>,
-    event: (AnswerUpdated, Token, Sender<HFRequest>, RqDate),
-) -> eyre::Result<()>
-where
-    P: DataProvider + 'static,
-{
-    let (AnswerUpdated { current, .. }, Token(token), hf_tx, RqDate(rq_date)) = event;
-    let token_details = tokens
-        .get(&token)
-        .ok_or_else(|| eyre::eyre!("token not found: {}", token))?;
-
-    debug!("{}", {
-        let received = Utc::now().timestamp_micros();
-        format!(
-            "answer_updated ({}): rq_date = {}, received = {}, delta = {} μs",
-            token_details.name.clone(),
-            rq_date,
-            received,
-            received - rq_date
-        )
-    });
-
-    {
-        let (prices, last_modified) = &mut *cache.prices.write().await;
-        prices[token_details.order] = current.as_f64(token_details.price_decimals);
-        *last_modified = rq_date;
     }
 
     hf_tx.send(HFRequest::Full(rq_date)).await?;
