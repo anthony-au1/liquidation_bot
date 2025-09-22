@@ -85,9 +85,9 @@
 
 1. we need detailed stats.. like per user and not all users. we have to find a way to get
 health factors so we can compare aave hf vs calculated hf
-
-
 2. make meaning full logs... we can't debug the whole cache.
+
+
 3. we need docker the app so we can add redis and metrics and maybe log server
 4. redis so we can get users and re-init them 
 5. metrics for performance.
