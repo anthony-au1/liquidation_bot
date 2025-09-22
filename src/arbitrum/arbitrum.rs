@@ -1984,6 +1984,7 @@ impl Cache {
 pub(crate) trait F64Converter {
     fn as_f64(&self, divisor: f64) -> f64;
     fn as_f64_ray(&self) -> f64;
+    fn as_f64_wad(&self) -> f64;
 }
 
 const POW64: [f64; 4] = [
@@ -2016,6 +2017,11 @@ impl F64Converter for I256 {
     fn as_f64_ray(&self) -> f64 {
         self.as_f64(1e27)
     }
+
+    #[inline(always)]
+    fn as_f64_wad(&self) -> f64 {
+        self.as_f64(1e18)
+    }
 }
 
 impl F64Converter for U256 {
@@ -2033,6 +2039,11 @@ impl F64Converter for U256 {
     #[inline(always)]
     fn as_f64_ray(&self) -> f64 {
         self.as_f64(1e27)
+    }
+
+    #[inline(always)]
+    fn as_f64_wad(&self) -> f64 {
+        self.as_f64(1e18)
     }
 }
 
