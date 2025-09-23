@@ -361,7 +361,8 @@ where
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
         format!(
-            "withdraw: rq_date = {}, received = {}, delta = {} μs",
+            "withdraw (user = {}): rq_date = {}, received = {}, delta = {} μs",
+            event.user,
             rq_date,
             received,
             received - rq_date
@@ -389,12 +390,18 @@ where
     let user_settings = cache
         .users
         .get(&event.user)
-        .ok_or_else(|| eyre!("user = {:?} not found", event.user))?
+        .ok_or_else(|| eyre!("withdraw: user = {:?} not found", event.user))?
         .clone();
     let row_num = user_settings.row_num;
     let idx = tokens
         .get(&event.reserve)
-        .ok_or_else(|| eyre!("token = {:?} not found", event.reserve))?
+        .ok_or_else(|| {
+            eyre!(
+                "withdraw (user = {}): token = {:?} not found",
+                event.user,
+                event.reserve
+            )
+        })?
         .order;
     let (decimals, _) = &*cache.decimals.read().await;
     let now = Utc::now().timestamp_micros();
@@ -404,7 +411,13 @@ where
             let collateral = &*cache.collateral.read().await;
             let (_, last_sync, last_modified) = &*collateral
                 .get(row_num)
-                .ok_or_else(|| eyre!("can't get row = {} from collateral", row_num))?
+                .ok_or_else(|| {
+                    eyre!(
+                        "withdraw (user = {}): can't get row = {} from collateral",
+                        event.user,
+                        row_num
+                    )
+                })?
                 .read()
                 .await;
 
@@ -418,7 +431,13 @@ where
             let collateral = &*c.collateral.read().await;
             let (col, _, last_modified) = &mut *collateral
                 .get(row_num)
-                .ok_or_else(|| eyre!("can't get row = {} from collateral", row_num))?
+                .ok_or_else(|| {
+                    eyre!(
+                        "withdraw (user = {}): can't get row = {} from collateral",
+                        event.user,
+                        row_num
+                    )
+                })?
                 .write()
                 .await;
             col[idx] -= event
@@ -437,8 +456,8 @@ where
         };
         let skip_event = async move || {
             debug!(
-                "event dated before sync:\
-                     event = withdraw, user = {}, rq_date = {}, collateral sync = {}, collateral modified = {}",
+                "withdraw (user = {}): event dated before sync:\
+                     event = withdraw, rq_date = {}, collateral sync = {}, collateral modified = {}",
                 event.user, rq_date, last_sync, last_modified,
             );
 
@@ -463,7 +482,13 @@ where
             let reserve = &*cache.reserve.read().await;
             let (_, last_sync, last_modified) = &*reserve
                 .get(row_num)
-                .ok_or_else(|| eyre!("can't get row = {} from reserve", row_num))?
+                .ok_or_else(|| {
+                    eyre!(
+                        "withdraw (user = {}): can't get row = {} from reserve",
+                        event.user,
+                        row_num
+                    )
+                })?
                 .read()
                 .await;
 
@@ -477,7 +502,13 @@ where
             let reserve = &*c.reserve.read().await;
             let (res, _, last_modified) = &mut *reserve
                 .get(row_num)
-                .ok_or_else(|| eyre!("can't get row = {} from reserve", row_num))?
+                .ok_or_else(|| {
+                    eyre!(
+                        "withdraw (user = {}): can't get row = {} from reserve",
+                        event.user,
+                        row_num
+                    )
+                })?
                 .write()
                 .await;
             res[idx] -= event
@@ -490,8 +521,8 @@ where
         };
         let skip_event = async move || {
             debug!(
-                "event dated before sync:\
-                     event = withdraw, user = {}, rq_date = {}, reserve sync = {}, reserve modified = {}",
+                "withdraw (user = {}): event dated before sync:\
+                     event = withdraw, rq_date = {}, reserve sync = {}, reserve modified = {}",
                 event.user, rq_date, last_sync, last_modified,
             );
 
@@ -516,8 +547,9 @@ where
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
         format!(
-            "withdraw: cache = {:?}, rq_date = {}, \
+            "withdraw (user = {}): cache = {:?}, rq_date = {}, \
                      received = {}, delta = {} μs",
+            event.user,
             cache,
             rq_date,
             received,
