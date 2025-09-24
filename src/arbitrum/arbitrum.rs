@@ -1,9 +1,9 @@
 use crate::arbitrum::arbitrum::IAaveOracle::IAaveOracleInstance;
 use crate::arbitrum::arbitrum::IAaveProtocolDataProvider::{
-    getReserveDataReturn, getUserReserveDataReturn, IAaveProtocolDataProviderInstance, TokenData,
+    IAaveProtocolDataProviderInstance, TokenData, getReserveDataReturn, getUserReserveDataReturn,
 };
 use crate::arbitrum::arbitrum::IL2Pool::{
-    getUserAccountDataReturn, IL2PoolEvents, IL2PoolInstance,
+    IL2PoolEvents, IL2PoolInstance, getUserAccountDataReturn,
 };
 use crate::arbitrum::events::{
     borrow, liquidation_call, repay, reserve_data_updated, reserve_used_as_collateral_disabled,
@@ -15,20 +15,20 @@ use alloy::rpc::types::Filter;
 use alloy::sol;
 use alloy::sol_types::SolEventInterface;
 use alloy_primitives::aliases::U40;
-use alloy_primitives::{Sign, I256, U256, U512};
+use alloy_primitives::{I256, Sign, U256, U512};
 use async_trait::async_trait;
 use bitvec::prelude::*;
 use chrono::Utc;
 use dashmap::DashMap;
 use eyre::eyre;
 use futures::future::try_join_all;
-use ndarray::{concatenate, Array1, Array2, Axis};
+use ndarray::{Array1, Array2, Axis, concatenate};
 use std::collections::HashMap;
 use std::default::Default;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::RwLock;
+use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::{task, time, try_join};
 use tracing::{debug, error, info};
 
@@ -826,25 +826,6 @@ where
                 .listen_events(move |data| {
                     let tx = tx.clone();
                     async move {
-                        match data {
-                            IL2PoolEvents::Supply(_) => debug!("listen_events: supply event"),
-                            IL2PoolEvents::Withdraw(_) => debug!("listen_events: withdraw event"),
-                            IL2PoolEvents::Borrow(_) => debug!("listen_events: borrow event"),
-                            IL2PoolEvents::Repay(_) => debug!("listen_events: repay event"),
-                            IL2PoolEvents::ReserveUsedAsCollateralEnabled(_) => {
-                                debug!("listen_events: enable collateral event")
-                            }
-                            IL2PoolEvents::ReserveUsedAsCollateralDisabled(_) => {
-                                debug!("listen_events: disable collateral event")
-                            }
-                            IL2PoolEvents::LiquidationCall(_) => {
-                                debug!("listen_events: liquidation event")
-                            }
-                            IL2PoolEvents::ReserveDataUpdated(_) => {
-                                debug!("listen_events: reserve data updated event")
-                            }
-                        }
-
                         tx.send(AaveEvents::IL2PoolEvents(
                             data,
                             Utc::now().timestamp_micros(),
@@ -1015,16 +996,16 @@ pub(crate) async fn listen_sync(
     bound: usize,
 ) -> eyre::Result<Vec<Sender<SyncRequest>>> {
     let mut senders = Vec::with_capacity(workers);
-    for _ in 0..workers {
+    for worker in 0..workers {
         let (tx, mut rc) = channel::<SyncRequest>(bound);
         let cache = cache.clone();
         task::spawn(async move {
             loop {
-                debug!("listen_sync: created thread");
+                debug!("listen_sync (worker = {}): created thread", worker);
 
                 match listen_sync_handler(&cache, &mut rc).await {
-                    Ok(_) => debug!("listen_sync: Ok"),
-                    Err(e) => debug!("listen_sync: error = {:?}", e),
+                    Ok(_) => debug!("listen_sync (worker = {}): Ok", worker),
+                    Err(e) => debug!("listen_sync (worker = {}): error = {:?}", worker, e),
                 }
             }
         });
@@ -1065,18 +1046,18 @@ pub(crate) async fn listen_hf_calc(
     bound: usize,
 ) -> eyre::Result<Vec<Sender<HFRequest>>> {
     let mut senders = Vec::with_capacity(workers);
-    for _ in 0..workers {
+    for worker in 0..workers {
         let (tx, mut rc) = channel::<HFRequest>(bound);
         let (cache, lq_lookup_tx) = (cache.clone(), lq_lookup_tx.clone());
         task::spawn(async move {
             loop {
-                debug!("listen_hf_calc: created thread");
+                debug!("listen_hf_calc (worker = {}): created thread", worker);
 
                 match listen_hf_calc_handler(&cache, &mut rc, &lq_lookup_tx).await {
                     Ok(_) => {
-                        debug!("listen_hf_calc: Ok");
+                        debug!("listen_hf_calc (worker = {}): Ok", worker);
                     }
-                    Err(e) => error!("listen_hf_calc: error = {:?}", e),
+                    Err(e) => error!("listen_hf_calc (worker = {}): error = {:?}", worker, e),
                 }
             }
         });
@@ -1093,26 +1074,8 @@ async fn listen_hf_calc_handler(
 ) -> eyre::Result<()> {
     while let Some(hf_rq) = rc.recv().await {
         match hf_rq {
-            HFRequest::User(user, rq_date) => match cache.calc_hf(Some(&user), rq_date).await {
-                Ok(_) => {
-                    debug!("listen_hf_calc: user = {}, hf = {}", user, {
-                        let (hf, _) = &*cache.health_factors.read().await;
-                        hf.clone()
-                    });
-                }
-                Err(e) => {
-                    error!("listen_hf_calc: user = {}, error = {:?}", user, e)
-                }
-            },
-            HFRequest::Full(rq_date) => match cache.calc_hf(None, rq_date).await {
-                Ok(_) => {
-                    debug!("listen_hf_calc: hf = {}", {
-                        let (hf, _) = &*cache.health_factors.read().await;
-                        hf.clone()
-                    });
-                }
-                Err(e) => error!("listen_hf_calc: error = {:?}", e),
-            },
+            HFRequest::User(user, rq_date) => cache.calc_hf(Some(&user), rq_date).await?,
+            HFRequest::Full(rq_date) => cache.calc_hf(None, rq_date).await?,
         }
 
         lq_lookup_tx.send(()).await?;
@@ -1157,16 +1120,19 @@ pub(crate) async fn liquidation(
 ) -> eyre::Result<Vec<Sender<usize>>> {
     let mut senders = Vec::with_capacity(workers);
 
-    for _ in 0..workers {
+    for worker in 0..workers {
         let (lq_tx, mut lq_rc) = channel::<usize>(bound);
         let cache = cache.clone();
         task::spawn(async move {
             loop {
-                debug!("liquidation: waiting for liquidation");
+                debug!("liquidation (worker = {}): waiting for liquidation", worker);
 
                 while let Some(i) = lq_rc.recv().await {
                     let (hf, _) = &*cache.health_factors.read().await;
-                    info!("liquidation: index {}, hf = {}", i, hf[i]);
+                    info!(
+                        "liquidation (worker = {}): index {}, hf = {}",
+                        worker, i, hf[i]
+                    );
                 }
             }
         });
@@ -1362,7 +1328,7 @@ impl Cache {
         let row_num = self
             .users
             .get(user)
-            .ok_or_else(|| eyre!("user = {:?} not found", user))?
+            .ok_or_else(|| eyre!("sync_user: user = {:?} not found", user))?
             .row_num;
         let now = Utc::now().timestamp_micros();
 
@@ -1372,33 +1338,60 @@ impl Cache {
             let collaterals = &*self.collateral.read().await;
             let (col, last_sync, last_modified) = &mut *collaterals
                 .get(row_num)
-                .ok_or_else(|| eyre!("can't get row = {} from collateral", row_num))?
+                .ok_or_else(|| {
+                    eyre!(
+                        "sync_user (user = {}): can't get row = {} from collateral",
+                        user,
+                        row_num
+                    )
+                })?
                 .write()
                 .await;
             (*col, *last_sync, *last_modified) = (Array1::from(collateral_scaled), now, now);
-            debug!("sync_user: new collateral scaled = {:?}", col);
+            debug!(
+                "sync_user (user = {}): new collateral scaled = {:?}",
+                user, col
+            );
         }
 
         {
             let reserves = &*self.reserve.read().await;
             let (res, last_sync, last_modified) = &mut *reserves
                 .get(row_num)
-                .ok_or_else(|| eyre!("can't get row = {} from reserve", row_num))?
+                .ok_or_else(|| {
+                    eyre!(
+                        "sync_user (user = {}): can't get row = {} from reserve",
+                        user,
+                        row_num
+                    )
+                })?
                 .write()
                 .await;
             (*res, *last_sync, *last_modified) = (Array1::from(reserve_scaled), now, now);
-            debug!("sync_user: new reserve scaled = {:?}", res);
+            debug!(
+                "sync_user (user = {}): new reserve scaled = {:?}",
+                user, res
+            );
         }
 
         {
             let debt = &*self.borrowed.read().await;
             let (bor, last_sync, last_modified) = &mut *debt
                 .get(row_num)
-                .ok_or_else(|| eyre!("can't get row = {} from borrowed", row_num))?
+                .ok_or_else(|| {
+                    eyre!(
+                        "sync_user (user = {}): can't get row = {} from borrowed",
+                        user,
+                        row_num
+                    )
+                })?
                 .write()
                 .await;
             (*bor, *last_sync, *last_modified) = (Array1::from(borrowed_scaled), now, now);
-            debug!("sync_user: new borrowed scaled = {:?}", bor);
+            debug!(
+                "sync_user (user = {}): new borrowed scaled = {:?}",
+                user, bor
+            );
         }
 
         {
@@ -1412,7 +1405,7 @@ impl Cache {
                 })
                 .collect::<Vec<_>>();
             (*indexes, *last_modified) = (Array1::from(idx), now);
-            debug!("sync_user: new liquidity = {:?}", indexes);
+            debug!("sync_user (user = {}): new liquidity = {:?}", user, indexes);
         }
 
         {
@@ -1421,7 +1414,10 @@ impl Cache {
                 Array1::from_iter(liquidity_indexes.iter().map(F64Converter::as_f64_ray)),
                 now,
             );
-            debug!("sync_user: new liquidity index = {:?}", indexes);
+            debug!(
+                "sync_user (user = {}): new liquidity index = {:?}",
+                user, indexes
+            );
         }
 
         {
@@ -1435,7 +1431,10 @@ impl Cache {
                 })
                 .collect::<Vec<_>>();
             (*indexes, *last_modified) = (Array1::from(idx), now);
-            debug!("sync_user: new variable borrow = {:?}", indexes);
+            debug!(
+                "sync_user (user = {}): new variable borrow = {:?}",
+                user, indexes
+            );
         }
 
         {
@@ -1444,7 +1443,10 @@ impl Cache {
                 Array1::from_iter(variable_borrow_indexes.iter().map(F64Converter::as_f64_ray)),
                 now,
             );
-            debug!("sync_user: new variable borrow index = {:?}", indexes);
+            debug!(
+                "sync_user (user = {}): new variable borrow index = {:?}",
+                user, indexes
+            );
         }
 
         Ok(())
@@ -1566,7 +1568,7 @@ impl Cache {
             vec![U40::default(); tokens.len()],
             self.users
                 .get(user)
-                .ok_or_else(|| eyre!("user = {:?} not found", user))?
+                .ok_or_else(|| eyre!("get_user_data: user = {:?} not found", user))?
                 .clone(),
         );
 
@@ -1588,7 +1590,13 @@ impl Cache {
         {
             let idx = tokens
                 .get(&token_address)
-                .ok_or_else(|| eyre!("token = {} not found", token_address))?
+                .ok_or_else(|| {
+                    eyre!(
+                        "get_user_data (user = {}): token = {} not found",
+                        user,
+                        token_address
+                    )
+                })?
                 .order;
 
             liquidity_indexes[idx] = liquidity_index;
@@ -1646,7 +1654,7 @@ impl Cache {
     {
         let callback = Arc::new(callback);
         let mut senders = vec![];
-        for _ in 0..workers {
+        for worker in 0..workers {
             let (tx, mut rc) = channel::<T>(bound);
             let (callback, cache, provider, tokens) = (
                 callback.clone(),
@@ -1656,13 +1664,16 @@ impl Cache {
             );
             task::spawn(async move {
                 loop {
-                    debug!("subscribe: created thread");
+                    debug!("subscribe (worker = {}): created thread", worker);
 
                     while let Some(msg) = rc.recv().await {
                         if let Err(e) =
                             callback(cache.clone(), provider.clone(), tokens.clone(), msg).await
                         {
-                            error!("Error while calling event listener: {:?}", e);
+                            error!(
+                                "subscribe (worker = {}): Error while calling event listener: {:?}",
+                                worker, e
+                            );
                         }
                     }
                 }
@@ -1691,7 +1702,12 @@ impl Cache {
         while col_matrix_lock.nrows() < col_lock.len() {
             let row_lock = col_lock
                 .get(col_matrix_lock.nrows())
-                .ok_or_else(|| eyre!("row = {} not found in collateral", col_matrix_lock.nrows()))?
+                .ok_or_else(|| {
+                    eyre!(
+                        "sync_collateral: row = {} not found in collateral",
+                        col_matrix_lock.nrows()
+                    )
+                })?
                 .read()
                 .await;
             let row = Array1::from_iter(row_lock.0.iter().map(F64Converter::as_f64_ray));
@@ -1726,17 +1742,24 @@ impl Cache {
             col_matrix_lock[(row_num, col_num)] = {
                 let (col, _, _) = &*col_lock
                     .get(row_num)
-                    .ok_or_else(|| eyre!("row = {} not found in collateral", row_num))?
+                    .ok_or_else(|| {
+                        eyre!("sync_collateral: row = {} not found in collateral", row_num)
+                    })?
                     .read()
                     .await;
                 col.get(col_num)
-                    .ok_or_else(|| eyre!("column = {} not found in collateral", col_num))?
+                    .ok_or_else(|| {
+                        eyre!(
+                            "sync_collateral: column = {} not found in collateral",
+                            col_num
+                        )
+                    })?
                     .as_f64_ray()
             };
         } else {
             let row = col_lock
                 .get(row_num)
-                .ok_or_else(|| eyre!("row = {} not found in collateral", row_num))?
+                .ok_or_else(|| eyre!("sync_collateral: row = {} not found in collateral", row_num))?
                 .read()
                 .await;
 
@@ -1776,7 +1799,12 @@ impl Cache {
         while bor_matrix_lock.nrows() < bor_lock.len() {
             let row_lock = bor_lock
                 .get(bor_matrix_lock.nrows())
-                .ok_or_else(|| eyre!("row = {} not found in borrowed", bor_matrix_lock.nrows()))?
+                .ok_or_else(|| {
+                    eyre!(
+                        "sync_borrowed: row = {} not found in borrowed",
+                        bor_matrix_lock.nrows()
+                    )
+                })?
                 .read()
                 .await;
 
@@ -1812,17 +1840,19 @@ impl Cache {
             bor_matrix_lock[(row_num, col_num)] = {
                 let (bor, _, _) = &*bor_lock
                     .get(row_num)
-                    .ok_or_else(|| eyre!("row = {} not found in borrowed", row_num))?
+                    .ok_or_else(|| eyre!("sync_borrowed: row = {} not found in borrowed", row_num))?
                     .read()
                     .await;
                 bor.get(col_num)
-                    .ok_or_else(|| eyre!("column = {} not found in borrowed", col_num))?
+                    .ok_or_else(|| {
+                        eyre!("sync_borrowed: column = {} not found in borrowed", col_num)
+                    })?
                     .as_f64_ray()
             };
         } else {
             let row = bor_lock
                 .get(row_num)
-                .ok_or_else(|| eyre!("row = {} not found in borrowed", row_num))?
+                .ok_or_else(|| eyre!("sync_borrowed: row = {} not found in borrowed", row_num))?
                 .read()
                 .await;
 
@@ -1875,7 +1905,7 @@ impl Cache {
             let row_num = self
                 .users
                 .get(user)
-                .ok_or_else(|| eyre!("user = {:?} not found", user))?
+                .ok_or_else(|| eyre!("calc_hf: user = {:?} not found", user))?
                 .row_num;
 
             let col_eff = {
@@ -1884,7 +1914,13 @@ impl Cache {
                 let col_row_lock = Array1::from_iter(
                     collateral
                         .get(row_num)
-                        .ok_or_else(|| eyre!("row = {} not found in collateral", row_num))?
+                        .ok_or_else(|| {
+                            eyre!(
+                                "calc_hf (user = {}): row = {} not found in collateral",
+                                user,
+                                row_num
+                            )
+                        })?
                         .read()
                         .await
                         .0
@@ -1901,7 +1937,13 @@ impl Cache {
                 let bor_row_lock = Array1::from_iter(
                     borrowed
                         .get(row_num)
-                        .ok_or_else(|| eyre!("row = {} not found in borrowed", row_num))?
+                        .ok_or_else(|| {
+                            eyre!(
+                                "calc_hf (user = {}): row = {} not found in borrowed",
+                                user,
+                                row_num
+                            )
+                        })?
                         .read()
                         .await
                         .0
@@ -1927,7 +1969,7 @@ impl Cache {
             debug!("{}", {
                 let received = Utc::now().timestamp_micros();
                 format!(
-                    "calc_hf: user = {:?}, hf = {:?}, rq_date = {}, \
+                    "calc_hf (user = {}): hf = {:?}, rq_date = {}, \
                      received = {}, delta = {} μs",
                     user,
                     hf_lock,
@@ -1946,7 +1988,7 @@ impl Cache {
             let scaled = collateral
                 * &li
                     .broadcast((collateral.nrows(), li.len()))
-                    .ok_or_else(|| eyre!("collateral = {:?} not found", collateral))?
+                    .ok_or_else(|| eyre!("calc_hf: collateral = {:?} not found", collateral))?
                     .to_owned();
             scaled.dot(&ltp)
         };
@@ -1957,7 +1999,7 @@ impl Cache {
             let scaled = borrowed
                 * &vbi
                     .broadcast((borrowed.nrows(), vbi.len()))
-                    .ok_or_else(|| eyre!("borrowed = {:?} not found", borrowed))?
+                    .ok_or_else(|| eyre!("calc_hf: borrowed = {:?} not found", borrowed))?
                     .to_owned();
             scaled.dot(&price)
         };

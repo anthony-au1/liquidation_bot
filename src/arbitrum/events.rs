@@ -30,9 +30,9 @@ where
                 debug!("{}", {
                     let received = Utc::now().timestamp_micros();
                     format!(
-                        "create_user: cache = {:?}, rq_date = {}, \
+                        "create_user (user = {}): rq_date = {}, \
                              received = {}, delta = {} μs",
-                        cache,
+                        user,
                         rq_date,
                         received,
                         received - rq_date
@@ -45,7 +45,7 @@ where
                             cache
                                 .users
                                 .get(user)
-                                .ok_or_else(|| eyre!("user = {:?} not found", user))?
+                                .ok_or_else(|| eyre!("create_user: user = {} not found", user))?
                                 .row_num,
                         ),
                         rq_date,
@@ -55,7 +55,7 @@ where
             }
         }
         Err(e) => {
-            debug!("create_user: error = {:?}", e);
+            debug!("create_user (user = {}): error = {:?}", user, e);
             cache.remove_user(user);
             return Err(e);
         }
@@ -90,12 +90,11 @@ where
             new_event().await?;
         }
         t if !sync_requested && t <= last_sync => {
-            // skip event
+            debug!("handle_event (user = {}): skip", user);
             skip_event().await?;
         }
         t if sync_requested || (t > last_sync && t <= last_modified) => {
-            // sync user
-            debug!("supply: sync_user user = {:?}", user);
+            debug!("handle_event (user = {}): sync", user);
             cache.sync_user(&user, &tokens, provider).await?;
 
             sync_tx
@@ -104,7 +103,9 @@ where
                         cache
                             .users
                             .get(user)
-                            .ok_or_else(|| eyre!("user = {:?} not found", user))?
+                            .ok_or_else(|| {
+                                eyre!("handle_event: user = {} not found for sync rq", user)
+                            })?
                             .row_num,
                     ),
                     rq_date,
@@ -114,9 +115,9 @@ where
             debug!("{}", {
                 let received = Utc::now().timestamp_micros();
                 format!(
-                    "sync_user: cache = {:?}, rq_date = {}, \
-                             received = {}, delta = {} μs",
-                    cache,
+                    "handle_event (user = {}): rq_date = {}, \
+                             received = {}, delta = {} μs for sync",
+                    user,
                     rq_date,
                     received,
                     received - rq_date
@@ -125,8 +126,8 @@ where
         }
         _ => {
             unreachable!(
-                "rq_date = {}, last_sync = {}, last_modified = {}",
-                rq_date, last_sync, last_modified
+                "handle_event (user = {}): rq_date = {}, last_sync = {}, last_modified = {} for unknown case",
+                user, rq_date, last_sync, last_modified
             );
         }
     }
@@ -148,7 +149,8 @@ where
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
         format!(
-            "supply: rq_date = {}, received = {}, delta = {} μs",
+            "supply (user = {}): rq_date = {}, received = {}, delta = {} μs",
+            event.onBehalfOf,
             rq_date,
             received,
             received - rq_date
@@ -165,10 +167,7 @@ where
     )
     .await?
     {
-        debug!(
-            "supplied: new user created = {}, cache = {:?}",
-            event.onBehalfOf, cache
-        );
+        debug!("supply: new user created = {}", event.onBehalfOf);
 
         return Ok(());
     }
@@ -176,12 +175,18 @@ where
     let user_settings = cache
         .users
         .get(&event.onBehalfOf)
-        .ok_or_else(|| eyre!("user = {:?} not found", event.onBehalfOf))?
+        .ok_or_else(|| eyre!("supply: user = {} not found", event.onBehalfOf))?
         .clone();
     let row_num = user_settings.row_num;
     let idx = tokens
         .get(&event.reserve)
-        .ok_or_else(|| eyre!("token = {:?} not found", event.reserve))?
+        .ok_or_else(|| {
+            eyre!(
+                "supply (user = {}): token = {} not found",
+                event.onBehalfOf,
+                event.reserve
+            )
+        })?
         .order;
     let (decimals, _) = &*cache.decimals.read().await;
     let now = Utc::now().timestamp_micros();
@@ -191,7 +196,13 @@ where
             let collateral = &*cache.collateral.read().await;
             let (_, last_sync, last_modified) = &*collateral
                 .get(row_num)
-                .ok_or_else(|| eyre!("can't get row = {} from collateral", row_num))?
+                .ok_or_else(|| {
+                    eyre!(
+                        "supply (user = {}): can't get row = {} from collateral",
+                        event.onBehalfOf,
+                        row_num
+                    )
+                })?
                 .read()
                 .await;
 
@@ -205,7 +216,13 @@ where
             let collateral = &*c.collateral.read().await;
             let (col, _, last_modified) = &mut *collateral
                 .get(row_num)
-                .ok_or_else(|| eyre!("can't get row = {} from collateral", row_num))?
+                .ok_or_else(|| {
+                    eyre!(
+                        "supply (user = {}): can't get row = {} from collateral",
+                        event.onBehalfOf,
+                        row_num
+                    )
+                })?
                 .write()
                 .await;
             col[idx] += event
@@ -224,8 +241,8 @@ where
         };
         let skip_event = async move || {
             debug!(
-                "event dated before sync:\
-                     event = supply, user = {}, rq_date = {}, collateral sync = {}, collateral modified = {}",
+                "supply (user = {}): event dated before sync:\
+                     event = supply, rq_date = {}, collateral sync = {}, collateral modified = {}",
                 event.onBehalfOf, rq_date, last_sync, last_modified,
             );
 
@@ -250,7 +267,13 @@ where
             let reserve = &*cache.reserve.read().await;
             let (_, last_sync, last_modified) = &*reserve
                 .get(row_num)
-                .ok_or_else(|| eyre!("can't get row = {} from reserve", row_num))?
+                .ok_or_else(|| {
+                    eyre!(
+                        "supply (user = {}): can't get row = {} from reserve",
+                        event.onBehalfOf,
+                        row_num
+                    )
+                })?
                 .read()
                 .await;
 
@@ -264,7 +287,13 @@ where
             let reserve = &*c.reserve.read().await;
             let (res, _, last_modified) = &mut *reserve
                 .get(row_num)
-                .ok_or_else(|| eyre!("can't get row = {} from reserve", row_num))?
+                .ok_or_else(|| {
+                    eyre!(
+                        "supply (user = {}): can't get row = {} from reserve",
+                        event.onBehalfOf,
+                        row_num
+                    )
+                })?
                 .write()
                 .await;
             res[idx] += event
@@ -277,8 +306,8 @@ where
         };
         let skip_event = async move || {
             debug!(
-                "event dated before sync:\
-                     event = supply, user = {}, rq_date = {}, reserve sync = {}, reserve modified = {}",
+                "supply (user = {}): event dated before sync:\
+                     event = supply, rq_date = {}, reserve sync = {}, reserve modified = {}",
                 event.onBehalfOf, rq_date, last_sync, last_modified,
             );
 
@@ -303,9 +332,9 @@ where
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
         format!(
-            "supplied: cache = {:?}, rq_date = {}, \
+            "supply (user = {}): rq_date = {}, \
                      received = {}, delta = {} μs",
-            cache,
+            event.onBehalfOf,
             rq_date,
             received,
             received - rq_date
@@ -329,7 +358,8 @@ where
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
         format!(
-            "withdraw: rq_date = {}, received = {}, delta = {} μs",
+            "withdraw (user = {}): rq_date = {}, received = {}, delta = {} μs",
+            event.user,
             rq_date,
             received,
             received - rq_date
@@ -346,10 +376,7 @@ where
     )
     .await?
     {
-        debug!(
-            "withdraw: new user created = {}, cache = {:?}",
-            event.user, cache
-        );
+        debug!("withdraw: new user created = {}", event.user);
 
         return Ok(());
     }
@@ -357,12 +384,18 @@ where
     let user_settings = cache
         .users
         .get(&event.user)
-        .ok_or_else(|| eyre!("user = {:?} not found", event.user))?
+        .ok_or_else(|| eyre!("withdraw: user = {} not found", event.user))?
         .clone();
     let row_num = user_settings.row_num;
     let idx = tokens
         .get(&event.reserve)
-        .ok_or_else(|| eyre!("token = {:?} not found", event.reserve))?
+        .ok_or_else(|| {
+            eyre!(
+                "withdraw (user = {}): token = {} not found",
+                event.user,
+                event.reserve
+            )
+        })?
         .order;
     let (decimals, _) = &*cache.decimals.read().await;
     let now = Utc::now().timestamp_micros();
@@ -372,7 +405,13 @@ where
             let collateral = &*cache.collateral.read().await;
             let (_, last_sync, last_modified) = &*collateral
                 .get(row_num)
-                .ok_or_else(|| eyre!("can't get row = {} from collateral", row_num))?
+                .ok_or_else(|| {
+                    eyre!(
+                        "withdraw (user = {}): can't get row = {} from collateral",
+                        event.user,
+                        row_num
+                    )
+                })?
                 .read()
                 .await;
 
@@ -386,7 +425,13 @@ where
             let collateral = &*c.collateral.read().await;
             let (col, _, last_modified) = &mut *collateral
                 .get(row_num)
-                .ok_or_else(|| eyre!("can't get row = {} from collateral", row_num))?
+                .ok_or_else(|| {
+                    eyre!(
+                        "withdraw (user = {}): can't get row = {} from collateral",
+                        event.user,
+                        row_num
+                    )
+                })?
                 .write()
                 .await;
             col[idx] -= event
@@ -405,8 +450,8 @@ where
         };
         let skip_event = async move || {
             debug!(
-                "event dated before sync:\
-                     event = withdraw, user = {}, rq_date = {}, collateral sync = {}, collateral modified = {}",
+                "withdraw (user = {}): event dated before sync:\
+                     event = withdraw, rq_date = {}, collateral sync = {}, collateral modified = {}",
                 event.user, rq_date, last_sync, last_modified,
             );
 
@@ -431,7 +476,13 @@ where
             let reserve = &*cache.reserve.read().await;
             let (_, last_sync, last_modified) = &*reserve
                 .get(row_num)
-                .ok_or_else(|| eyre!("can't get row = {} from reserve", row_num))?
+                .ok_or_else(|| {
+                    eyre!(
+                        "withdraw (user = {}): can't get row = {} from reserve",
+                        event.user,
+                        row_num
+                    )
+                })?
                 .read()
                 .await;
 
@@ -445,7 +496,13 @@ where
             let reserve = &*c.reserve.read().await;
             let (res, _, last_modified) = &mut *reserve
                 .get(row_num)
-                .ok_or_else(|| eyre!("can't get row = {} from reserve", row_num))?
+                .ok_or_else(|| {
+                    eyre!(
+                        "withdraw (user = {}): can't get row = {} from reserve",
+                        event.user,
+                        row_num
+                    )
+                })?
                 .write()
                 .await;
             res[idx] -= event
@@ -458,8 +515,8 @@ where
         };
         let skip_event = async move || {
             debug!(
-                "event dated before sync:\
-                     event = withdraw, user = {}, rq_date = {}, reserve sync = {}, reserve modified = {}",
+                "withdraw (user = {}): event dated before sync:\
+                     event = withdraw, rq_date = {}, reserve sync = {}, reserve modified = {}",
                 event.user, rq_date, last_sync, last_modified,
             );
 
@@ -484,8 +541,9 @@ where
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
         format!(
-            "withdraw: cache = {:?}, rq_date = {}, \
+            "withdraw (user = {}): cache = {:?}, rq_date = {}, \
                      received = {}, delta = {} μs",
+            event.user,
             cache,
             rq_date,
             received,
@@ -510,7 +568,8 @@ where
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
         format!(
-            "borrow: rq_date = {}, received = {}, delta = {} μs",
+            "borrow (user = {}): rq_date = {}, received = {}, delta = {} μs",
+            event.onBehalfOf,
             rq_date,
             received,
             received - rq_date
@@ -522,28 +581,31 @@ where
         &cache,
         provider.clone(),
         &tokens,
-        &event.user,
+        &event.onBehalfOf,
         &sync_tx,
     )
     .await?
     {
-        debug!(
-            "borrow: new user created = {}, cache = {:?}",
-            event.user, cache
-        );
+        debug!("borrow: new user created = {}", event.onBehalfOf);
 
         return Ok(());
     }
 
     let user_settings = cache
         .users
-        .get(&event.user)
-        .ok_or_else(|| eyre!("user = {:?} not found", event.user))?
+        .get(&event.onBehalfOf)
+        .ok_or_else(|| eyre!("borrow: user = {} not found", event.onBehalfOf))?
         .clone();
     let row_num = user_settings.row_num;
     let idx = tokens
         .get(&event.reserve)
-        .ok_or_else(|| eyre!("token = {:?} not found", event.reserve))?
+        .ok_or_else(|| {
+            eyre!(
+                "borrow (user = {}): token = {} not found",
+                event.onBehalfOf,
+                event.reserve
+            )
+        })?
         .order;
     let (decimals, _) = &*cache.decimals.read().await;
     let now = Utc::now().timestamp_micros();
@@ -552,7 +614,13 @@ where
         let borrowed = &*cache.borrowed.read().await;
         let (_, last_sync, last_modified) = &*borrowed
             .get(row_num)
-            .ok_or_else(|| eyre!("can't get row = {} from borrowed", row_num))?
+            .ok_or_else(|| {
+                eyre!(
+                    "borrow (user = {}): can't get row = {} from borrowed",
+                    event.onBehalfOf,
+                    row_num
+                )
+            })?
             .read()
             .await;
 
@@ -561,12 +629,18 @@ where
 
     let (c, s_tx) = (cache.clone(), sync_tx.clone());
     let new_event = async move || {
-        debug!("borrow: new event user = {}", event.user);
+        debug!("borrow: new event user = {}", event.onBehalfOf);
 
         let borrowed = &*c.borrowed.read().await;
         let (bor, _, last_modified) = &mut *borrowed
             .get(row_num)
-            .ok_or_else(|| eyre!("can't get row = {} from borrowed", row_num))?
+            .ok_or_else(|| {
+                eyre!(
+                    "borrow (user = {}): can't get row = {} from borrowed",
+                    event.onBehalfOf,
+                    row_num
+                )
+            })?
             .write()
             .await;
         bor[idx] += event
@@ -585,16 +659,16 @@ where
     };
     let skip_event = async move || {
         debug!(
-            "event dated before sync:\
-                     event = borrow, user = {}, rq_date = {}, borrowed sync = {}, borrowed modified = {}",
-            event.user, rq_date, last_sync, last_modified,
+            "borrow (user = {}): event dated before sync:\
+                     event = borrow, rq_date = {}, borrowed sync = {}, borrowed modified = {}",
+            event.onBehalfOf, rq_date, last_sync, last_modified,
         );
 
         Ok(())
     };
 
     handle_event(
-        &event.user,
+        &event.onBehalfOf,
         &cache,
         &tokens,
         provider.clone(),
@@ -610,9 +684,9 @@ where
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
         format!(
-            "borrow: cache = {:?}, rq_date = {}, \
+            "borrow (user = {}): rq_date = {}, \
                      received = {}, delta = {} μs",
-            cache,
+            event.onBehalfOf,
             rq_date,
             received,
             received - rq_date
@@ -636,7 +710,8 @@ where
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
         format!(
-            "repay: rq_date = {}, received = {}, delta = {} μs",
+            "repay (user = {}): rq_date = {}, received = {}, delta = {} μs",
+            event.user,
             rq_date,
             received,
             received - rq_date
@@ -653,10 +728,7 @@ where
     )
     .await?
     {
-        debug!(
-            "repay: new user created = {}, cache = {:?}",
-            event.user, cache
-        );
+        debug!("repay: new user created = {}", event.user);
 
         return Ok(());
     }
@@ -664,12 +736,18 @@ where
     let user_settings = cache
         .users
         .get(&event.user)
-        .ok_or_else(|| eyre!("user = {:?} not found", event.user))?
+        .ok_or_else(|| eyre!("repay: user = {} not found", event.user))?
         .clone();
     let row_num = user_settings.row_num;
     let idx = tokens
         .get(&event.reserve)
-        .ok_or_else(|| eyre!("token = {:?} not found", event.reserve))?
+        .ok_or_else(|| {
+            eyre!(
+                "repay (user = {}): token = {} not found",
+                event.user,
+                event.reserve
+            )
+        })?
         .order;
     let (decimals, _) = &*cache.decimals.read().await;
     let now = Utc::now().timestamp_micros();
@@ -678,7 +756,13 @@ where
         let borrowed = &*cache.borrowed.read().await;
         let (_, last_sync, last_modified) = &*borrowed
             .get(row_num)
-            .ok_or_else(|| eyre!("can't get row = {} from borrowed", row_num))?
+            .ok_or_else(|| {
+                eyre!(
+                    "repay (user = {}): can't get row = {} from borrowed",
+                    event.user,
+                    row_num
+                )
+            })?
             .read()
             .await;
 
@@ -692,7 +776,13 @@ where
         let borrowed = &*c.borrowed.read().await;
         let (bor, _, last_modified) = &mut *borrowed
             .get(row_num)
-            .ok_or_else(|| eyre!("can't get row = {} from borrowed", row_num))?
+            .ok_or_else(|| {
+                eyre!(
+                    "repay (user = {}): can't get row = {} from borrowed",
+                    event.user,
+                    row_num
+                )
+            })?
             .write()
             .await;
         bor[idx] -= event
@@ -711,8 +801,8 @@ where
     };
     let skip_event = async move || {
         debug!(
-            "event dated before sync:\
-                     event = repay, user = {}, rq_date = {}, borrowed sync = {}, borrowed modified = {}",
+            "repay (user = {}): event dated before sync:\
+                     event = repay, rq_date = {}, borrowed sync = {}, borrowed modified = {}",
             event.user, rq_date, last_sync, last_modified,
         );
 
@@ -736,9 +826,9 @@ where
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
         format!(
-            "repay: cache = {:?}, rq_date = {}, \
+            "repay (user = {}): rq_date = {}, \
                      received = {}, delta = {} μs",
-            cache,
+            event.user,
             rq_date,
             received,
             received - rq_date
@@ -767,7 +857,8 @@ where
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
         format!(
-            "reserve_used_as_collateral_enabled: rq_date = {}, received = {}, delta = {} μs",
+            "reserve_used_as_collateral_enabled (user = {}): rq_date = {}, received = {}, delta = {} μs",
+            event.user,
             rq_date,
             received,
             received - rq_date
@@ -785,8 +876,8 @@ where
     .await?
     {
         debug!(
-            "reserve_used_as_collateral_enabled: new user created = {}, cache = {:?}",
-            event.user, cache
+            "reserve_used_as_collateral_enabled: new user created = {}",
+            event.user
         );
 
         return Ok(());
@@ -795,12 +886,23 @@ where
     let user_settings = cache
         .users
         .get(&event.user)
-        .ok_or_else(|| eyre!("user = {:?} not found", event.user))?
+        .ok_or_else(|| {
+            eyre!(
+                "reserve_used_as_collateral_enabled: user = {} not found",
+                event.user
+            )
+        })?
         .clone();
     let row_num = user_settings.row_num;
     let idx = tokens
         .get(&event.reserve)
-        .ok_or_else(|| eyre!("token = {:?} not found", event.reserve))?
+        .ok_or_else(|| {
+            eyre!(
+                "reserve_used_as_collateral_enabled (user = {}): token = {:?} not found",
+                event.user,
+                event.reserve
+            )
+        })?
         .order;
     let now = Utc::now().timestamp_micros();
 
@@ -808,7 +910,7 @@ where
         let reserve = &*cache.reserve.read().await;
         let (_, last_sync, last_modified) = &*reserve
             .get(row_num)
-            .ok_or_else(|| eyre!("can't get row = {} from reserve", row_num))?
+            .ok_or_else(|| eyre!("reserve_used_as_collateral_enabled (user = {}): can't get row = {} from reserve", event.user, row_num))?
             .read()
             .await;
 
@@ -824,14 +926,19 @@ where
 
         c.users
             .get_mut(&event.user)
-            .ok_or_else(|| eyre!("user = {:?} not found", event.user))?
+            .ok_or_else(|| {
+                eyre!(
+                    "reserve_used_as_collateral_enabled: user = {} not found",
+                    event.user
+                )
+            })?
             .use_as_collateral
             .set(idx, true);
 
         let reserve = &*c.reserve.read().await;
         let (res, _, last_modified) = &mut *reserve
             .get(row_num)
-            .ok_or_else(|| eyre!("can't get row = {} from reserve", row_num))?
+            .ok_or_else(|| eyre!("reserve_used_as_collateral_enabled (user = {}): can't get row = {} from reserve", event.user, row_num))?
             .write()
             .await;
         *last_modified = now;
@@ -839,7 +946,7 @@ where
         let collateral = &*c.collateral.read().await;
         let (col, _, last_modified) = &mut *collateral
             .get(row_num)
-            .ok_or_else(|| eyre!("can't get row = {} from collateral", row_num))?
+            .ok_or_else(|| eyre!("reserve_used_as_collateral_enabled (user = {}): can't get row = {} from collateral", event.user, row_num))?
             .write()
             .await;
         *last_modified = now;
@@ -857,8 +964,8 @@ where
     };
     let skip_event = async move || {
         debug!(
-            "event dated before sync:\
-                     event = reserve_used_as_collateral_enabled, user = {}, rq_date = {}, reserve sync = {}, reserve modified = {}",
+            "reserve_used_as_collateral_enabled (user = {}): event dated before sync:\
+                     event = reserve_used_as_collateral_enabled, rq_date = {}, reserve sync = {}, reserve modified = {}",
             event.user, rq_date, last_sync, last_modified,
         );
 
@@ -882,9 +989,9 @@ where
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
         format!(
-            "reserve_used_as_collateral_enabled: cache = {:?}, rq_date = {}, \
+            "reserve_used_as_collateral_enabled (user = {}): rq_date = {}, \
                      received = {}, delta = {} μs",
-            cache,
+            event.user,
             rq_date,
             received,
             received - rq_date
@@ -913,7 +1020,8 @@ where
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
         format!(
-            "reserve_used_as_collateral_disabled: rq_date = {}, received = {}, delta = {} μs",
+            "reserve_used_as_collateral_disabled (user = {}): rq_date = {}, received = {}, delta = {} μs",
+            event.user,
             rq_date,
             received,
             received - rq_date
@@ -931,8 +1039,8 @@ where
     .await?
     {
         debug!(
-            "reserve_used_as_collateral_disabled: new user created = {}, cache = {:?}",
-            event.user, cache
+            "reserve_used_as_collateral_disabled: new user created = {}",
+            event.user
         );
 
         return Ok(());
@@ -941,12 +1049,23 @@ where
     let user_settings = cache
         .users
         .get(&event.user)
-        .ok_or_else(|| eyre!("user = {:?} not found", event.user))?
+        .ok_or_else(|| {
+            eyre!(
+                "reserve_used_as_collateral_disabled: user = {} not found",
+                event.user
+            )
+        })?
         .clone();
     let row_num = user_settings.row_num;
     let idx = tokens
         .get(&event.reserve)
-        .ok_or_else(|| eyre!("token = {:?} not found", event.reserve))?
+        .ok_or_else(|| {
+            eyre!(
+                "reserve_used_as_collateral_disabled (user = {}): token = {} not found",
+                event.user,
+                event.reserve
+            )
+        })?
         .order;
     let now = Utc::now().timestamp_micros();
 
@@ -954,7 +1073,7 @@ where
         let reserve = &*cache.reserve.read().await;
         let (_, last_sync, last_modified) = &*reserve
             .get(row_num)
-            .ok_or_else(|| eyre!("can't get row = {} from reserve", row_num))?
+            .ok_or_else(|| eyre!("reserve_used_as_collateral_disabled (user = {}): can't get row = {} from reserve", event.user, row_num))?
             .read()
             .await;
 
@@ -970,14 +1089,19 @@ where
 
         c.users
             .get_mut(&event.user)
-            .ok_or_else(|| eyre!("user = {:?} not found", event.user))?
+            .ok_or_else(|| {
+                eyre!(
+                    "reserve_used_as_collateral_disabled: user = {} not found",
+                    event.user
+                )
+            })?
             .use_as_collateral
             .set(idx, false);
 
         let reserve = &*c.reserve.read().await;
         let (res, _, last_modified) = &mut *reserve
             .get(row_num)
-            .ok_or_else(|| eyre!("can't get row = {} from reserve", row_num))?
+            .ok_or_else(|| eyre!("reserve_used_as_collateral_disabled (user = {}): can't get row = {} from reserve", event.user, row_num))?
             .write()
             .await;
         *last_modified = now;
@@ -985,7 +1109,7 @@ where
         let collateral = &*c.collateral.read().await;
         let (col, _, last_modified) = &mut *collateral
             .get(row_num)
-            .ok_or_else(|| eyre!("can't get row = {} from collateral", row_num))?
+            .ok_or_else(|| eyre!("reserve_used_as_collateral_disabled (user = {}): can't get row = {} from collateral", event.user, row_num))?
             .write()
             .await;
         *last_modified = now;
@@ -1003,8 +1127,8 @@ where
     };
     let skip_event = async move || {
         debug!(
-            "event dated before sync:\
-                     event = reserve_used_as_collateral_disabled, user = {}, rq_date = {}, reserve sync = {}, reserve modified = {}",
+            "reserve_used_as_collateral_disabled (user = {}): event dated before sync:\
+                     event = reserve_used_as_collateral_disabled, rq_date = {}, reserve sync = {}, reserve modified = {}",
             event.user, rq_date, last_sync, last_modified,
         );
 
@@ -1028,9 +1152,9 @@ where
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
         format!(
-            "reserve_used_as_collateral_disabled: cache = {:?}, rq_date = {}, \
+            "reserve_used_as_collateral_disabled (user = {}): rq_date = {}, \
                      received = {}, delta = {} μs",
-            cache,
+            event.user,
             rq_date,
             received,
             received - rq_date
@@ -1059,7 +1183,8 @@ where
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
         format!(
-            "liquidation_call: rq_date = {}, received = {}, delta = {} μs",
+            "liquidation_call (user = {}): rq_date = {}, received = {}, delta = {} μs",
+            event.user,
             rq_date,
             received,
             received - rq_date
@@ -1076,10 +1201,7 @@ where
     )
     .await?
     {
-        debug!(
-            "liquidation_call: new user created = {}, cache = {:?}",
-            event.user, cache
-        );
+        debug!("liquidation_call: new user created = {}", event.user);
 
         return Ok(());
     }
@@ -1087,7 +1209,7 @@ where
     let user_settings = cache
         .users
         .get(&event.user)
-        .ok_or_else(|| eyre!("user = {:?} not found", event.user))?
+        .ok_or_else(|| eyre!("liquidation_call: user = {} not found", event.user))?
         .clone();
     let row_num = user_settings.row_num;
     let (decimals, _) = &*cache.decimals.read().await;
@@ -1095,19 +1217,37 @@ where
 
     let bor_idx = tokens
         .get(&event.debtAsset)
-        .ok_or_else(|| eyre!("token = {:?} not found", event.debtAsset))?
+        .ok_or_else(|| {
+            eyre!(
+                "liquidation_call (user = {}): token = {} not found",
+                event.user,
+                event.debtAsset
+            )
+        })?
         .order;
 
     let col_idx = tokens
         .get(&event.collateralAsset)
-        .ok_or_else(|| eyre!("token = {:?} not found", event.collateralAsset))?
+        .ok_or_else(|| {
+            eyre!(
+                "liquidation_call (user = {}): token = {} not found",
+                event.user,
+                event.collateralAsset
+            )
+        })?
         .order;
 
     let (last_sync, last_modified) = {
         let borrowed = &*cache.borrowed.read().await;
         let (_, last_sync, last_modified) = &*borrowed
             .get(row_num)
-            .ok_or_else(|| eyre!("can't get row = {} from borrowed", row_num))?
+            .ok_or_else(|| {
+                eyre!(
+                    "liquidation_call (user = {}): can't get row = {} from borrowed",
+                    event.user,
+                    row_num
+                )
+            })?
             .read()
             .await;
 
@@ -1121,7 +1261,13 @@ where
         let collateral = &*c.collateral.read().await;
         let (col, _, last_modified) = &mut *collateral
             .get(row_num)
-            .ok_or_else(|| eyre!("can't get row = {} from collateral", row_num))?
+            .ok_or_else(|| {
+                eyre!(
+                    "liquidation_call (user = {}): can't get row = {} from collateral",
+                    event.user,
+                    row_num
+                )
+            })?
             .write()
             .await;
         *last_modified = now;
@@ -1129,7 +1275,13 @@ where
         let borrowed = &*c.borrowed.read().await;
         let (bor, _, last_modified) = &mut *borrowed
             .get(row_num)
-            .ok_or_else(|| eyre!("can't get row = {} from borrowed", row_num))?
+            .ok_or_else(|| {
+                eyre!(
+                    "liquidation_call (user = {}): can't get row = {} from borrowed",
+                    event.user,
+                    row_num
+                )
+            })?
             .write()
             .await;
         *last_modified = now;
@@ -1158,8 +1310,8 @@ where
     };
     let skip_event = async move || {
         debug!(
-            "event dated before sync:\
-                     event = liquidation_call, user = {}, rq_date = {}, borrowed sync = {}, borrowed modified = {}",
+            "liquidation_call (user = {}): event dated before sync:\
+                     event = liquidation_call, rq_date = {}, borrowed sync = {}, borrowed modified = {}",
             event.user, rq_date, last_sync, last_modified,
         );
 
@@ -1183,9 +1335,9 @@ where
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
         format!(
-            "liquidation_call: cache = {:?}, rq_date = {}, \
+            "liquidation_call (user = {}): rq_date = {}, \
                      received = {}, delta = {} μs",
-            cache,
+            event.user,
             rq_date,
             received,
             received - rq_date
@@ -1209,7 +1361,8 @@ where
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
         format!(
-            "reserve_data_updated: rq_date = {}, received = {}, delta = {} μs",
+            "reserve_data_updated (reserve = {}): rq_date = {}, received = {}, delta = {} μs",
+            event.reserve,
             rq_date,
             received,
             received - rq_date
@@ -1220,7 +1373,7 @@ where
 
     let idx = tokens
         .get(&event.reserve)
-        .ok_or_else(|| eyre::eyre!("token not found"))?
+        .ok_or_else(|| eyre::eyre!("reserve_data_updated: {} token not found", event.reserve))?
         .order;
 
     {
