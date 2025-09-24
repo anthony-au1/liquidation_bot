@@ -2,9 +2,9 @@ extern crate core;
 
 use liquidation_bot;
 
-use alloy::providers::{Provider, ProviderBuilder, WsConnect};
+use alloy::providers::{ProviderBuilder, WsConnect};
 use axum::routing::get;
-use axum::Router;
+use axum::{Json, Router};
 use clap::{Parser, Subcommand};
 use liquidation_bot::arbitrum::arbitrum::AaveDataProvider;
 use liquidation_bot::arbitrum::arbitrum::{start, Cache, WS_URL};
@@ -20,7 +20,8 @@ use liquidation_bot::arbitrum::stats::{
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing::info;
-use tracing_subscriber::EnvFilter;
+use tracing_appender::rolling::{RollingFileAppender, Rotation};
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 /// Liquidation bot command interface
 #[derive(Debug, Parser)]
@@ -43,8 +44,30 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,liquidation_bot=debug"));
+
+    let stdout_layer = fmt::layer()
+        .with_target(false)
+        .with_thread_ids(true)
+        .with_level(true)
+        .pretty();
+
+    let file_appender = RollingFileAppender::builder()
+        .rotation(Rotation::DAILY)
+        .filename_prefix("lb")
+        .filename_suffix("json")
+        .build("logs")
+        .expect("log directory create failed");
+
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+
+    let json_layer = fmt::layer().json().with_writer(non_blocking);
+
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(stdout_layer)
+        .with(json_layer)
         .init();
 
     info!("app is starting ...");

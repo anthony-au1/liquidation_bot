@@ -13,7 +13,7 @@
 
 `RUST_LOG=debug cargo run -- start` - run liquidation bot with debug level logger
 
-`RUST_LOG=debug cargo run --bin bot -- start` - run liquidation bot with debug level logger
+`RUST_LOG=info,liquidation_bot=debug cargo run --bin bot -- start` - run liquidation bot with debug level logger
 
 `RUST_LOG=debug cargo run --release --bin bot -- start` - run liquidation bot in release mode with debug level logger
 
