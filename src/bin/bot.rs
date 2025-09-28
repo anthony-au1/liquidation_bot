@@ -4,7 +4,7 @@ use liquidation_bot;
 
 use alloy::providers::{ProviderBuilder, WsConnect};
 use axum::routing::get;
-use axum::{Json, Router};
+use axum::Router;
 use clap::{Parser, Subcommand};
 use liquidation_bot::arbitrum::arbitrum::AaveDataProvider;
 use liquidation_bot::arbitrum::arbitrum::{start, Cache, WS_URL};
@@ -21,6 +21,7 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing::info;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
+use tracing_subscriber::prelude::*;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 /// Liquidation bot command interface
@@ -62,12 +63,36 @@ async fn main() -> eyre::Result<()> {
 
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
 
-    let json_layer = fmt::layer().json().with_writer(non_blocking);
+    let json_layer = fmt::layer()
+        .json()
+        .with_writer(non_blocking)
+        .with_filter(tracing_subscriber::filter::filter_fn(|meta| {
+            !meta.target()
+                .starts_with("liquidation_bot::arbitrum::stats")
+        }));
+
+    let stats_file_appender = RollingFileAppender::builder()
+        .rotation(Rotation::DAILY)
+        .filename_prefix("stats")
+        .filename_suffix("json")
+        .build("logs/stats")
+        .expect("log/stats directory create failed");
+
+    let (stats_non_blocking, _stats_guard) = tracing_appender::non_blocking(stats_file_appender);
+
+    let stats_json_layer = fmt::layer()
+        .json()
+        .with_writer(stats_non_blocking)
+        .with_filter(tracing_subscriber::filter::filter_fn(|meta| {
+            meta.target()
+                .starts_with("liquidation_bot::arbitrum::stats")
+        }));
 
     tracing_subscriber::registry()
         .with(filter)
         .with(stdout_layer)
         .with(json_layer)
+        .with(stats_json_layer)
         .init();
 
     info!("app is starting ...");

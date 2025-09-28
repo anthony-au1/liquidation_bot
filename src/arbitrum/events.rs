@@ -3,8 +3,8 @@ use crate::arbitrum::arbitrum::IL2Pool::{
     ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
 use crate::arbitrum::arbitrum::{
-    Cache, DataProvider, F64Converter, HFRequest, RayOperations, RqDate, Scaler, SyncRequest, SyncTarget,
-    TimeStamp, TokenDetails, Tokens, RAY,
+    Cache, DataProvider, F64Converter, HFRequest, RAY, RayOperations, RqDate, Scaler, SyncRequest,
+    SyncTarget, TimeStamp, TokenDetails, Tokens,
 };
 use alloy_primitives::{Address, U256};
 use chrono::Utc;
@@ -541,10 +541,9 @@ where
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
         format!(
-            "withdraw (user = {}): cache = {:?}, rq_date = {}, \
+            "withdraw (user = {}): rq_date = {}, \
                      received = {}, delta = {} μs",
             event.user,
-            cache,
             rq_date,
             received,
             received - rq_date

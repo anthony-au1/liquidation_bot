@@ -10,6 +10,7 @@ use bitvec::prelude::BitVec;
 use ndarray::Axis;
 use serde::Serialize;
 use std::sync::Arc;
+use tracing::info;
 
 #[derive(Clone)]
 pub struct AppState<P>
@@ -26,7 +27,7 @@ pub struct UserState {
     pub users_num: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct FullState {
     pub users: Vec<User>,
     pub users_num: usize,
@@ -55,7 +56,7 @@ pub struct FullState {
     pub health_factors: Vec<f64>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct User {
     pub name: Address,
     pub row: usize,
@@ -74,7 +75,7 @@ impl User {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct IndexRate {
     pub index: String,
     pub rate: String,
@@ -110,12 +111,18 @@ where
     let user = get_user(row_num, state.cache).await;
 
     match user {
-        Some(u) => (StatusCode::OK, Json(u)).into_response(),
-        None => (
-            StatusCode::NOT_FOUND,
-            format!("User for row {} not found", row_num),
-        )
-            .into_response(),
+        Some(u) => {
+            info!("get_user_state: row_num = {} and user = {:?}", row_num, u);
+            (StatusCode::OK, Json(u)).into_response()
+        }
+        None => {
+            info!("get_user_state: user for row_num = {} not found", row_num);
+            (
+                StatusCode::NOT_FOUND,
+                format!("User for row {} not found", row_num),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -141,8 +148,13 @@ where
     P: Provider + Clone + Send + Sync + 'static,
 {
     let (users, users_num) = get_users(state.cache).await;
-    let user_state = UserState { users, users_num };
 
+    info!(
+        "get_users_state: users = {:?} and users_num = {}",
+        users, users_num
+    );
+
+    let user_state = UserState { users, users_num };
     (StatusCode::OK, Json(user_state))
 }
 
@@ -156,6 +168,8 @@ where
     P: Provider + Clone + Send + Sync + 'static,
 {
     let decimals = get_decimals(state.cache).await;
+
+    info!("get_decimals_state: decimals = {:?}", decimals);
 
     (StatusCode::OK, Json(decimals))
 }
@@ -173,6 +187,8 @@ where
 {
     let tokens = get_tokens(state.cache).await;
 
+    info!("get_tokens_state: tokens = {:?}", tokens);
+
     (StatusCode::OK, Json(tokens))
 }
 
@@ -188,6 +204,11 @@ where
     P: Provider + Clone + Send + Sync + 'static,
 {
     let price_decimals = get_price_decimals(state.cache).await;
+
+    info!(
+        "get_price_decimals_state: price_decimals = {:?}",
+        price_decimals
+    );
 
     (StatusCode::OK, Json(price_decimals))
 }
@@ -209,12 +230,24 @@ where
     let reserve = get_reserve(row_num, state.cache).await;
 
     match reserve {
-        Some(r) => (StatusCode::OK, Json(r)).into_response(),
-        None => (
-            StatusCode::NOT_FOUND,
-            format!("reserve for row {} not found", row_num),
-        )
-            .into_response(),
+        Some(r) => {
+            info!(
+                "get_reserve_state: row_num = {} and reserve = {:?}",
+                row_num, r
+            );
+            (StatusCode::OK, Json(r)).into_response()
+        }
+        None => {
+            info!(
+                "get_reserve_state: reserve for row_num = {} not found",
+                row_num
+            );
+            (
+                StatusCode::NOT_FOUND,
+                format!("reserve for row {} not found", row_num),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -237,6 +270,8 @@ where
 {
     let reserve = get_reserve_all(state.cache).await;
 
+    info!("get_reserve_all_state: reserve = {:?}", reserve);
+
     (StatusCode::OK, Json(reserve))
 }
 
@@ -257,12 +292,24 @@ where
     let collateral = get_collateral(row_num, state.cache).await;
 
     match collateral {
-        Some(c) => (StatusCode::OK, Json(c)).into_response(),
-        None => (
-            StatusCode::NOT_FOUND,
-            format!("collateral for row {} not found", row_num),
-        )
-            .into_response(),
+        Some(c) => {
+            info!(
+                "get_collateral_state: row_num = {} and collateral = {:?}",
+                row_num, c
+            );
+            (StatusCode::OK, Json(c)).into_response()
+        }
+        None => {
+            info!(
+                "get_collateral_state: collateral for row_num = {} not found",
+                row_num
+            );
+            (
+                StatusCode::NOT_FOUND,
+                format!("collateral for row {} not found", row_num),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -284,6 +331,8 @@ where
     P: Provider + Clone + Send + Sync + 'static,
 {
     let collateral = get_collateral_all(state.cache).await;
+
+    info!("get_collateral_all_state: collateral = {:?}", collateral);
 
     (StatusCode::OK, Json(collateral))
 }
@@ -307,12 +356,26 @@ where
     let collateral_matrix_row = get_collateral_matrix_row(row_num, state.cache).await;
 
     match collateral_matrix_row {
-        Some(c) => (StatusCode::OK, Json(c)).into_response(),
-        None => (
-            StatusCode::NOT_FOUND,
-            format!("collateral for row {} not found", row_num),
-        )
-            .into_response(),
+        Some(c) => {
+            info!(
+                "get_collateral_matrix_row_state: row_num = {} and collateral_matrix_row = {:?}",
+                row_num, c
+            );
+
+            (StatusCode::OK, Json(c)).into_response()
+        }
+        None => {
+            info!(
+                "get_collateral_matrix_row_state: collateral_matrix_row for row_num = {} not found",
+                row_num
+            );
+
+            (
+                StatusCode::NOT_FOUND,
+                format!("collateral for row {} not found", row_num),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -331,6 +394,11 @@ where
     P: Provider + Clone + Send + Sync + 'static,
 {
     let collateral_matrix = get_collateral_matrix(state.cache).await;
+
+    info!(
+        "get_collateral_matrix_state: collateral_matrix = {:?}",
+        collateral_matrix
+    );
 
     (StatusCode::OK, Json(collateral_matrix))
 }
@@ -352,12 +420,26 @@ where
     let borrowed = get_borrowed(row_num, state.cache).await;
 
     match borrowed {
-        Some(b) => (StatusCode::OK, Json(b)).into_response(),
-        None => (
-            StatusCode::NOT_FOUND,
-            format!("borrowed for row {} not found", row_num),
-        )
-            .into_response(),
+        Some(b) => {
+            info!(
+                "get_borrowed_state: row_num = {} and borrowed = {:?}",
+                row_num, b
+            );
+
+            (StatusCode::OK, Json(b)).into_response()
+        }
+        None => {
+            info!(
+                "get_borrowed_state: borrowed for row_num = {} not found",
+                row_num
+            );
+
+            (
+                StatusCode::NOT_FOUND,
+                format!("borrowed for row {} not found", row_num),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -379,6 +461,8 @@ where
     P: Provider + Clone + Send + Sync + 'static,
 {
     let borrowed = get_borrowed_all(state.cache).await;
+
+    info!("get_borrowed_all_state: borrowed = {:?}", borrowed);
 
     (StatusCode::OK, Json(borrowed))
 }
@@ -403,12 +487,25 @@ where
     let borrowed_matrix_row = get_borrowed_matrix_row(row_num, state.cache).await;
 
     match borrowed_matrix_row {
-        Some(c) => (StatusCode::OK, Json(c)).into_response(),
-        None => (
-            StatusCode::NOT_FOUND,
-            format!("borrowed for row {} not found", row_num),
-        )
-            .into_response(),
+        Some(b) => {
+            info!(
+                "get_borrowed_matrix_row_state: row_num = {} and borrowed_matrix_row = {:?}",
+                row_num, b
+            );
+
+            (StatusCode::OK, Json(b)).into_response()
+        }
+        None => {
+            info!(
+                "get_borrowed_matrix_row_state: borrowed_matrix_row for row_num = {} and not found",
+                row_num
+            );
+            (
+                StatusCode::NOT_FOUND,
+                format!("borrowed for row {} not found", row_num),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -427,6 +524,11 @@ where
     P: Provider + Clone + Send + Sync + 'static,
 {
     let borrowed_matrix = get_borrowed_matrix(state.cache).await;
+
+    info!(
+        "get_borrowed_matrix_state: borrowed_matrix = {:?}",
+        borrowed_matrix
+    );
 
     (StatusCode::OK, Json(borrowed_matrix))
 }
@@ -447,6 +549,8 @@ where
 {
     let liquidity = get_liquidity(state.cache).await;
 
+    info!("get_liquidity_state: liquidity = {:?}", liquidity);
+
     (StatusCode::OK, Json(liquidity))
 }
 
@@ -462,6 +566,11 @@ where
     P: Provider + Clone + Send + Sync + 'static,
 {
     let liquidity_index = get_liquidity_index(state.cache).await;
+
+    info!(
+        "get_liquidity_index_state: liquidity_index = {:?}",
+        liquidity_index
+    );
 
     (StatusCode::OK, Json(liquidity_index))
 }
@@ -482,6 +591,11 @@ where
 {
     let variable_borrow = get_variable_borrow(state.cache).await;
 
+    info!(
+        "get_variable_borrow_state: variable_borrow = {:?}",
+        variable_borrow
+    );
+
     (StatusCode::OK, Json(variable_borrow))
 }
 
@@ -497,6 +611,11 @@ where
     P: Provider + Clone + Send + Sync + 'static,
 {
     let variable_borrow_index = get_variable_borrow_index(state.cache).await;
+
+    info!(
+        "get_variable_borrow_index_state: variable_borrow_index = {:?}",
+        variable_borrow_index
+    );
 
     (StatusCode::OK, Json(variable_borrow_index))
 }
@@ -514,6 +633,11 @@ where
 {
     let liquidation_threshold = get_liquidation_threshold(state.cache).await;
 
+    info!(
+        "get_liquidation_threshold_state: liquidation_threshold = {:?}",
+        liquidation_threshold
+    );
+
     (StatusCode::OK, Json(liquidation_threshold))
 }
 
@@ -527,6 +651,8 @@ where
     P: Provider + Clone + Send + Sync + 'static,
 {
     let prices = get_prices(state.cache).await;
+
+    info!("get_prices_state: prices = {:?}", prices);
 
     (StatusCode::OK, Json(prices))
 }
@@ -545,6 +671,11 @@ where
 {
     let health_factors = get_health_factor(row_num, state.cache).await;
 
+    info!(
+        "get_health_factor_state: row_num = {}, health_factor = {:?}",
+        row_num, health_factors
+    );
+
     (StatusCode::OK, Json(health_factors))
 }
 
@@ -560,6 +691,11 @@ where
     P: Provider + Clone + Send + Sync + 'static,
 {
     let health_factors = get_health_factors(state.cache).await;
+
+    info!(
+        "get_health_factors_state: health_factors = {:?}",
+        health_factors
+    );
 
     (StatusCode::OK, Json(health_factors))
 }
@@ -606,6 +742,8 @@ where
         prices,
         health_factors,
     };
+
+    info!("get_full_state: full_state = {:?}", full_state);
 
     (StatusCode::OK, Json(full_state))
 }

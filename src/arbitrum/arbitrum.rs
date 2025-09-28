@@ -1694,8 +1694,8 @@ impl Cache {
         let mut col_matrix_lock = self.collateral_matrix.write().await;
 
         debug!(
-            "sync_collateral: sync target = {:?}, col_lock = {:?}",
-            target, col_lock
+            "sync_collateral: sync target = {:?}, col lock len = {}",
+            target, col_lock.len()
         );
 
         let low_bound = col_matrix_lock.nrows().saturating_sub(1);
@@ -1715,8 +1715,8 @@ impl Cache {
         }
 
         debug!(
-            "sync_collateral: after row check col_matrix_lock = {:?}",
-            col_matrix_lock
+            "sync_collateral: after row check col matrix rows = {}",
+            col_matrix_lock.nrows()
         );
 
         let (row_num, col_num) = match target {
@@ -1770,9 +1770,9 @@ impl Cache {
         debug!("{}", {
             let received = Utc::now().timestamp_micros();
             format!(
-                "sync_collateral: after row insert col_matrix_lock = {:?}, rq_date = {}, \
+                "sync_collateral: after row insert col matrix rows = {}, rq_date = {}, \
                      received = {}, delta = {} μs",
-                col_matrix_lock,
+                col_matrix_lock.nrows(),
                 rq_date,
                 received,
                 received - rq_date
@@ -1791,8 +1791,8 @@ impl Cache {
         let mut bor_matrix_lock = self.borrowed_matrix.write().await;
 
         debug!(
-            "sync_borrowed: sync target = {:?}, bor_lock = {:?}",
-            target, bor_lock
+            "sync_borrowed: sync target = {:?}, bor lock len = {:?}",
+            target, bor_lock.len()
         );
 
         let low_bound = bor_matrix_lock.nrows().saturating_sub(1);
@@ -1813,8 +1813,8 @@ impl Cache {
         }
 
         debug!(
-            "sync_borrowed: after row check bor_matrix_lock = {:?}",
-            bor_matrix_lock
+            "sync_borrowed: after row check bor matrix rows = {}",
+            bor_matrix_lock.nrows()
         );
 
         let (row_num, col_num) = match target {
@@ -1863,9 +1863,9 @@ impl Cache {
         debug!("{}", {
             let received = Utc::now().timestamp_micros();
             format!(
-                "sync_borrowed: after row insert bor_matrix_lock = {:?}, rq_date = {}, \
+                "sync_borrowed: after row insert bor matrix rows = {}, rq_date = {}, \
                      received = {}, delta = {} μs",
-                bor_matrix_lock,
+                bor_matrix_lock.nrows(),
                 rq_date,
                 received,
                 received - rq_date
@@ -1969,10 +1969,10 @@ impl Cache {
             debug!("{}", {
                 let received = Utc::now().timestamp_micros();
                 format!(
-                    "calc_hf (user = {}): hf = {:?}, rq_date = {}, \
+                    "calc_hf (user = {}): hf = {}, rq_date = {}, \
                      received = {}, delta = {} μs",
                     user,
-                    hf_lock,
+                    hf_lock.0[row_num],
                     rq_date,
                     received,
                     received - rq_date
@@ -1988,7 +1988,7 @@ impl Cache {
             let scaled = collateral
                 * &li
                     .broadcast((collateral.nrows(), li.len()))
-                    .ok_or_else(|| eyre!("calc_hf: collateral = {:?} not found", collateral))?
+                    .ok_or_else(|| eyre!("calc_hf: scaling collateral failed"))?
                     .to_owned();
             scaled.dot(&ltp)
         };
@@ -1999,7 +1999,7 @@ impl Cache {
             let scaled = borrowed
                 * &vbi
                     .broadcast((borrowed.nrows(), vbi.len()))
-                    .ok_or_else(|| eyre!("calc_hf: borrowed = {:?} not found", borrowed))?
+                    .ok_or_else(|| eyre!("calc_hf: scaling borrowed failed"))?
                     .to_owned();
             scaled.dot(&price)
         };
@@ -2010,9 +2010,9 @@ impl Cache {
         debug!("{}", {
             let received = Utc::now().timestamp_micros();
             format!(
-                "calc_hf: hf = {:?}, rq_date = {}, \
+                "calc_hf: hf len = {}, rq_date = {}, \
                      received = {}, delta = {} μs",
-                hf_lock,
+                hf_lock.0.len(),
                 rq_date,
                 received,
                 received - rq_date
