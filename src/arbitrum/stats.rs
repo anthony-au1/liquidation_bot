@@ -2,12 +2,14 @@ use crate::arbitrum::arbitrum::{Cache, F64Converter, IL2Pool, Index};
 use alloy::providers::Provider;
 use alloy::transports::http::reqwest::StatusCode;
 use alloy_primitives::{Address, U256};
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;
-use axum::Json;
 use bitvec::order::Lsb0;
 use bitvec::prelude::BitVec;
+use itertools::Itertools;
 use ndarray::Axis;
+use rand::Rng;
 use serde::Serialize;
 use std::sync::Arc;
 use tracing::info;
@@ -769,4 +771,168 @@ where
         StatusCode::OK,
         Json((hf.to_string(), hf.as_f64_wad().to_string())),
     )
+}
+
+#[derive(Serialize, Debug)]
+pub struct TestProbe {
+    pub hf: Vec<f64>,
+    pub users: Vec<Address>,
+    pub tokens: Vec<Address>,
+    pub decimals: Vec<f64>,
+    pub price_decimals: Vec<f64>,
+    pub liquidation_threshold: Vec<f64>,
+    pub liquidity: Vec<String>,
+    pub liquidity_index: Vec<String>,
+    pub variable_borrow: Vec<String>,
+    pub variable_borrow_index: Vec<String>,
+    pub prices: Vec<f64>,
+    pub reserve_scaled: Vec<Vec<String>>,
+    pub collateral_scaled: Vec<Vec<String>>,
+    pub collateral: Vec<Vec<String>>,
+    pub borrowed_scaled: Vec<Vec<String>>,
+    pub borrowed: Vec<Vec<String>>,
+}
+
+pub async fn get_test_probe_state<P>(
+    Path(mut window_size): Path<usize>,
+    State(state): State<AppState<P>>,
+) -> (StatusCode, Json<TestProbe>)
+where
+    P: Provider + Clone + Send + Sync + 'static,
+{
+    let hf = {
+        let (hf, _) = &*state.cache.health_factors.read().await;
+        hf.to_vec()
+    };
+
+    let mut start = 0;
+    if hf.len() > window_size {
+        let range = 0..hf.len() - window_size;
+        let mut rng = rand::rng();
+        start = rng.random_range(range);
+    } else {
+        window_size = hf.len();
+    }
+
+    let users = state
+        .cache
+        .users
+        .iter()
+        .filter(|user| user.row_num >= start && user.row_num < start + window_size)
+        .sorted_by_key(|user| user.row_num)
+        .map(|user| user.key().clone())
+        .collect::<Vec<_>>();
+
+    let (tokens, _) = &*state.cache.tokens.read().await;
+    let tokens = tokens.to_vec();
+
+    let (decimals, _) = &*state.cache.decimals.read().await;
+    let decimals = decimals.to_vec();
+
+    let (price_decimals, _) = &*state.cache.price_decimals.read().await;
+    let price_decimals = price_decimals.to_vec();
+
+    let (lt, _) = &*state.cache.liquidation_threshold.read().await;
+    let liquidation_threshold = lt.to_vec();
+
+    let (li, _) = &*state.cache.liquidity.read().await;
+    let liquidity = li.iter().map(|li| li.index.to_string()).collect();
+
+    let (li, _) = &*state.cache.liquidity_index.read().await;
+    let liquidity_index = li.iter().map(|li| li.to_string()).collect();
+
+    let (vb, _) = &*state.cache.variable_borrow.read().await;
+    let variable_borrow = vb.iter().map(|vb| vb.index.to_string()).collect();
+
+    let (vb, _) = &*state.cache.variable_borrow_index.read().await;
+    let variable_borrow_index = vb.iter().map(|vb| li.to_string()).collect();
+
+    let (prices, _) = &*state.cache.prices.read().await;
+    let prices = prices.to_vec();
+
+    let mut reserve_scaled = vec![];
+    let reserve = &*state.cache.reserve.read().await;
+    for res_lock in reserve[start..window_size].iter() {
+        let (res, _, _) = &*res_lock.read().await;
+        reserve_scaled.push(res.iter().map(|r| r.to_string()).collect::<Vec<_>>());
+    }
+
+    let mut collateral_scaled = vec![];
+    let collateral = &*state.cache.collateral.read().await;
+    for col_lock in collateral[start..window_size].iter() {
+        let (col, _, _) = &*col_lock.read().await;
+        collateral_scaled.push(col.iter().map(|c| c.to_string()).collect::<Vec<_>>());
+    }
+
+    let mut collateral = vec![];
+    let col = &*state.cache.collateral_matrix.read().await;
+    for idx in start..start + window_size {
+        let row = col.row(idx);
+        collateral.push(row.iter().map(|c| c.to_string()).collect::<Vec<_>>());
+    }
+
+    let mut borrowed_scaled = vec![];
+    let borrowed = &*state.cache.borrowed.read().await;
+    for bor_lock in borrowed[start..window_size].iter() {
+        let (bor, _, _) = &*bor_lock.read().await;
+        borrowed_scaled.push(bor.iter().map(|b| b.to_string()).collect::<Vec<_>>());
+    }
+
+    let mut borrowed = vec![];
+    let bor = &*state.cache.borrowed_matrix.read().await;
+    for idx in start..start + window_size {
+        let row = bor.row(idx);
+        borrowed.push(row.iter().map(|b| b.to_string()).collect::<Vec<_>>());
+    }
+
+    // get randomly hf of the window size
+    // user names for hf
+    // user rows
+    // decimals
+    // token addresses
+    // price decimals
+    // reserve
+
+    // collateral
+    // collateral matrix
+
+    // borrowed
+    // borrowed matrix
+
+    // liquidity
+    // liquidity index
+    // variable borrow
+    // variable borrow index
+    // liquidation thresholds
+    // prices
+
+    // real hf
+    // real collateral
+    // real borrowed
+    // liquidity index
+    // variable borrow index
+    // prices
+
+    let test_probe = TestProbe {
+        hf: hf[start..window_size].to_vec(),
+        users,
+        tokens,
+        decimals,
+        price_decimals,
+        liquidation_threshold,
+        liquidity,
+        liquidity_index,
+        variable_borrow,
+        variable_borrow_index,
+        prices,
+        reserve_scaled,
+        collateral_scaled,
+        collateral,
+        borrowed_scaled,
+        borrowed,
+    };
+
+    info!("get_test_probe_state: test_probe = {:?}", test_probe);
+
+    (StatusCode::OK, Json(test_probe))
 }

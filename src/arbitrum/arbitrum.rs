@@ -1695,7 +1695,8 @@ impl Cache {
 
         debug!(
             "sync_collateral: sync target = {:?}, col lock len = {}",
-            target, col_lock.len()
+            target,
+            col_lock.len()
         );
 
         let low_bound = col_matrix_lock.nrows().saturating_sub(1);
@@ -1792,7 +1793,8 @@ impl Cache {
 
         debug!(
             "sync_borrowed: sync target = {:?}, bor lock len = {:?}",
-            target, bor_lock.len()
+            target,
+            bor_lock.len()
         );
 
         let low_bound = bor_matrix_lock.nrows().saturating_sub(1);

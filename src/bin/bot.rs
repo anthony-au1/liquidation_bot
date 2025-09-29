@@ -14,8 +14,9 @@ use liquidation_bot::arbitrum::stats::{
     get_collateral_state, get_decimals_state, get_full_state, get_health_factor_state,
     get_health_factors_state, get_liquidation_threshold_state, get_liquidity_index_state,
     get_liquidity_state, get_price_decimals_state, get_prices_state, get_reserve_all_state,
-    get_reserve_state, get_tokens_state, get_user_account_data_state, get_user_state,
-    get_users_state, get_variable_borrow_index_state, get_variable_borrow_state, AppState,
+    get_reserve_state, get_test_probe_state, get_tokens_state, get_user_account_data_state,
+    get_user_state, get_users_state, get_variable_borrow_index_state, get_variable_borrow_state,
+    AppState,
 };
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -63,13 +64,13 @@ async fn main() -> eyre::Result<()> {
 
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
 
-    let json_layer = fmt::layer()
-        .json()
-        .with_writer(non_blocking)
-        .with_filter(tracing_subscriber::filter::filter_fn(|meta| {
-            !meta.target()
+    let json_layer = fmt::layer().json().with_writer(non_blocking).with_filter(
+        tracing_subscriber::filter::filter_fn(|meta| {
+            !meta
+                .target()
                 .starts_with("liquidation_bot::arbitrum::stats")
-        }));
+        }),
+    );
 
     let stats_file_appender = RollingFileAppender::builder()
         .rotation(Rotation::DAILY)
@@ -150,6 +151,7 @@ async fn main() -> eyre::Result<()> {
                 .route("/health_factors/{row_num}", get(get_health_factor_state))
                 .route("/health_factors", get(get_health_factors_state))
                 .route("/health_factor/{user}", get(get_user_account_data_state))
+                .route("/test_probe/{window_size}", get(get_test_probe_state))
                 .with_state(state);
             let listener = TcpListener::bind("0.0.0.0:3000").await?;
             let data_provider = Arc::new(AaveDataProvider::new(&provider)?);
