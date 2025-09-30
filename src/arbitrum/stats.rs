@@ -1,4 +1,7 @@
-use crate::arbitrum::arbitrum::{Cache, F64Converter, IL2Pool, Index};
+use crate::arbitrum::arbitrum::IAaveProtocolDataProvider::IAaveProtocolDataProviderInstance;
+use crate::arbitrum::arbitrum::{
+    AaveDataProvider, Cache, DataProvider, F64Converter, IL2Pool, Index,
+};
 use alloy::providers::Provider;
 use alloy::transports::http::reqwest::StatusCode;
 use alloy_primitives::{Address, U256};
@@ -7,11 +10,13 @@ use axum::extract::{Path, State};
 use axum::response::IntoResponse;
 use bitvec::order::Lsb0;
 use bitvec::prelude::BitVec;
+use futures::future::try_join_all;
 use itertools::Itertools;
 use ndarray::Axis;
 use rand::Rng;
 use serde::Serialize;
 use std::sync::Arc;
+use tokio::try_join;
 use tracing::info;
 
 #[derive(Clone)]
@@ -750,28 +755,32 @@ where
     (StatusCode::OK, Json(full_state))
 }
 
-const L2_POOL_ADDRESS: &str = "0x794a61358D6845594F94dc1DB02A252b5b4814aD";
-
 pub async fn get_user_account_data_state<P>(
     Path(user): Path<Address>,
     State(state): State<AppState<P>>,
-) -> (StatusCode, Json<(String, String)>)
+) -> Result<(StatusCode, Json<(String, String)>), (StatusCode, String)>
 where
     P: Provider + Clone + Send + Sync + 'static,
 {
-    let aave_l2_pool = IL2Pool::new(L2_POOL_ADDRESS.parse().unwrap(), state.provider.clone());
-    let hf = aave_l2_pool
-        .getUserAccountData(user.clone())
-        .call()
+    let data_provider = Arc::new(
+        AaveDataProvider::new(&state.provider)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:?}")))?,
+    );
+    let uad = data_provider
+        .get_user_account_data(&user)
         .await
-        .unwrap()
-        .healthFactor;
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:?}")))?;
 
-    (
+    let hf = uad.health_factor;
+
+    Ok((
         StatusCode::OK,
         Json((hf.to_string(), hf.as_f64_wad().to_string())),
-    )
+    ))
 }
+
+const L2_POOL_ADDRESS: &str = "0x794a61358D6845594F94dc1DB02A252b5b4814aD";
+const AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS: &str = "0x14496b405D62c24F91f04Cda1c69Dc526D56fDE5";
 
 #[derive(Serialize, Debug)]
 pub struct TestProbe {
@@ -782,15 +791,17 @@ pub struct TestProbe {
     pub price_decimals: Vec<f64>,
     pub liquidation_threshold: Vec<f64>,
     pub liquidity: Vec<String>,
-    pub liquidity_index: Vec<String>,
+    pub liquidity_index: Vec<f64>,
     pub variable_borrow: Vec<String>,
-    pub variable_borrow_index: Vec<String>,
+    pub variable_borrow_index: Vec<f64>,
     pub prices: Vec<f64>,
     pub reserve_scaled: Vec<Vec<String>>,
     pub collateral_scaled: Vec<Vec<String>>,
-    pub collateral: Vec<Vec<String>>,
+    pub collateral: Vec<Vec<f64>>,
     pub borrowed_scaled: Vec<Vec<String>>,
-    pub borrowed: Vec<Vec<String>>,
+    pub borrowed: Vec<Vec<f64>>,
+
+    pub hf_aave: Vec<f64>,
 }
 
 pub async fn get_test_probe_state<P>(
@@ -839,13 +850,13 @@ where
     let liquidity = li.iter().map(|li| li.index.to_string()).collect();
 
     let (li, _) = &*state.cache.liquidity_index.read().await;
-    let liquidity_index = li.iter().map(|li| li.to_string()).collect();
+    let liquidity_index = li.to_vec();
 
     let (vb, _) = &*state.cache.variable_borrow.read().await;
     let variable_borrow = vb.iter().map(|vb| vb.index.to_string()).collect();
 
     let (vb, _) = &*state.cache.variable_borrow_index.read().await;
-    let variable_borrow_index = vb.iter().map(|vb| li.to_string()).collect();
+    let variable_borrow_index = vb.to_vec();
 
     let (prices, _) = &*state.cache.prices.read().await;
     let prices = prices.to_vec();
@@ -868,7 +879,7 @@ where
     let col = &*state.cache.collateral_matrix.read().await;
     for idx in start..start + window_size {
         let row = col.row(idx);
-        collateral.push(row.iter().map(|c| c.to_string()).collect::<Vec<_>>());
+        collateral.push(row.to_vec());
     }
 
     let mut borrowed_scaled = vec![];
@@ -882,7 +893,7 @@ where
     let bor = &*state.cache.borrowed_matrix.read().await;
     for idx in start..start + window_size {
         let row = bor.row(idx);
-        borrowed.push(row.iter().map(|b| b.to_string()).collect::<Vec<_>>());
+        borrowed.push(row.to_vec());
     }
 
     // get randomly hf of the window size
@@ -907,11 +918,52 @@ where
     // prices
 
     // real hf
+    // real reserve
     // real collateral
     // real borrowed
     // liquidity index
     // variable borrow index
     // prices
+
+    let aave_l2_pool = IL2Pool::new(L2_POOL_ADDRESS.parse().unwrap(), state.provider.clone());
+
+    let tasks = users.iter().enumerate().map(|(idx, user)| {
+        let pool = aave_l2_pool.clone();
+        let user = user.clone();
+        async move { Ok::<_, eyre::Error>((idx, pool.getUserAccountData(user).call().await?)) }
+    });
+    let task_results = try_join_all(tasks).await.unwrap();
+    let mut hf_aave = vec![0.0; task_results.len()];
+    for (idx, uad) in task_results {
+        hf_aave[idx] = uad.healthFactor.as_f64_wad();
+    }
+
+    let aave_protocol_data_provider = IAaveProtocolDataProviderInstance::new(
+        AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS.parse().unwrap(),
+        state.provider.clone(),
+    );
+
+    let tasks = users.iter().enumerate().flat_map(|(row, user)| {
+        let user = user.clone();
+        let pool = aave_protocol_data_provider.clone();
+
+        tokens.iter().enumerate().map(move |(col, token)| {
+            let pool = pool.clone();
+            let token = token.clone();
+            let user = user.clone();
+
+            async move {
+                let reserve_call = pool.getReserveData(token.clone());
+                let user_reserve_call = pool.getUserReserveData(token.clone(), user);
+
+                let (reserve_data, user_reserve_data) =
+                    try_join!(reserve_call.call(), user_reserve_call.call())?;
+
+                Ok::<_, eyre::Error>((row, col, reserve_data, user_reserve_data))
+            }
+        })
+    });
+    let task_results: Vec<_> = futures::future::try_join_all(tasks).await.unwrap();
 
     let test_probe = TestProbe {
         hf: hf[start..window_size].to_vec(),
@@ -930,6 +982,8 @@ where
         collateral,
         borrowed_scaled,
         borrowed,
+
+        hf_aave,
     };
 
     info!("get_test_probe_state: test_probe = {:?}", test_probe);
