@@ -5,9 +5,9 @@ use crate::arbitrum::arbitrum::{
 use alloy::providers::Provider;
 use alloy::transports::http::reqwest::StatusCode;
 use alloy_primitives::{Address, U256};
-use axum::Json;
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;
+use axum::Json;
 use bitvec::order::Lsb0;
 use bitvec::prelude::BitVec;
 use futures::future::try_join_all;
@@ -773,14 +773,16 @@ where
 
     let hf = uad.health_factor;
 
+    info!(
+        "get_user_account_data_state: user = {}, hf = {:?}",
+        user, hf
+    );
+
     Ok((
         StatusCode::OK,
         Json((hf.to_string(), hf.as_f64_wad().to_string())),
     ))
 }
-
-const L2_POOL_ADDRESS: &str = "0x794a61358D6845594F94dc1DB02A252b5b4814aD";
-const AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS: &str = "0x14496b405D62c24F91f04Cda1c69Dc526D56fDE5";
 
 #[derive(Serialize, Debug)]
 pub struct TestProbe {
@@ -807,10 +809,15 @@ pub struct TestProbe {
 pub async fn get_test_probe_state<P>(
     Path(mut window_size): Path<usize>,
     State(state): State<AppState<P>>,
-) -> (StatusCode, Json<TestProbe>)
+) -> Result<(StatusCode, Json<TestProbe>), (StatusCode, String)>
 where
     P: Provider + Clone + Send + Sync + 'static,
 {
+    let data_provider = Arc::new(
+        AaveDataProvider::new(&state.provider)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:?}")))?,
+    );
+
     let hf = {
         let (hf, _) = &*state.cache.health_factors.read().await;
         hf.to_vec()
@@ -925,39 +932,34 @@ where
     // variable borrow index
     // prices
 
-    let aave_l2_pool = IL2Pool::new(L2_POOL_ADDRESS.parse().unwrap(), state.provider.clone());
-
     let tasks = users.iter().enumerate().map(|(idx, user)| {
-        let pool = aave_l2_pool.clone();
+        let provider = data_provider.clone();
         let user = user.clone();
-        async move { Ok::<_, eyre::Error>((idx, pool.getUserAccountData(user).call().await?)) }
+        async move { Ok::<_, eyre::Error>((idx, provider.get_user_account_data(&user).await?)) }
     });
-    let task_results = try_join_all(tasks).await.unwrap();
+    let task_results = try_join_all(tasks)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:?}")))?;
+
     let mut hf_aave = vec![0.0; task_results.len()];
     for (idx, uad) in task_results {
-        hf_aave[idx] = uad.healthFactor.as_f64_wad();
+        hf_aave[idx] = uad.health_factor.as_f64_wad();
     }
-
-    let aave_protocol_data_provider = IAaveProtocolDataProviderInstance::new(
-        AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS.parse().unwrap(),
-        state.provider.clone(),
-    );
 
     let tasks = users.iter().enumerate().flat_map(|(row, user)| {
         let user = user.clone();
-        let pool = aave_protocol_data_provider.clone();
+        let provider = data_provider.clone();
 
         tokens.iter().enumerate().map(move |(col, token)| {
-            let pool = pool.clone();
+            let provider = provider.clone();
             let token = token.clone();
             let user = user.clone();
 
             async move {
-                let reserve_call = pool.getReserveData(token.clone());
-                let user_reserve_call = pool.getUserReserveData(token.clone(), user);
-
-                let (reserve_data, user_reserve_data) =
-                    try_join!(reserve_call.call(), user_reserve_call.call())?;
+                let (reserve_data, user_reserve_data) = try_join!(
+                    provider.get_reserve_data(&token),
+                    provider.get_user_reserve_data(&token, &user)
+                )?;
 
                 Ok::<_, eyre::Error>((row, col, reserve_data, user_reserve_data))
             }
@@ -988,5 +990,5 @@ where
 
     info!("get_test_probe_state: test_probe = {:?}", test_probe);
 
-    (StatusCode::OK, Json(test_probe))
+    Ok((StatusCode::OK, Json(test_probe)))
 }
