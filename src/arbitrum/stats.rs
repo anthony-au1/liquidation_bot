@@ -1,6 +1,6 @@
-use crate::arbitrum::arbitrum::IAaveProtocolDataProvider::IAaveProtocolDataProviderInstance;
 use crate::arbitrum::arbitrum::{
-    AaveDataProvider, Cache, DataProvider, F64Converter, IL2Pool, Index,
+    AaveDataProvider, Cache, DataProvider, F64Converter, Index, RayOperations, ReserveData, Scaler,
+    UserReserveData,
 };
 use alloy::providers::Provider;
 use alloy::transports::http::reqwest::StatusCode;
@@ -792,18 +792,38 @@ pub struct TestProbe {
     pub decimals: Vec<f64>,
     pub price_decimals: Vec<f64>,
     pub liquidation_threshold: Vec<f64>,
-    pub liquidity: Vec<String>,
+    pub liquidity: Vec<U256>,
     pub liquidity_index: Vec<f64>,
-    pub variable_borrow: Vec<String>,
+    pub variable_borrow: Vec<U256>,
     pub variable_borrow_index: Vec<f64>,
     pub prices: Vec<f64>,
-    pub reserve_scaled: Vec<Vec<String>>,
-    pub collateral_scaled: Vec<Vec<String>>,
+    pub reserve_scaled: Vec<Vec<U256>>,
+    pub collateral_scaled: Vec<Vec<U256>>,
     pub collateral: Vec<Vec<f64>>,
-    pub borrowed_scaled: Vec<Vec<String>>,
+    pub borrowed_scaled: Vec<Vec<U256>>,
     pub borrowed: Vec<Vec<f64>>,
 
     pub hf_aave: Vec<f64>,
+    pub liquidity_aave: Vec<U256>,
+    pub liquidity_index_aave: Vec<f64>,
+    pub variable_borrow_aave: Vec<U256>,
+    pub variable_borrow_index_aave: Vec<f64>,
+    pub reserve_scaled_aave: Vec<Vec<U256>>,
+    pub collateral_scaled_aave: Vec<Vec<U256>>,
+    pub collateral_aave: Vec<Vec<f64>>,
+    pub borrowed_scaled_aave: Vec<Vec<U256>>,
+    pub borrowed_aave: Vec<Vec<f64>>,
+
+    pub hf_diff: Vec<f64>,
+    pub liquidity_diff: Vec<U256>,
+    pub liquidity_index_diff: Vec<f64>,
+    pub variable_borrow_diff: Vec<U256>,
+    pub variable_borrow_index_diff: Vec<f64>,
+    pub reserve_scaled_diff: Vec<Vec<U256>>,
+    pub collateral_scaled_diff: Vec<Vec<U256>>,
+    pub collateral_diff: Vec<Vec<f64>>,
+    pub borrowed_scaled_diff: Vec<Vec<U256>>,
+    pub borrowed_diff: Vec<Vec<f64>>,
 }
 
 pub async fn get_test_probe_state<P>(
@@ -854,13 +874,13 @@ where
     let liquidation_threshold = lt.to_vec();
 
     let (li, _) = &*state.cache.liquidity.read().await;
-    let liquidity = li.iter().map(|li| li.index.to_string()).collect();
+    let liquidity = li.iter().map(|li| li.index).collect::<Vec<_>>();
 
     let (li, _) = &*state.cache.liquidity_index.read().await;
     let liquidity_index = li.to_vec();
 
     let (vb, _) = &*state.cache.variable_borrow.read().await;
-    let variable_borrow = vb.iter().map(|vb| vb.index.to_string()).collect();
+    let variable_borrow = vb.iter().map(|vb| vb.index).collect::<Vec<_>>();
 
     let (vb, _) = &*state.cache.variable_borrow_index.read().await;
     let variable_borrow_index = vb.to_vec();
@@ -872,14 +892,14 @@ where
     let reserve = &*state.cache.reserve.read().await;
     for res_lock in reserve[start..window_size].iter() {
         let (res, _, _) = &*res_lock.read().await;
-        reserve_scaled.push(res.iter().map(|r| r.to_string()).collect::<Vec<_>>());
+        reserve_scaled.push(res.to_vec());
     }
 
     let mut collateral_scaled = vec![];
     let collateral = &*state.cache.collateral.read().await;
     for col_lock in collateral[start..window_size].iter() {
         let (col, _, _) = &*col_lock.read().await;
-        collateral_scaled.push(col.iter().map(|c| c.to_string()).collect::<Vec<_>>());
+        collateral_scaled.push(col.to_vec());
     }
 
     let mut collateral = vec![];
@@ -893,7 +913,7 @@ where
     let borrowed = &*state.cache.borrowed.read().await;
     for bor_lock in borrowed[start..window_size].iter() {
         let (bor, _, _) = &*bor_lock.read().await;
-        borrowed_scaled.push(bor.iter().map(|b| b.to_string()).collect::<Vec<_>>());
+        borrowed_scaled.push(bor.to_vec());
     }
 
     let mut borrowed = vec![];
@@ -903,50 +923,18 @@ where
         borrowed.push(row.to_vec());
     }
 
-    // get randomly hf of the window size
-    // user names for hf
-    // user rows
-    // decimals
-    // token addresses
-    // price decimals
-    // reserve
-
-    // collateral
-    // collateral matrix
-
-    // borrowed
-    // borrowed matrix
-
-    // liquidity
-    // liquidity index
-    // variable borrow
-    // variable borrow index
-    // liquidation thresholds
-    // prices
-
-    // real hf
-    // real reserve
-    // real collateral
-    // real borrowed
-    // liquidity index
-    // variable borrow index
-    // prices
-
-    let tasks = users.iter().enumerate().map(|(idx, user)| {
+    let uad_tasks = users.iter().enumerate().map(|(idx, user)| {
         let provider = data_provider.clone();
         let user = user.clone();
         async move { Ok::<_, eyre::Error>((idx, provider.get_user_account_data(&user).await?)) }
     });
-    let task_results = try_join_all(tasks)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:?}")))?;
 
-    let mut hf_aave = vec![0.0; task_results.len()];
-    for (idx, uad) in task_results {
-        hf_aave[idx] = uad.health_factor.as_f64_wad();
-    }
+    let rd_tasks = tokens.iter().enumerate().map(|(col, token)| {
+        let provider = data_provider.clone();
+        async move { Ok::<_, eyre::Error>((col, provider.get_reserve_data(&token).await?)) }
+    });
 
-    let tasks = users.iter().enumerate().flat_map(|(row, user)| {
+    let urd_tasks = users.iter().enumerate().flat_map(|(row, user)| {
         let user = user.clone();
         let provider = data_provider.clone();
 
@@ -956,16 +944,188 @@ where
             let user = user.clone();
 
             async move {
-                let (reserve_data, user_reserve_data) = try_join!(
-                    provider.get_reserve_data(&token),
-                    provider.get_user_reserve_data(&token, &user)
-                )?;
-
-                Ok::<_, eyre::Error>((row, col, reserve_data, user_reserve_data))
+                Ok::<_, eyre::Error>((
+                    row,
+                    col,
+                    provider.get_user_reserve_data(&token, &user).await?,
+                ))
             }
         })
     });
-    let task_results: Vec<_> = futures::future::try_join_all(tasks).await.unwrap();
+
+    let (uad_results, rd_results, urd_results) = try_join!(
+        try_join_all(uad_tasks),
+        try_join_all(rd_tasks),
+        try_join_all(urd_tasks),
+    )
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:?}")))?;
+
+    let mut hf_aave = vec![0.0; uad_results.len()];
+    for (idx, uad) in uad_results {
+        hf_aave[idx] = uad.health_factor.as_f64_wad();
+    }
+
+    let mut liquidity_aave = vec![U256::default(); tokens.len()];
+    let mut liquidity_index_aave = vec![0.0; tokens.len()];
+    let mut variable_borrow_aave = vec![U256::default(); tokens.len()];
+    let mut variable_borrow_index_aave = vec![0.0; tokens.len()];
+
+    for (
+        col,
+        ReserveData {
+            liquidity_index,
+            variable_borrow_index,
+            ..
+        },
+    ) in rd_results
+    {
+        liquidity_aave[col] = liquidity_index;
+        liquidity_index_aave[col] = liquidity_index.as_f64_ray();
+
+        variable_borrow_aave[col] = variable_borrow_index;
+        variable_borrow_index_aave[col] = variable_borrow_index.as_f64_ray();
+    }
+
+    let mut reserve_scaled_aave = vec![vec![U256::default(); tokens.len()]; window_size];
+    let mut reserve_aave = vec![vec![0.0; tokens.len()]; window_size];
+
+    let mut collateral_scaled_aave = vec![vec![U256::default(); tokens.len()]; window_size];
+    let mut collateral_aave = vec![vec![0.0; tokens.len()]; window_size];
+
+    let mut borrowed_scaled_aave = vec![vec![U256::default(); tokens.len()]; window_size];
+    let mut borrowed_aave = vec![vec![0.0; tokens.len()]; window_size];
+
+    for (
+        row,
+        col,
+        UserReserveData {
+            current_atoken_balance,
+            current_variable_debt,
+            usage_as_collateral_enabled,
+        },
+    ) in urd_results
+    {
+        if usage_as_collateral_enabled {
+            collateral_scaled_aave[row][col] = current_atoken_balance
+                .to_ray(decimals[col])
+                .to_scaled(liquidity_aave[col]);
+            collateral_aave[row][col] = current_atoken_balance.as_f64(decimals[col]);
+        } else {
+            reserve_scaled_aave[row][col] = current_atoken_balance
+                .to_ray(decimals[col])
+                .to_scaled(liquidity_aave[col]);
+            reserve_aave[row][col] = current_atoken_balance.as_f64(decimals[col]);
+        }
+        borrowed_scaled_aave[row][col] = current_variable_debt
+            .to_ray(decimals[col])
+            .to_scaled(variable_borrow_aave[col]);
+        borrowed_aave[row][col] = current_variable_debt.as_f64(decimals[col]);
+    }
+
+    let hf_diff = {
+        hf_aave
+            .iter()
+            .zip(hf.iter())
+            .map(|(hf_aave, hf)| (hf_aave - hf).abs())
+            .collect::<Vec<_>>()
+    };
+
+    let liquidity_diff = {
+        liquidity_aave
+            .iter()
+            .zip(liquidity.iter())
+            .map(|(l_aave, l)| l_aave.abs_diff(l.clone()))
+            .collect::<Vec<_>>()
+    };
+
+    let liquidity_index_diff = {
+        liquidity_index_aave
+            .iter()
+            .zip(liquidity_index.iter())
+            .map(|(l_aave, l)| (l_aave - l).abs())
+            .collect::<Vec<_>>()
+    };
+
+    let variable_borrow_diff = {
+        variable_borrow_aave
+            .iter()
+            .zip(variable_borrow.iter())
+            .map(|(vb_aave, vb)| vb_aave.abs_diff(vb.clone()))
+            .collect::<Vec<_>>()
+    };
+
+    let variable_borrow_index_diff = {
+        variable_borrow_index_aave
+            .iter()
+            .zip(variable_borrow_index.iter())
+            .map(|(vb_aave, vb)| (vb_aave - vb).abs())
+            .collect::<Vec<_>>()
+    };
+
+    let reserve_scaled_diff = {
+        reserve_scaled_aave
+            .iter()
+            .zip(reserve_scaled.iter())
+            .map(|(r, r2)| {
+                r.iter()
+                    .zip(r2.iter())
+                    .map(|(c, c2)| c.abs_diff(c2.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let collateral_scaled_diff = {
+        collateral_scaled_aave
+            .iter()
+            .zip(collateral_scaled.iter())
+            .map(|(r, r2)| {
+                r.iter()
+                    .zip(r2.iter())
+                    .map(|(c, c2)| c.abs_diff(c2.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let collateral_diff = {
+        collateral_aave
+            .iter()
+            .zip(collateral.iter())
+            .map(|(r, r2)| {
+                r.iter()
+                    .zip(r2.iter())
+                    .map(|(c, c2)| (c - c2).abs())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let borrowed_scaled_diff = {
+        borrowed_scaled_aave
+            .iter()
+            .zip(borrowed_scaled.iter())
+            .map(|(r, r2)| {
+                r.iter()
+                    .zip(r2.iter())
+                    .map(|(c, c2)| c.abs_diff(c2.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let borrowed_diff = {
+        borrowed_aave
+            .iter()
+            .zip(borrowed.iter())
+            .map(|(r, r2)| {
+                r.iter()
+                    .zip(r2.iter())
+                    .map(|(c, c2)| (c - c2).abs())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
 
     let test_probe = TestProbe {
         hf: hf[start..window_size].to_vec(),
@@ -986,6 +1146,26 @@ where
         borrowed,
 
         hf_aave,
+        liquidity_aave,
+        liquidity_index_aave,
+        variable_borrow_aave,
+        variable_borrow_index_aave,
+        reserve_scaled_aave,
+        collateral_scaled_aave,
+        collateral_aave,
+        borrowed_scaled_aave,
+        borrowed_aave,
+
+        hf_diff,
+        liquidity_diff,
+        liquidity_index_diff,
+        variable_borrow_diff,
+        variable_borrow_index_diff,
+        reserve_scaled_diff,
+        collateral_scaled_diff,
+        collateral_diff,
+        borrowed_scaled_diff,
+        borrowed_diff,
     };
 
     info!("get_test_probe_state: test_probe = {:?}", test_probe);
