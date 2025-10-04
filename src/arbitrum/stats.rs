@@ -5,9 +5,9 @@ use crate::arbitrum::arbitrum::{
 use alloy::providers::Provider;
 use alloy::transports::http::reqwest::StatusCode;
 use alloy_primitives::{Address, U256};
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;
-use axum::Json;
 use bitvec::order::Lsb0;
 use bitvec::prelude::BitVec;
 use futures::future::try_join_all;
@@ -861,67 +861,108 @@ where
         .map(|user| user.key().clone())
         .collect::<Vec<_>>();
 
-    let (tokens, _) = &*state.cache.tokens.read().await;
-    let tokens = tokens.to_vec();
+    let tokens = {
+        let (tokens, _) = &*state.cache.tokens.read().await;
+        tokens.to_vec()
+    };
 
-    let (decimals, _) = &*state.cache.decimals.read().await;
-    let decimals = decimals.to_vec();
+    let decimals = {
+        let (decimals, _) = &*state.cache.decimals.read().await;
+        decimals.to_vec()
+    };
 
-    let (price_decimals, _) = &*state.cache.price_decimals.read().await;
-    let price_decimals = price_decimals.to_vec();
+    let price_decimals = {
+        let (price_decimals, _) = &*state.cache.price_decimals.read().await;
+        price_decimals.to_vec()
+    };
 
-    let (lt, _) = &*state.cache.liquidation_threshold.read().await;
-    let liquidation_threshold = lt.to_vec();
+    let liquidation_threshold = {
+        let (lt, _) = &*state.cache.liquidation_threshold.read().await;
+        lt.to_vec()
+    };
 
-    let (li, _) = &*state.cache.liquidity.read().await;
-    let liquidity = li.iter().map(|li| li.index).collect::<Vec<_>>();
+    let liquidity = {
+        let (li, _) = &*state.cache.liquidity.read().await;
+        li.iter().map(|li| li.index).collect::<Vec<_>>()
+    };
 
-    let (li, _) = &*state.cache.liquidity_index.read().await;
-    let liquidity_index = li.to_vec();
+    let liquidity_index = {
+        let (li, _) = &*state.cache.liquidity_index.read().await;
+        li.to_vec()
+    };
 
-    let (vb, _) = &*state.cache.variable_borrow.read().await;
-    let variable_borrow = vb.iter().map(|vb| vb.index).collect::<Vec<_>>();
+    let variable_borrow = {
+        let (vb, _) = &*state.cache.variable_borrow.read().await;
+        vb.iter().map(|vb| vb.index).collect::<Vec<_>>()
+    };
 
-    let (vb, _) = &*state.cache.variable_borrow_index.read().await;
-    let variable_borrow_index = vb.to_vec();
+    let variable_borrow_index = {
+        let (vb, _) = &*state.cache.variable_borrow_index.read().await;
+        vb.to_vec()
+    };
 
-    let (prices, _) = &*state.cache.prices.read().await;
-    let prices = prices.to_vec();
+    let prices = {
+        let (prices, _) = &*state.cache.prices.read().await;
+        prices.to_vec()
+    };
 
-    let mut reserve_scaled = vec![];
-    let reserve = &*state.cache.reserve.read().await;
-    for res_lock in reserve[start..window_size].iter() {
-        let (res, _, _) = &*res_lock.read().await;
-        reserve_scaled.push(res.to_vec());
-    }
+    let reserve_scaled = {
+        let mut reserve_scaled = vec![];
+        let reserve = &*state.cache.reserve.read().await;
+        for res_lock in reserve[start..window_size].iter() {
+            let (res, _, _) = &*res_lock.read().await;
+            reserve_scaled.push(res.to_vec());
+        }
+        reserve_scaled
+    };
 
-    let mut collateral_scaled = vec![];
-    let collateral = &*state.cache.collateral.read().await;
-    for col_lock in collateral[start..window_size].iter() {
-        let (col, _, _) = &*col_lock.read().await;
-        collateral_scaled.push(col.to_vec());
-    }
+    let collateral_scaled = {
+        let mut collateral_scaled = vec![];
+        let collateral = &*state.cache.collateral.read().await;
+        for col_lock in collateral[start..window_size].iter() {
+            let (col, _, _) = &*col_lock.read().await;
+            collateral_scaled.push(col.to_vec());
+        }
+        collateral_scaled
+    };
 
-    let mut collateral = vec![];
-    let col = &*state.cache.collateral_matrix.read().await;
-    for idx in start..start + window_size {
-        let row = col.row(idx);
-        collateral.push(row.to_vec());
-    }
+    let collateral = {
+        let mut collateral = vec![];
+        let col = &*state.cache.collateral_matrix.read().await;
+        for idx in start..start + window_size {
+            let row = col.row(idx);
+            collateral.push(
+                row.iter()
+                    .map(|x| x * liquidity_index[idx])
+                    .collect::<Vec<_>>(),
+            );
+        }
+        collateral
+    };
 
-    let mut borrowed_scaled = vec![];
-    let borrowed = &*state.cache.borrowed.read().await;
-    for bor_lock in borrowed[start..window_size].iter() {
-        let (bor, _, _) = &*bor_lock.read().await;
-        borrowed_scaled.push(bor.to_vec());
-    }
+    let borrowed_scaled = {
+        let mut borrowed_scaled = vec![];
+        let borrowed = &*state.cache.borrowed.read().await;
+        for bor_lock in borrowed[start..window_size].iter() {
+            let (bor, _, _) = &*bor_lock.read().await;
+            borrowed_scaled.push(bor.to_vec());
+        }
+        borrowed_scaled
+    };
 
-    let mut borrowed = vec![];
-    let bor = &*state.cache.borrowed_matrix.read().await;
-    for idx in start..start + window_size {
-        let row = bor.row(idx);
-        borrowed.push(row.to_vec());
-    }
+    let mut borrowed = {
+        let mut borrowed = vec![];
+        let bor = &*state.cache.borrowed_matrix.read().await;
+        for idx in start..start + window_size {
+            let row = bor.row(idx);
+            borrowed.push(
+                row.iter()
+                    .map(|x| x * variable_borrow_index[idx])
+                    .collect::<Vec<_>>(),
+            );
+        }
+        borrowed
+    };
 
     let uad_tasks = users.iter().enumerate().map(|(idx, user)| {
         let provider = data_provider.clone();

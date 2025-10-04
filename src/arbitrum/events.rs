@@ -3,15 +3,15 @@ use crate::arbitrum::arbitrum::IL2Pool::{
     ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
 use crate::arbitrum::arbitrum::{
-    Cache, DataProvider, F64Converter, HFRequest, RAY, RayOperations, RqDate, Scaler, SyncRequest,
-    SyncTarget, TimeStamp, TokenDetails, Tokens,
+    Cache, DataProvider, F64Converter, HFRequest, RayOperations, RqDate, Scaler, SyncRequest, SyncTarget,
+    TimeStamp, TokenDetails, Tokens, RAY,
 };
 use alloy_primitives::{Address, U256};
 use chrono::Utc;
 use eyre::eyre;
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
-use tracing::debug;
+use tracing::{debug, error};
 
 pub(in crate::arbitrum) async fn create_user<P>(
     rq_date: TimeStamp,
@@ -1441,7 +1441,12 @@ where
         ) = (now, now, now, now);
     }
 
-    hf_tx.send(HFRequest::Full(rq_date)).await?;
+    if let Err(e) = hf_tx.send(HFRequest::Full(rq_date)).await {
+        error!(
+            "reserve_data_updated: failed to send to hf channel: {:?}",
+            e
+        );
+    }
 
     Ok(())
 }

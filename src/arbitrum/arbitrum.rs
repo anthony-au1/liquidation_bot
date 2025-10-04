@@ -826,11 +826,15 @@ where
                 .listen_events(move |data| {
                     let tx = tx.clone();
                     async move {
-                        tx.send(AaveEvents::IL2PoolEvents(
-                            data,
-                            Utc::now().timestamp_micros(),
-                        ))
-                        .await?;
+                        if let Err(e) = tx
+                            .send(AaveEvents::IL2PoolEvents(
+                                data,
+                                Utc::now().timestamp_micros(),
+                            ))
+                            .await
+                        {
+                            error!("listen_events: failed to send to event channel: {:?}", e);
+                        }
 
                         Ok(())
                     }
@@ -883,7 +887,12 @@ where
                             if *prices_current != prices {
                                 *prices_current = prices;
 
-                                hf_tx.send(HFRequest::Full(now)).await?;
+                                if let Err(e) = hf_tx.send(HFRequest::Full(now)).await {
+                                        error!(
+                                        "listen_prices_update: failed to send to hf calculation channel: {:?}",
+                                        e
+                                    );
+                                }
                             }
                         }
 
@@ -971,7 +980,13 @@ where
     if lt_modified {
         let rq_date = Utc::now().timestamp_micros();
         *cache.liquidation_threshold.write().await = (d, rq_date);
-        hf_tx.send(HFRequest::Full(rq_date)).await?;
+
+        if let Err(e) = hf_tx.send(HFRequest::Full(rq_date)).await {
+            error!(
+                "liquidation_threshold_update: failed to send to hf calculation channel: {:?}",
+                e
+            );
+        }
     }
 
     Ok(())
@@ -1000,13 +1015,11 @@ pub(crate) async fn listen_sync(
         let (tx, mut rc) = channel::<SyncRequest>(bound);
         let cache = cache.clone();
         task::spawn(async move {
-            loop {
-                debug!("listen_sync (worker = {}): created thread", worker);
+            debug!("listen_sync (worker = {}): created thread", worker);
 
-                match listen_sync_handler(&cache, &mut rc).await {
-                    Ok(_) => debug!("listen_sync (worker = {}): Ok", worker),
-                    Err(e) => debug!("listen_sync (worker = {}): error = {:?}", worker, e),
-                }
+            match listen_sync_handler(&cache, &mut rc).await {
+                Ok(_) => debug!("listen_sync (worker = {}): Ok", worker),
+                Err(e) => debug!("listen_sync (worker = {}): error = {:?}", worker, e),
             }
         });
         senders.push(tx);
@@ -1050,15 +1063,13 @@ pub(crate) async fn listen_hf_calc(
         let (tx, mut rc) = channel::<HFRequest>(bound);
         let (cache, lq_lookup_tx) = (cache.clone(), lq_lookup_tx.clone());
         task::spawn(async move {
-            loop {
-                debug!("listen_hf_calc (worker = {}): created thread", worker);
+            debug!("listen_hf_calc (worker = {}): created thread", worker);
 
-                match listen_hf_calc_handler(&cache, &mut rc, &lq_lookup_tx).await {
-                    Ok(_) => {
-                        debug!("listen_hf_calc (worker = {}): Ok", worker);
-                    }
-                    Err(e) => error!("listen_hf_calc (worker = {}): error = {:?}", worker, e),
+            match listen_hf_calc_handler(&cache, &mut rc, &lq_lookup_tx).await {
+                Ok(_) => {
+                    debug!("listen_hf_calc (worker = {}): Ok", worker);
                 }
+                Err(e) => error!("listen_hf_calc (worker = {}): error = {:?}", worker, e),
             }
         });
         senders.push(tx);
@@ -1078,7 +1089,12 @@ async fn listen_hf_calc_handler(
             HFRequest::Full(rq_date) => cache.calc_hf(None, rq_date).await?,
         }
 
-        lq_lookup_tx.send(()).await?;
+        if let Err(e) = lq_lookup_tx.send(()).await {
+            error!(
+                "listen_hf_calc_handler: failed to send to liquidation lookup channel: {:?}",
+                e
+            );
+        }
     }
 
     Ok(())
@@ -1091,20 +1107,22 @@ pub(crate) async fn liquidation_lookup(
 ) -> eyre::Result<Sender<()>> {
     let (lq_lookup_tx, mut lq_lookup_rc) = channel::<()>(bound);
     task::spawn(async move {
-        loop {
-            debug!("liquidation_lookup: check if we have any liquidation opportunities");
+        debug!("liquidation_lookup: check if we have any liquidation opportunities");
 
-            let (workers, mut counter) = (lq_txs.len(), 0);
-            while let Some(_) = lq_lookup_rc.recv().await {
-                let (hf, _) = &*cache.health_factors.read().await;
-                for (i, &v) in hf.iter().enumerate() {
-                    if v < 1.0 {
-                        let lq_tx = lq_txs[counter % workers].clone();
-                        if let Err(e) = lq_tx.send(i).await {
-                            error!("failed to send index {}: {:?}", i, e);
-                        }
-                        counter = counter.wrapping_add(1);
+        let (workers, mut counter) = (lq_txs.len(), 0);
+        while let Some(_) = lq_lookup_rc.recv().await {
+            let (hf, _) = &*cache.health_factors.read().await;
+            for (i, &v) in hf.iter().enumerate() {
+                if v < 1.0 {
+                    let worker = counter % workers;
+                    let lq_tx = lq_txs[worker].clone();
+                    if let Err(e) = lq_tx.send(i).await {
+                        error!(
+                            "liquidation_lookup: failed to send index {} by worker = {}: {:?}",
+                            i, worker, e
+                        );
                     }
+                    counter = counter.wrapping_add(1);
                 }
             }
         }
@@ -1124,17 +1142,17 @@ pub(crate) async fn liquidation(
         let (lq_tx, mut lq_rc) = channel::<usize>(bound);
         let cache = cache.clone();
         task::spawn(async move {
-            loop {
-                debug!("liquidation (worker = {}): waiting for liquidation", worker);
+            debug!("liquidation (worker = {}): waiting for liquidation", worker);
 
-                while let Some(i) = lq_rc.recv().await {
-                    let (hf, _) = &*cache.health_factors.read().await;
-                    info!(
-                        "liquidation (worker = {}): index {}, hf = {}",
-                        worker, i, hf[i]
-                    );
-                }
+            while let Some(i) = lq_rc.recv().await {
+                let (hf, _) = &*cache.health_factors.read().await;
+                info!(
+                    "liquidation (worker = {}): index {}, hf = {}",
+                    worker, i, hf[i]
+                );
             }
+
+            debug!("liquidation (worker = {}): channel closed", worker);
         });
         senders.push(lq_tx);
     }
