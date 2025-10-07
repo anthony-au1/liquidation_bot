@@ -2262,7 +2262,6 @@ dependencies = [
  "eyre",
  "futures",
  "itertools 0.14.0",
- "log",
  "ndarray",
  "rand 0.9.1",
  "serde",

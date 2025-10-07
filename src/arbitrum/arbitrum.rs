@@ -1485,7 +1485,13 @@ impl Cache {
         }
 
         {
-            let mut user_num_lock = self.users_num.write().await;
+            let (mut user_num_lock, mut collaterals, mut reserves, mut borrowed, mut hf) = tokio::join!(
+                self.users_num.write(),
+                self.collateral.write(),
+                self.reserve.write(),
+                self.borrowed.write(),
+                self.health_factors.write(),
+            );
 
             // if we have more than one thread in this fn
             if self.contains(user) {
@@ -1500,37 +1506,26 @@ impl Cache {
                 UserSettings::new(*user_num_lock, bitvec![usize, Lsb0; 0; tokens.len()]),
             );
             *user_num_lock += 1;
-        }
 
-        {
-            let collaterals = &mut *self.collateral.write().await;
-            collaterals.push(RwLock::new((
-                Array1::from_vec(vec![U256::default(); tokens.len()]),
-                0,
-                0,
-            )));
-        }
-
-        {
-            let reserves = &mut *self.reserve.write().await;
             reserves.push(RwLock::new((
                 Array1::from_vec(vec![U256::default(); tokens.len()]),
                 0,
                 0,
             )));
-        }
 
-        {
-            let borrowed = &mut *self.borrowed.write().await;
+            collaterals.push(RwLock::new((
+                Array1::from_vec(vec![U256::default(); tokens.len()]),
+                0,
+                0,
+            )));
+
             borrowed.push(RwLock::new((
                 Array1::from_vec(vec![U256::default(); tokens.len()]),
                 0,
                 0,
             )));
-        }
 
-        {
-            let (hf, last_modified) = &mut *self.health_factors.write().await;
+            let (hf, last_modified) = &mut *hf;
             let mut hf_vec = hf.to_vec();
             hf_vec.push(0.0);
             (*hf, *last_modified) = (Array1::from_vec(hf_vec), 0);
@@ -1708,8 +1703,8 @@ impl Cache {
         target: &SyncTarget,
         rq_date: TimeStamp,
     ) -> eyre::Result<()> {
-        let col_lock = self.collateral.read().await;
         let mut col_matrix_lock = self.collateral_matrix.write().await;
+        let col_lock = self.collateral.read().await;
 
         debug!(
             "sync_collateral: sync target = {:?}, col lock len = {}",
@@ -1806,8 +1801,8 @@ impl Cache {
         target: &SyncTarget,
         rq_date: TimeStamp,
     ) -> eyre::Result<()> {
-        let bor_lock = self.borrowed.read().await;
         let mut bor_matrix_lock = self.borrowed_matrix.write().await;
+        let bor_lock = self.borrowed.read().await;
 
         debug!(
             "sync_borrowed: sync target = {:?}, bor lock len = {:?}",
@@ -1900,8 +1895,10 @@ impl Cache {
         target: &SyncTarget,
         rq_date: TimeStamp,
     ) -> eyre::Result<()> {
-        self.sync_collateral(target, rq_date).await?;
-        self.sync_borrowed(target, rq_date).await?;
+        let _ = tokio::join!(
+            self.sync_collateral(target, rq_date),
+            self.sync_borrowed(target, rq_date)
+        );
 
         Ok(())
     }

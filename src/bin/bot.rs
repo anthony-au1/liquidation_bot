@@ -1,6 +1,7 @@
 extern crate core;
 
 use liquidation_bot;
+use std::panic;
 
 use alloy::providers::{ProviderBuilder, WsConnect};
 use axum::routing::get;
@@ -20,7 +21,7 @@ use liquidation_bot::arbitrum::stats::{
 };
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tracing::info;
+use tracing::{error, info};
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -46,6 +47,8 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
+    setup_panic_hook();
+
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,liquidation_bot=debug"));
 
@@ -53,7 +56,8 @@ async fn main() -> eyre::Result<()> {
         .with_target(false)
         .with_thread_ids(true)
         .with_level(true)
-        .pretty();
+        .pretty()
+        .with_ansi(false);
 
     let file_appender = RollingFileAppender::builder()
         .rotation(Rotation::DAILY)
@@ -171,4 +175,29 @@ async fn main() -> eyre::Result<()> {
     }
 
     Ok(())
+}
+
+fn setup_panic_hook() {
+    let default_hook = panic::take_hook();
+    panic::set_hook(Box::new(move |info| {
+        let msg = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            *s
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.as_str()
+        } else {
+            "unknown panic"
+        };
+
+        let location = if let Some(loc) = info.location() {
+            format!("{}:{}", loc.file(), loc.line())
+        } else {
+            "unknown location".into()
+        };
+
+        let bt = std::backtrace::Backtrace::force_capture();
+
+        error!("PANIC: {}\nAt: {}\nBacktrace:\n{:?}", msg, location, bt);
+
+        default_hook(info);
+    }));
 }
