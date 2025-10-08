@@ -1,9 +1,9 @@
 use crate::arbitrum::arbitrum::IAaveOracle::IAaveOracleInstance;
 use crate::arbitrum::arbitrum::IAaveProtocolDataProvider::{
-    IAaveProtocolDataProviderInstance, TokenData, getReserveDataReturn, getUserReserveDataReturn,
+    getReserveDataReturn, getUserReserveDataReturn, IAaveProtocolDataProviderInstance, TokenData,
 };
 use crate::arbitrum::arbitrum::IL2Pool::{
-    IL2PoolEvents, IL2PoolInstance, getUserAccountDataReturn,
+    getUserAccountDataReturn, IL2PoolEvents, IL2PoolInstance,
 };
 use crate::arbitrum::events::{
     borrow, liquidation_call, repay, reserve_data_updated, reserve_used_as_collateral_disabled,
@@ -15,20 +15,20 @@ use alloy::rpc::types::Filter;
 use alloy::sol;
 use alloy::sol_types::SolEventInterface;
 use alloy_primitives::aliases::U40;
-use alloy_primitives::{I256, Sign, U256, U512};
+use alloy_primitives::{Sign, I256, U256, U512};
 use async_trait::async_trait;
 use bitvec::prelude::*;
 use chrono::Utc;
 use dashmap::DashMap;
 use eyre::eyre;
 use futures::future::try_join_all;
-use ndarray::{Array1, Array2, Axis, concatenate};
+use ndarray::{concatenate, Array1, Array2, Axis};
 use std::collections::HashMap;
 use std::default::Default;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::RwLock;
-use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::{task, time, try_join};
 use tracing::{debug, error, info};
 
@@ -1712,45 +1712,10 @@ impl Cache {
             col_lock.len()
         );
 
-        let low_bound = col_matrix_lock.nrows().saturating_sub(1);
-        while col_matrix_lock.nrows() < col_lock.len() {
-            let row_lock = col_lock
-                .get(col_matrix_lock.nrows())
-                .ok_or_else(|| {
-                    eyre!(
-                        "sync_collateral: row = {} not found in collateral",
-                        col_matrix_lock.nrows()
-                    )
-                })?
-                .read()
-                .await;
-            let row = Array1::from_iter(row_lock.0.iter().map(F64Converter::as_f64_ray));
-            col_matrix_lock.push_row(row.view())?;
-        }
-
-        debug!(
-            "sync_collateral: after row check col matrix rows = {}",
-            col_matrix_lock.nrows()
-        );
-
         let (row_num, col_num) = match target {
             SyncTarget::Row(row_num) => (*row_num, None),
             SyncTarget::Cell(row_num, col_num) => (*row_num, Some(*col_num)),
         };
-
-        if row_num > low_bound {
-            debug!("{}", {
-                let received = Utc::now().timestamp_micros();
-                format!(
-                    "sync_collateral: we sync collateral, rq_date = {}, \
-                         received = {}, delta = {} μs",
-                    rq_date,
-                    received,
-                    received - rq_date
-                )
-            });
-            return Ok(());
-        }
 
         if let Some(col_num) = col_num {
             col_matrix_lock[(row_num, col_num)] = {
@@ -1810,46 +1775,10 @@ impl Cache {
             bor_lock.len()
         );
 
-        let low_bound = bor_matrix_lock.nrows().saturating_sub(1);
-        while bor_matrix_lock.nrows() < bor_lock.len() {
-            let row_lock = bor_lock
-                .get(bor_matrix_lock.nrows())
-                .ok_or_else(|| {
-                    eyre!(
-                        "sync_borrowed: row = {} not found in borrowed",
-                        bor_matrix_lock.nrows()
-                    )
-                })?
-                .read()
-                .await;
-
-            let row = Array1::from_iter(row_lock.0.iter().map(F64Converter::as_f64_ray));
-            bor_matrix_lock.push_row(row.view())?;
-        }
-
-        debug!(
-            "sync_borrowed: after row check bor matrix rows = {}",
-            bor_matrix_lock.nrows()
-        );
-
         let (row_num, col_num) = match target {
             SyncTarget::Row(row_num) => (*row_num, None),
             SyncTarget::Cell(row_num, col_num) => (*row_num, Some(*col_num)),
         };
-
-        if row_num > low_bound {
-            debug!("{}", {
-                let received = Utc::now().timestamp_micros();
-                format!(
-                    "sync_borrowed: we sync borrowed, rq_date = {}, \
-                         received = {}, delta = {} μs",
-                    rq_date,
-                    received,
-                    received - rq_date
-                )
-            });
-            return Ok(());
-        }
 
         if let Some(col_num) = col_num {
             bor_matrix_lock[(row_num, col_num)] = {
@@ -1895,10 +1824,136 @@ impl Cache {
         target: &SyncTarget,
         rq_date: TimeStamp,
     ) -> eyre::Result<()> {
-        let _ = tokio::join!(
-            self.sync_collateral(target, rq_date),
-            self.sync_borrowed(target, rq_date)
+        let (mut col_matrix_lock, col_lock, mut bor_matrix_lock, bor_lock) = tokio::join!(
+            self.collateral_matrix.write(),
+            self.collateral.read(),
+            self.borrowed_matrix.write(),
+            self.borrowed.read()
         );
+
+        debug!(
+            "sync_data: sync target = {:?}, col lock len = {}, bor lock len = {}",
+            target,
+            col_lock.len(),
+            bor_lock.len()
+        );
+
+        while col_matrix_lock.nrows() < col_lock.len() {
+            let row_lock = col_lock
+                .get(col_matrix_lock.nrows())
+                .ok_or_else(|| {
+                    eyre!(
+                        "sync_data: row = {} not found in collateral",
+                        col_matrix_lock.nrows()
+                    )
+                })?
+                .read()
+                .await;
+            let row = Array1::from_iter(row_lock.0.iter().map(F64Converter::as_f64_ray));
+            col_matrix_lock.push_row(row.view())?;
+        }
+
+        debug!(
+            "sync_data: after row check col matrix rows = {}",
+            col_matrix_lock.nrows()
+        );
+
+        let bor_low_bound = bor_matrix_lock.nrows().saturating_sub(1);
+        while bor_matrix_lock.nrows() < bor_lock.len() {
+            let row_lock = bor_lock
+                .get(bor_matrix_lock.nrows())
+                .ok_or_else(|| {
+                    eyre!(
+                        "sync_data: row = {} not found in borrowed",
+                        bor_matrix_lock.nrows()
+                    )
+                })?
+                .read()
+                .await;
+
+            let row = Array1::from_iter(row_lock.0.iter().map(F64Converter::as_f64_ray));
+            bor_matrix_lock.push_row(row.view())?;
+        }
+
+        debug!(
+            "sync_data: after row check bor matrix rows = {}",
+            bor_matrix_lock.nrows()
+        );
+
+        let (row_num, col_num) = match target {
+            SyncTarget::Row(row_num) => (*row_num, None),
+            SyncTarget::Cell(row_num, col_num) => (*row_num, Some(*col_num)),
+        };
+
+        if row_num > bor_low_bound {
+            debug!("{}", {
+                let received = Utc::now().timestamp_micros();
+                format!(
+                    "sync_data: we sync collateral and borrowed, rq_date = {}, \
+                         received = {}, delta = {} μs",
+                    rq_date,
+                    received,
+                    received - rq_date
+                )
+            });
+            return Ok(());
+        }
+
+        if let Some(col_num) = col_num {
+            col_matrix_lock[(row_num, col_num)] = {
+                let (col, _, _) = &*col_lock
+                    .get(row_num)
+                    .ok_or_else(|| eyre!("sync_data: row = {} not found in collateral", row_num))?
+                    .read()
+                    .await;
+                col.get(col_num)
+                    .ok_or_else(|| {
+                        eyre!("sync_data: column = {} not found in collateral", col_num)
+                    })?
+                    .as_f64_ray()
+            };
+            bor_matrix_lock[(row_num, col_num)] = {
+                let (bor, _, _) = &*bor_lock
+                    .get(row_num)
+                    .ok_or_else(|| eyre!("sync_data: row = {} not found in borrowed", row_num))?
+                    .read()
+                    .await;
+                bor.get(col_num)
+                    .ok_or_else(|| eyre!("sync_data: column = {} not found in borrowed", col_num))?
+                    .as_f64_ray()
+            };
+        } else {
+            let row = col_lock
+                .get(row_num)
+                .ok_or_else(|| eyre!("sync_data: row = {} not found in collateral", row_num))?
+                .read()
+                .await;
+
+            let row = Array1::from_iter(row.0.iter().map(F64Converter::as_f64_ray));
+            col_matrix_lock.row_mut(row_num).assign(&row);
+
+            let row = bor_lock
+                .get(row_num)
+                .ok_or_else(|| eyre!("sync_data: row = {} not found in borrowed", row_num))?
+                .read()
+                .await;
+
+            let row = Array1::from_iter(row.0.iter().map(F64Converter::as_f64_ray));
+            bor_matrix_lock.row_mut(row_num).assign(&row);
+        }
+
+        debug!("{}", {
+            let received = Utc::now().timestamp_micros();
+            format!(
+                "sync_data: after row insert col matrix rows = {}, bor matrix rows = {}, rq_date = {}, \
+                     received = {}, delta = {} μs",
+                col_matrix_lock.nrows(),
+                bor_matrix_lock.nrows(),
+                rq_date,
+                received,
+                received - rq_date
+            )
+        });
 
         Ok(())
     }
