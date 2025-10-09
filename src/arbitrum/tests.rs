@@ -3,7 +3,12 @@ use crate::arbitrum::arbitrum::IL2Pool::{
     Borrow, IL2PoolEvents, LiquidationCall, Repay, ReserveDataUpdated,
     ReserveUsedAsCollateralDisabled, ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
-use crate::arbitrum::arbitrum::{liquidation, liquidation_lookup, liquidation_threshold_update, listen_events, listen_hf_calc, listen_prices_update, listen_sync, setup, AaveEvents, Cache, DataProvider, F64Converter, HFRequest, Index, RayOperations, ReserveData, RqDate, Scaler, SyncRequest, SyncTarget, TokenDetails, UserAccountData, UserData, UserReserveData, UserSettings};
+use crate::arbitrum::arbitrum::{
+    AaveEvents, Cache, DataProvider, F64Converter, HFRequest, Index, RayOperations, ReserveData,
+    RqDate, Scaler, SyncRequest, SyncTarget, TokenDetails, UserAccountData, UserData,
+    UserReserveData, UserSettings, liquidation, liquidation_lookup, liquidation_threshold_update,
+    listen_events, listen_hf_calc, listen_prices_update, listen_sync, setup,
+};
 use crate::arbitrum::events::{
     borrow, create_user, liquidation_call, repay, reserve_data_updated,
     reserve_used_as_collateral_disabled, reserve_used_as_collateral_enabled, supply, withdraw,
@@ -22,8 +27,8 @@ use std::fmt::Debug;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc::channel;
 use tokio::sync::RwLock;
+use tokio::sync::mpsc::channel;
 use tokio::task;
 use tokio::time::sleep;
 
@@ -559,6 +564,9 @@ async fn test_sync_collateral() -> eyre::Result<()> {
     {
         let collateral = &mut *cache.collateral.write().await;
         collateral.push(RwLock::new((Array1::from_vec(row.clone()), 0, 0)));
+
+        let collateral_matrix = &mut *cache.collateral_matrix.write().await;
+        collateral_matrix.push_row(Array1::from_vec(vec![0.0; 3]).view())?;
     }
 
     cache.sync_collateral(&SyncTarget::Row(1), rq_date).await?;
@@ -593,6 +601,9 @@ async fn test_sync_collateral() -> eyre::Result<()> {
     {
         let collateral = &mut *cache.collateral.write().await;
         collateral.push(RwLock::new((Array1::from_vec(row.clone()), 0, 0)));
+
+        let collateral_matrix = &mut *cache.collateral_matrix.write().await;
+        collateral_matrix.push_row(Array1::from_vec(vec![0.0; 3]).view())?;
     }
 
     cache.sync_collateral(&SyncTarget::Row(2), rq_date).await?;
@@ -725,6 +736,9 @@ async fn test_sync_borrowed() -> eyre::Result<()> {
     {
         let borrowed = &mut *cache.borrowed.write().await;
         borrowed.push(RwLock::new((Array1::from_vec(row.clone()), 0, 0)));
+
+        let borrowed_matrix = &mut *cache.borrowed_matrix.write().await;
+        borrowed_matrix.push_row(Array1::from_vec(vec![0.0; 3]).view())?;
     }
 
     cache.sync_borrowed(&SyncTarget::Row(1), rq_date).await?;
@@ -759,6 +773,9 @@ async fn test_sync_borrowed() -> eyre::Result<()> {
     {
         let borrowed = &mut *cache.borrowed.write().await;
         borrowed.push(RwLock::new((Array1::from_vec(row.clone()), 0, 0)));
+
+        let borrowed_matrix = &mut *cache.borrowed_matrix.write().await;
+        borrowed_matrix.push_row(Array1::from_vec(vec![0.0; 3]).view())?;
     }
 
     cache.sync_borrowed(&SyncTarget::Row(2), rq_date).await?;

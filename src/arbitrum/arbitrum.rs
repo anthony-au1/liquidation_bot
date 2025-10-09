@@ -668,6 +668,12 @@ where
             AaveEvents::IL2PoolEvents(event, rq_date) => match event {
                 IL2PoolEvents::Supply(ev) => {
                     debug!("start: supply");
+
+                    let n = counters.supply % w_num;
+                    debug!("start: supply - channel = {}, is_closed = {}", n,
+                        supply_txs[n].is_closed());
+
+
                     supply_txs[counters.supply % w_num]
                         .send((
                             ev,
@@ -1974,6 +1980,13 @@ impl Cache {
         let ltp = &lt * &price;
 
         if let Some(user) = user {
+            let (collateral, li, borrowed, vbi) = tokio::join!(
+                self.collateral.read(),
+                self.liquidity.read(),
+                self.borrowed.read(),
+                self.variable_borrow.read()
+            );
+
             let row_num = self
                 .users
                 .get(user)
@@ -1981,8 +1994,9 @@ impl Cache {
                 .row_num;
 
             let col_eff = {
-                let collateral = &*self.collateral.read().await;
-                let (li, _) = &*self.liquidity.read().await;
+                let collateral = &*collateral;
+                let (li, _) = &*li;
+
                 let col_row_lock = Array1::from_iter(
                     collateral
                         .get(row_num)
@@ -2004,8 +2018,9 @@ impl Cache {
             };
 
             let bor_eff = {
-                let borrowed = &*self.borrowed.read().await;
-                let (vbi, _) = &*self.variable_borrow.read().await;
+                let borrowed = &*borrowed;
+                let (vbi, _) = &*vbi;
+
                 let bor_row_lock = Array1::from_iter(
                     borrowed
                         .get(row_num)
@@ -2054,9 +2069,17 @@ impl Cache {
             return Ok(());
         }
 
+        let (collateral, li, borrowed, vbi) = tokio::join!(
+            self.collateral_matrix.read(),
+            self.liquidity_index.read(),
+            self.borrowed_matrix.read(),
+            self.variable_borrow_index.read()
+        );
+
         let col_eff = {
-            let collateral = &*self.collateral_matrix.read().await;
-            let (li, _) = &*self.liquidity_index.read().await;
+            let collateral = &*collateral;
+            let (li, _) = &*li;
+
             let scaled = collateral
                 * &li
                     .broadcast((collateral.nrows(), li.len()))
@@ -2066,8 +2089,9 @@ impl Cache {
         };
 
         let bor_eff = {
-            let borrowed = &*self.borrowed_matrix.read().await;
-            let (vbi, _) = &*self.variable_borrow_index.read().await;
+            let borrowed = &*borrowed;
+            let (vbi, _) = &*vbi;
+
             let scaled = borrowed
                 * &vbi
                     .broadcast((borrowed.nrows(), vbi.len()))
