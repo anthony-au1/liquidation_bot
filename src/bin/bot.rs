@@ -7,6 +7,7 @@ use alloy::providers::{ProviderBuilder, WsConnect};
 use axum::routing::get;
 use axum::Router;
 use clap::{Parser, Subcommand};
+use console_subscriber::{init, ConsoleLayer};
 use liquidation_bot::arbitrum::arbitrum::AaveDataProvider;
 use liquidation_bot::arbitrum::arbitrum::{start, Cache, WS_URL};
 use liquidation_bot::arbitrum::stats::{
@@ -48,6 +49,7 @@ enum Commands {
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
     setup_panic_hook();
+    // init();
 
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,liquidation_bot=debug"));

@@ -32,7 +32,12 @@ use tokio::sync::RwLock;
 use tokio::{task, time, try_join};
 use tracing::{debug, error, info};
 
-pub const WS_URL: &str = "wss://arb-mainnet.g.alchemy.com/v2/9DDcCoPPxnq-aSjQ8k79vxfLvrhBAXjQ";
+// anthony.anokhin@gmail.com
+// pub const WS_URL: &str = "wss://arb-mainnet.g.alchemy.com/v2/9DDcCoPPxnq-aSjQ8k79vxfLvrhBAXjQ";
+
+// antonanohin@gmail.com
+pub const WS_URL: &str = "wss://arb-mainnet.g.alchemy.com/v2/7txxkMJILUjSSkDIHoJ8Q";
+
 const L2_POOL_ADDRESS: &str = "0x794a61358D6845594F94dc1DB02A252b5b4814aD";
 const AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS: &str = "0x14496b405D62c24F91f04Cda1c69Dc526D56fDE5";
 const AAVE_ORACLE_ADDRESS: &str = "0xb56c2F0B653B2e0b10C9b928C8580Ac5Df02C7C7";
@@ -463,8 +468,10 @@ where
         F: Fn(Vec<f64>) -> Fut + Send + 'static,
         Fut: Future<Output = eyre::Result<()>> + Send,
     {
-        let mut block_stream = self.provider.subscribe_blocks().await?;
-        while let Ok(_) = block_stream.recv().await {
+        let mut interval = time::interval(Duration::from_secs(10));
+        loop {
+            interval.tick().await;
+
             let prices = self
                 .get_asset_prices(tokens.clone())
                 .await?
@@ -474,8 +481,6 @@ where
                 .collect();
             callback(prices).await?;
         }
-
-        Ok(())
     }
 
     async fn get_user_account_data(&self, user: &Address) -> eyre::Result<UserAccountData> {
@@ -668,12 +673,6 @@ where
             AaveEvents::IL2PoolEvents(event, rq_date) => match event {
                 IL2PoolEvents::Supply(ev) => {
                     debug!("start: supply");
-
-                    let n = counters.supply % w_num;
-                    debug!("start: supply - channel = {}, is_closed = {}", n,
-                        supply_txs[n].is_closed());
-
-
                     supply_txs[counters.supply % w_num]
                         .send((
                             ev,
@@ -876,40 +875,40 @@ where
             &price_decimals.to_vec()
         };
 
-        loop {
-            let hf_tx = hf_tx.clone();
-            let cache = cache.clone();
-            match provider
-                .listen_prices_update(&tokens, &price_decimals, move |prices| {
-                    let hf_tx = hf_tx.clone();
-                    let cache = cache.clone();
-                    async move {
-                        let now = Utc::now().timestamp_micros();
+        let hf_tx = hf_tx.clone();
+        let cache = cache.clone();
+        match provider
+            .listen_prices_update(&tokens, &price_decimals, move |prices| {
+                let hf_tx = hf_tx.clone();
+                let cache = cache.clone();
+                async move {
+                    let now = Utc::now().timestamp_micros();
 
-                        {
-                            let (prices_current, _) = &mut *cache.prices.write().await;
-                            let prices = Array1::from_vec(prices);
+                    {
+                        let (prices_current, _) = &mut *cache.prices.write().await;
+                        let prices = Array1::from_vec(prices);
 
-                            if *prices_current != prices {
-                                *prices_current = prices;
+                        if *prices_current != prices {
+                            *prices_current = prices;
 
-                                if let Err(e) = hf_tx.send(HFRequest::Full(now)).await {
-                                        error!(
-                                        "listen_prices_update: failed to send to hf calculation channel: {:?}",
-                                        e
-                                    );
-                                }
+                            debug!("listen_prices_update: prices_current = {}", prices_current);
+
+                            if let Err(e) = hf_tx.send(HFRequest::Full(now)).await {
+                                    error!(
+                                    "listen_prices_update: failed to send to hf calculation channel: {:?}",
+                                    e
+                                );
                             }
                         }
-
-                        Ok(())
                     }
-                })
-                .await
-            {
-                Ok(_) => debug!("listen_prices_update: Ok"),
-                Err(e) => debug!("listen_prices_update: error = {:?}", e),
-            }
+
+                    Ok(())
+                }
+            })
+            .await
+        {
+            Ok(_) => debug!("listen_prices_update: Ok"),
+            Err(e) => debug!("listen_prices_update: error = {:?}", e),
         }
     });
 
@@ -928,7 +927,7 @@ where
     task::spawn(async move {
         debug!("liquidation_threshold_update: created thread");
 
-        let mut interval = time::interval(Duration::from_secs(600));
+        let mut interval = time::interval(Duration::from_secs(24 * 60 * 60));
         loop {
             interval.tick().await;
 
@@ -1491,12 +1490,12 @@ impl Cache {
         }
 
         {
-            let (mut user_num_lock, mut collaterals, mut reserves, mut borrowed, mut hf) = tokio::join!(
-                self.users_num.write(),
-                self.collateral.write(),
-                self.reserve.write(),
-                self.borrowed.write(),
-                self.health_factors.write(),
+            let (mut collaterals, mut borrowed, mut user_num_lock, mut reserves, mut hf) = (
+                self.collateral.write().await,
+                self.borrowed.write().await,
+                self.users_num.write().await,
+                self.reserve.write().await,
+                self.health_factors.write().await,
             );
 
             // if we have more than one thread in this fn
@@ -1830,11 +1829,11 @@ impl Cache {
         target: &SyncTarget,
         rq_date: TimeStamp,
     ) -> eyre::Result<()> {
-        let (mut col_matrix_lock, col_lock, mut bor_matrix_lock, bor_lock) = tokio::join!(
-            self.collateral_matrix.write(),
-            self.collateral.read(),
-            self.borrowed_matrix.write(),
-            self.borrowed.read()
+        let (col_lock, mut col_matrix_lock, mut bor_matrix_lock, bor_lock) = (
+            self.collateral.read().await,
+            self.collateral_matrix.write().await,
+            self.borrowed_matrix.write().await,
+            self.borrowed.read().await,
         );
 
         debug!(
@@ -1980,11 +1979,11 @@ impl Cache {
         let ltp = &lt * &price;
 
         if let Some(user) = user {
-            let (collateral, li, borrowed, vbi) = tokio::join!(
-                self.collateral.read(),
-                self.liquidity.read(),
-                self.borrowed.read(),
-                self.variable_borrow.read()
+            let (collateral, borrowed, (li, _), (vbi, _)) = (
+                &*self.collateral.read().await,
+                &*self.borrowed.read().await,
+                &*self.liquidity.read().await,
+                &*self.variable_borrow.read().await,
             );
 
             let row_num = self
@@ -1994,9 +1993,6 @@ impl Cache {
                 .row_num;
 
             let col_eff = {
-                let collateral = &*collateral;
-                let (li, _) = &*li;
-
                 let col_row_lock = Array1::from_iter(
                     collateral
                         .get(row_num)
@@ -2018,9 +2014,6 @@ impl Cache {
             };
 
             let bor_eff = {
-                let borrowed = &*borrowed;
-                let (vbi, _) = &*vbi;
-
                 let bor_row_lock = Array1::from_iter(
                     borrowed
                         .get(row_num)
@@ -2069,17 +2062,14 @@ impl Cache {
             return Ok(());
         }
 
-        let (collateral, li, borrowed, vbi) = tokio::join!(
-            self.collateral_matrix.read(),
-            self.liquidity_index.read(),
-            self.borrowed_matrix.read(),
-            self.variable_borrow_index.read()
+        let (collateral, borrowed, (li, _), (vbi, _)) = (
+            &*self.collateral_matrix.read().await,
+            &*self.borrowed_matrix.read().await,
+            &*self.liquidity_index.read().await,
+            &*self.variable_borrow_index.read().await,
         );
 
         let col_eff = {
-            let collateral = &*collateral;
-            let (li, _) = &*li;
-
             let scaled = collateral
                 * &li
                     .broadcast((collateral.nrows(), li.len()))
@@ -2089,9 +2079,6 @@ impl Cache {
         };
 
         let bor_eff = {
-            let borrowed = &*borrowed;
-            let (vbi, _) = &*vbi;
-
             let scaled = borrowed
                 * &vbi
                     .broadcast((borrowed.nrows(), vbi.len()))

@@ -17,6 +17,8 @@
 
 `RUST_LOG=debug cargo run --release --bin bot -- start` - run liquidation bot in release mode with debug level logger
 
+`RUSTFLAGS="--cfg tokio_unstable" RUST_BACKTRACE=1 cargo run --bin bot -- start` - run liquidation bot with tokio-console
+
 `cargo check` - fast check
 
 `cargo fmt` - format code

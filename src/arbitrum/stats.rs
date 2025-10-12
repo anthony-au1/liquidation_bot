@@ -10,12 +10,14 @@ use axum::extract::{Path, State};
 use axum::response::IntoResponse;
 use bitvec::order::Lsb0;
 use bitvec::prelude::BitVec;
+use eyre::eyre;
 use futures::future::try_join_all;
 use itertools::Itertools;
 use ndarray::Axis;
 use rand::Rng;
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 use std::sync::Arc;
+use serde::ser::SerializeSeq;
 use tokio::try_join;
 use tracing::info;
 
@@ -792,38 +794,88 @@ pub struct TestProbe {
     pub decimals: Vec<f64>,
     pub price_decimals: Vec<f64>,
     pub liquidation_threshold: Vec<f64>,
+
+    #[serde(serialize_with = "u256_vec_to_string")]
     pub liquidity: Vec<U256>,
     pub liquidity_index: Vec<f64>,
+
+    #[serde(serialize_with = "u256_vec_to_string")]
     pub variable_borrow: Vec<U256>,
     pub variable_borrow_index: Vec<f64>,
     pub prices: Vec<f64>,
+
+    #[serde(serialize_with = "u256_2d_to_string")]
     pub reserve_scaled: Vec<Vec<U256>>,
+
+    #[serde(serialize_with = "u256_2d_to_string")]
     pub collateral_scaled: Vec<Vec<U256>>,
     pub collateral: Vec<Vec<f64>>,
+
+    #[serde(serialize_with = "u256_2d_to_string")]
     pub borrowed_scaled: Vec<Vec<U256>>,
     pub borrowed: Vec<Vec<f64>>,
 
     pub hf_aave: Vec<f64>,
+
+    #[serde(serialize_with = "u256_vec_to_string")]
     pub liquidity_aave: Vec<U256>,
     pub liquidity_index_aave: Vec<f64>,
+
+    #[serde(serialize_with = "u256_vec_to_string")]
     pub variable_borrow_aave: Vec<U256>,
     pub variable_borrow_index_aave: Vec<f64>,
+
+    #[serde(serialize_with = "u256_2d_to_string")]
     pub reserve_scaled_aave: Vec<Vec<U256>>,
+
+    #[serde(serialize_with = "u256_2d_to_string")]
     pub collateral_scaled_aave: Vec<Vec<U256>>,
     pub collateral_aave: Vec<Vec<f64>>,
+
+    #[serde(serialize_with = "u256_2d_to_string")]
     pub borrowed_scaled_aave: Vec<Vec<U256>>,
     pub borrowed_aave: Vec<Vec<f64>>,
 
     pub hf_diff: Vec<f64>,
+
+    #[serde(serialize_with = "u256_vec_to_string")]
     pub liquidity_diff: Vec<U256>,
     pub liquidity_index_diff: Vec<f64>,
+
+    #[serde(serialize_with = "u256_vec_to_string")]
     pub variable_borrow_diff: Vec<U256>,
     pub variable_borrow_index_diff: Vec<f64>,
+
+    #[serde(serialize_with = "u256_2d_to_string")]
     pub reserve_scaled_diff: Vec<Vec<U256>>,
+
+    #[serde(serialize_with = "u256_2d_to_string")]
     pub collateral_scaled_diff: Vec<Vec<U256>>,
     pub collateral_diff: Vec<Vec<f64>>,
+
+    #[serde(serialize_with = "u256_2d_to_string")]
     pub borrowed_scaled_diff: Vec<Vec<U256>>,
     pub borrowed_diff: Vec<Vec<f64>>,
+}
+
+pub fn u256_vec_to_string<S>(vals: &Vec<U256>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let strs = vals.iter().map(|v| v.to_string()).collect::<Vec<_>>();
+    strs.serialize(serializer)
+}
+
+fn u256_2d_to_string<S>(matrix: &Vec<Vec<U256>>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let mut outer_seq = serializer.serialize_seq(Some(matrix.len()))?;
+    for row in matrix {
+        let row_as_strings = row.iter().map(|v| v.to_string()).collect::<Vec<_>>();
+        outer_seq.serialize_element(&row_as_strings)?;
+    }
+    outer_seq.end()
 }
 
 pub async fn get_test_probe_state<P>(
