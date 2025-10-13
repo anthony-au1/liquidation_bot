@@ -56,7 +56,6 @@ where
         }
         Err(e) => {
             debug!("create_user (user = {}): error = {:?}", user, e);
-            cache.remove_user(user);
             return Err(e);
         }
     }

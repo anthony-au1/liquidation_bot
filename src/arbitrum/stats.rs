@@ -15,9 +15,9 @@ use futures::future::try_join_all;
 use itertools::Itertools;
 use ndarray::Axis;
 use rand::Rng;
+use serde::ser::SerializeSeq;
 use serde::{Serialize, Serializer};
 use std::sync::Arc;
-use serde::ser::SerializeSeq;
 use tokio::try_join;
 use tracing::info;
 
@@ -961,7 +961,7 @@ where
     let reserve_scaled = {
         let mut reserve_scaled = vec![];
         let reserve = &*state.cache.reserve.read().await;
-        for res_lock in reserve[start..window_size].iter() {
+        for res_lock in reserve[start..start + window_size].iter() {
             let (res, _, _) = &*res_lock.read().await;
             reserve_scaled.push(res.to_vec());
         }
@@ -971,7 +971,7 @@ where
     let collateral_scaled = {
         let mut collateral_scaled = vec![];
         let collateral = &*state.cache.collateral.read().await;
-        for col_lock in collateral[start..window_size].iter() {
+        for col_lock in collateral[start..start + window_size].iter() {
             let (col, _, _) = &*col_lock.read().await;
             collateral_scaled.push(col.to_vec());
         }
@@ -981,11 +981,12 @@ where
     let collateral = {
         let mut collateral = vec![];
         let col = &*state.cache.collateral_matrix.read().await;
-        for idx in start..start + window_size {
-            let row = col.row(idx);
+        for row in start..start + window_size {
+            let row = col.row(row);
             collateral.push(
                 row.iter()
-                    .map(|x| x * liquidity_index[idx])
+                    .enumerate()
+                    .map(|(col, x)| x * liquidity_index[col])
                     .collect::<Vec<_>>(),
             );
         }
@@ -995,7 +996,7 @@ where
     let borrowed_scaled = {
         let mut borrowed_scaled = vec![];
         let borrowed = &*state.cache.borrowed.read().await;
-        for bor_lock in borrowed[start..window_size].iter() {
+        for bor_lock in borrowed[start..start + window_size].iter() {
             let (bor, _, _) = &*bor_lock.read().await;
             borrowed_scaled.push(bor.to_vec());
         }
@@ -1005,11 +1006,12 @@ where
     let mut borrowed = {
         let mut borrowed = vec![];
         let bor = &*state.cache.borrowed_matrix.read().await;
-        for idx in start..start + window_size {
-            let row = bor.row(idx);
+        for row in start..start + window_size {
+            let row = bor.row(row);
             borrowed.push(
                 row.iter()
-                    .map(|x| x * variable_borrow_index[idx])
+                    .enumerate()
+                    .map(|(col, x)| x * variable_borrow_index[col])
                     .collect::<Vec<_>>(),
             );
         }
@@ -1118,7 +1120,7 @@ where
     let hf_diff = {
         hf_aave
             .iter()
-            .zip(hf.iter())
+            .zip(hf[start..start + window_size].iter())
             .map(|(hf_aave, hf)| (hf_aave - hf).abs())
             .collect::<Vec<_>>()
     };
@@ -1221,7 +1223,7 @@ where
     };
 
     let test_probe = TestProbe {
-        hf: hf[start..window_size].to_vec(),
+        hf: hf[start..start + window_size].to_vec(),
         users,
         tokens,
         decimals,
