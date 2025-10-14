@@ -210,8 +210,6 @@ where
 
         let (c, s_tx) = (cache.clone(), sync_tx.clone());
         let new_event = async move || {
-            debug!("supply: collateral new event user = {}", event.onBehalfOf);
-
             let collateral = &*c.collateral.read().await;
             let (col, _, last_modified) = &mut *collateral
                 .get(row_num)
@@ -229,6 +227,11 @@ where
                 .to_ray(decimals[idx])
                 .to_scaled(c.liquidity.read().await.0[idx].index);
             *last_modified = now;
+
+            debug!(
+                "supply (user = {}): collateral amount = {}, col = {}",
+                event.onBehalfOf, event.amount, col
+            );
 
             s_tx.send(SyncRequest::Collateral(
                 SyncTarget::Cell(row_num, idx),
@@ -281,8 +284,6 @@ where
 
         let c = cache.clone();
         let new_event = async move || {
-            debug!("supply: reserve new event user = {}", event.onBehalfOf);
-
             let reserve = &*c.reserve.read().await;
             let (res, _, last_modified) = &mut *reserve
                 .get(row_num)
@@ -300,6 +301,11 @@ where
                 .to_ray(decimals[idx])
                 .to_scaled(c.liquidity.read().await.0[idx].index);
             *last_modified = now;
+
+            debug!(
+                "supply (user = {}): reserve amount = {}, res = {}",
+                event.onBehalfOf, event.amount, res
+            );
 
             Ok(())
         };
@@ -419,8 +425,6 @@ where
 
         let (c, s_tx) = (cache.clone(), sync_tx.clone());
         let new_event = async move || {
-            debug!("withdraw: collateral new event user = {}", event.user);
-
             let collateral = &*c.collateral.read().await;
             let (col, _, last_modified) = &mut *collateral
                 .get(row_num)
@@ -438,6 +442,11 @@ where
                 .to_ray(decimals[idx])
                 .to_scaled(c.liquidity.read().await.0[idx].index);
             *last_modified = now;
+
+            debug!(
+                "withdraw (user = {}): collateral amount = {}, col = {}",
+                event.user, event.amount, col
+            );
 
             s_tx.send(SyncRequest::Collateral(
                 SyncTarget::Cell(row_num, idx),
@@ -490,8 +499,6 @@ where
 
         let c = cache.clone();
         let new_event = async move || {
-            debug!("withdraw: reserve new event user = {}", event.user);
-
             let reserve = &*c.reserve.read().await;
             let (res, _, last_modified) = &mut *reserve
                 .get(row_num)
@@ -509,6 +516,11 @@ where
                 .to_ray(decimals[idx])
                 .to_scaled(c.liquidity.read().await.0[idx].index);
             *last_modified = now;
+
+            debug!(
+                "withdraw (user = {}): reserve amount = {}, res = {}",
+                event.user, event.amount, res
+            );
 
             Ok(())
         };
@@ -627,8 +639,6 @@ where
 
     let (c, s_tx) = (cache.clone(), sync_tx.clone());
     let new_event = async move || {
-        debug!("borrow: new event user = {}", event.onBehalfOf);
-
         let borrowed = &*c.borrowed.read().await;
         let (bor, _, last_modified) = &mut *borrowed
             .get(row_num)
@@ -646,6 +656,11 @@ where
             .to_ray(decimals[idx])
             .to_scaled(c.variable_borrow.read().await.0[idx].index);
         *last_modified = now;
+
+        debug!(
+            "borrow (user = {}): borrowed amount = {}, bor = {}",
+            event.onBehalfOf, event.amount, bor
+        );
 
         s_tx.send(SyncRequest::Borrowed(
             SyncTarget::Cell(row_num, idx),
@@ -769,8 +784,6 @@ where
 
     let (c, s_tx) = (cache.clone(), sync_tx.clone());
     let new_event = async move || {
-        debug!("repay: new event user = {}", event.user);
-
         let borrowed = &*c.borrowed.read().await;
         let (bor, _, last_modified) = &mut *borrowed
             .get(row_num)
@@ -788,6 +801,11 @@ where
             .to_ray(decimals[idx])
             .to_scaled(c.variable_borrow.read().await.0[idx].index);
         *last_modified = now;
+
+        debug!(
+            "repay (user = {}): borrowed amount = {}, bor = {}",
+            event.user, event.amount, bor
+        );
 
         s_tx.send(SyncRequest::Borrowed(
             SyncTarget::Cell(row_num, idx),
@@ -917,11 +935,6 @@ where
 
     let (c, s_tx) = (cache.clone(), sync_tx.clone());
     let new_event = async move || {
-        debug!(
-            "reserve_used_as_collateral_enabled: new event user = {}",
-            event.user
-        );
-
         c.users
             .get_mut(&event.user)
             .ok_or_else(|| {
@@ -951,6 +964,11 @@ where
 
         col[idx] = res[idx];
         res[idx] = U256::default();
+
+        debug!(
+            "reserve_used_as_collateral_enabled (user = {}): col = {}, res = {}",
+            event.user, col, res
+        );
 
         s_tx.send(SyncRequest::Collateral(
             SyncTarget::Cell(row_num, idx),
@@ -1080,11 +1098,6 @@ where
 
     let (c, s_tx) = (cache.clone(), sync_tx.clone());
     let new_event = async move || {
-        debug!(
-            "reserve_used_as_collateral_disabled: new event user = {}",
-            event.user
-        );
-
         c.users
             .get_mut(&event.user)
             .ok_or_else(|| {
@@ -1114,6 +1127,11 @@ where
 
         res[idx] = col[idx];
         col[idx] = U256::default();
+
+        debug!(
+            "reserve_used_as_collateral_disabled (user = {}): res = {}, col = {}",
+            event.user, res, col
+        );
 
         s_tx.send(SyncRequest::Collateral(
             SyncTarget::Cell(row_num, idx),
@@ -1254,8 +1272,6 @@ where
 
     let (c, s_tx) = (cache.clone(), sync_tx.clone());
     let new_event = async move || {
-        debug!("liquidation_call: new event user = {}", event.user);
-
         let collateral = &*c.collateral.read().await;
         let (col, _, last_modified) = &mut *collateral
             .get(row_num)
@@ -1292,6 +1308,12 @@ where
             .liquidatedCollateralAmount
             .to_ray(decimals[col_idx])
             .to_scaled(c.liquidity.read().await.0[col_idx].index);
+
+        debug!(
+            "liquidation_call (user = {}): borrowed repay amount = {}, bor = {},\
+         collateral liquidated amount = {}, col = {}",
+            event.user, event.debtToCover, bor, event.liquidatedCollateralAmount, col
+        );
 
         s_tx.send(SyncRequest::Collateral(
             SyncTarget::Cell(row_num, col_idx),
@@ -1375,36 +1397,22 @@ where
         .order;
 
     {
-        let (li, _) = &mut *cache.liquidity.write().await;
+        let (li, li_last_modified) = &mut *cache.liquidity.write().await;
         (li[idx].index, li[idx].rate, li[idx].last_update) =
             (event.liquidityIndex, event.liquidityRate, now);
-    }
 
-    {
-        let (li, _) = &mut *cache.liquidity_index.write().await;
-        li[idx] = event.liquidityIndex.as_f64_ray();
-    }
-
-    {
-        let (vbi, _) = &mut *cache.variable_borrow.write().await;
-        (vbi[idx].index, vbi[idx].rate, vbi[idx].last_update) =
-            (event.variableBorrowIndex, event.variableBorrowRate, now);
-    }
-
-    {
-        let (vbi, _) = &mut *cache.variable_borrow_index.write().await;
-        vbi[idx] = event.variableBorrowIndex.as_f64_ray();
-    }
-
-    {
-        let one_ray: U256 = U256::from(RAY);
-        let seconds_per_year = U256::from(31_536_000);
-
-        let (li, li_last_modified) = &mut *cache.liquidity.write().await;
         let (lii, lii_last_modified) = &mut *cache.liquidity_index.write().await;
+        lii[idx] = event.liquidityIndex.as_f64_ray();
 
         let (vbi, vbi_last_modified) = &mut *cache.variable_borrow.write().await;
+        (vbi[idx].index, vbi[idx].rate, vbi[idx].last_update) =
+            (event.variableBorrowIndex, event.variableBorrowRate, now);
+
         let (vbii, vbii_last_modified) = &mut *cache.variable_borrow_index.write().await;
+        vbii[idx] = event.variableBorrowIndex.as_f64_ray();
+
+        let one_ray: U256 = U256::from(RAY);
+        let seconds_per_year = U256::from(31_536_000);
 
         for (_, TokenDetails { order, .. }) in tokens.iter() {
             let idx2 = order.clone();
@@ -1438,6 +1446,11 @@ where
             *vbi_last_modified,
             *vbii_last_modified,
         ) = (now, now, now, now);
+
+        debug!(
+            "reserve_data_updated (token = {}): li = {:?}, lii = {}, vbi = {:?}, vbii = {}",
+            event.reserve, li, lii, vbi, vbii
+        );
     }
 
     if let Err(e) = hf_tx.send(HFRequest::Full(rq_date)).await {
