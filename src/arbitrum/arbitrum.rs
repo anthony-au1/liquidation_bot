@@ -1167,7 +1167,7 @@ pub(crate) async fn liquidation(
 
 pub type UserDetails = DashMap<Address, UserSettings>;
 pub type Array = RwLock<(Array1<f64>, TimeStamp)>;
-pub type Arrays = RwLock<Vec<RwLock<(Array1<U256>, TimeStamp, TimeStamp)>>>;
+pub type Arrays = RwLock<Vec<Arc<RwLock<(Array1<U256>, TimeStamp, TimeStamp)>>>>;
 pub type Matrix = RwLock<Array2<f64>>;
 pub type Indexes = RwLock<(Array1<Index>, TimeStamp)>;
 pub type Addresses = RwLock<(Array1<Address>, TimeStamp)>;
@@ -1358,7 +1358,7 @@ impl Cache {
         self.users.insert(user.clone(), user_settings);
 
         {
-            let collaterals = &*self.collateral.read().await;
+            let collaterals = self.collateral.read().await.to_vec();
             let (col, last_sync, last_modified) = &mut *collaterals
                 .get(row_num)
                 .ok_or_else(|| {
@@ -1378,7 +1378,7 @@ impl Cache {
         }
 
         {
-            let reserves = &*self.reserve.read().await;
+            let reserves = self.reserve.read().await.to_vec();
             let (res, last_sync, last_modified) = &mut *reserves
                 .get(row_num)
                 .ok_or_else(|| {
@@ -1398,7 +1398,7 @@ impl Cache {
         }
 
         {
-            let debt = &*self.borrowed.read().await;
+            let debt = self.borrowed.read().await.to_vec();
             let (bor, last_sync, last_modified) = &mut *debt
                 .get(row_num)
                 .ok_or_else(|| {
@@ -1512,23 +1512,23 @@ impl Cache {
             );
             *user_num_lock += 1;
 
-            reserves.push(RwLock::new((
+            reserves.push(Arc::new(RwLock::new((
                 Array1::from_vec(vec![U256::default(); tokens.len()]),
                 0,
                 0,
-            )));
+            ))));
 
-            collaterals.push(RwLock::new((
+            collaterals.push(Arc::new(RwLock::new((
                 Array1::from_vec(vec![U256::default(); tokens.len()]),
                 0,
                 0,
-            )));
+            ))));
 
-            borrowed.push(RwLock::new((
+            borrowed.push(Arc::new(RwLock::new((
                 Array1::from_vec(vec![U256::default(); tokens.len()]),
                 0,
                 0,
-            )));
+            ))));
 
             let (hf, last_modified) = &mut *hf;
             let mut hf_vec = hf.to_vec();
@@ -1709,12 +1709,12 @@ impl Cache {
         rq_date: TimeStamp,
     ) -> eyre::Result<()> {
         let mut col_matrix_lock = self.collateral_matrix.write().await;
-        let col_lock = self.collateral.read().await;
+        let collateral = self.collateral.read().await.to_vec();
 
         debug!(
-            "sync_collateral: sync target = {:?}, col lock len = {}",
+            "sync_collateral: sync target = {:?}, collateral len = {}",
             target,
-            col_lock.len()
+            collateral.len()
         );
 
         let (row_num, col_num) = match target {
@@ -1724,7 +1724,7 @@ impl Cache {
 
         if let Some(col_num) = col_num {
             col_matrix_lock[(row_num, col_num)] = {
-                let (col, _, _) = &*col_lock
+                let (col, _, _) = &*collateral
                     .get(row_num)
                     .ok_or_else(|| {
                         eyre!("sync_collateral: row = {} not found in collateral", row_num)
@@ -1741,7 +1741,7 @@ impl Cache {
                     .as_f64_ray()
             };
         } else {
-            let row = col_lock
+            let row = collateral
                 .get(row_num)
                 .ok_or_else(|| eyre!("sync_collateral: row = {} not found in collateral", row_num))?
                 .read()
@@ -1772,12 +1772,12 @@ impl Cache {
         rq_date: TimeStamp,
     ) -> eyre::Result<()> {
         let mut bor_matrix_lock = self.borrowed_matrix.write().await;
-        let bor_lock = self.borrowed.read().await;
+        let borrowed = self.borrowed.read().await.to_vec();
 
         debug!(
-            "sync_borrowed: sync target = {:?}, bor lock len = {:?}",
+            "sync_borrowed: sync target = {:?}, borrowed len = {:?}",
             target,
-            bor_lock.len()
+            borrowed.len()
         );
 
         let (row_num, col_num) = match target {
@@ -1787,7 +1787,7 @@ impl Cache {
 
         if let Some(col_num) = col_num {
             bor_matrix_lock[(row_num, col_num)] = {
-                let (bor, _, _) = &*bor_lock
+                let (bor, _, _) = &*borrowed
                     .get(row_num)
                     .ok_or_else(|| eyre!("sync_borrowed: row = {} not found in borrowed", row_num))?
                     .read()
@@ -1799,7 +1799,7 @@ impl Cache {
                     .as_f64_ray()
             };
         } else {
-            let row = bor_lock
+            let row = borrowed
                 .get(row_num)
                 .ok_or_else(|| eyre!("sync_borrowed: row = {} not found in borrowed", row_num))?
                 .read()
@@ -1829,22 +1829,22 @@ impl Cache {
         target: &SyncTarget,
         rq_date: TimeStamp,
     ) -> eyre::Result<()> {
-        let (col_lock, mut col_matrix_lock, mut bor_matrix_lock, bor_lock) = (
-            self.collateral.read().await,
+        let (collateral, mut col_matrix_lock, mut bor_matrix_lock, borrowed) = (
+            self.collateral.read().await.to_vec(),
             self.collateral_matrix.write().await,
             self.borrowed_matrix.write().await,
-            self.borrowed.read().await,
+            self.borrowed.read().await.to_vec(),
         );
 
         debug!(
-            "sync_data: sync target = {:?}, col lock len = {}, bor lock len = {}",
+            "sync_data: sync target = {:?}, collateral len = {}, borrowed len = {}",
             target,
-            col_lock.len(),
-            bor_lock.len()
+            collateral.len(),
+            borrowed.len()
         );
 
-        while col_matrix_lock.nrows() < col_lock.len() {
-            let row_lock = col_lock
+        while col_matrix_lock.nrows() < collateral.len() {
+            let row_lock = collateral
                 .get(col_matrix_lock.nrows())
                 .ok_or_else(|| {
                     eyre!(
@@ -1864,8 +1864,8 @@ impl Cache {
         );
 
         let bor_low_bound = bor_matrix_lock.nrows().saturating_sub(1);
-        while bor_matrix_lock.nrows() < bor_lock.len() {
-            let row_lock = bor_lock
+        while bor_matrix_lock.nrows() < borrowed.len() {
+            let row_lock = borrowed
                 .get(bor_matrix_lock.nrows())
                 .ok_or_else(|| {
                     eyre!(
@@ -1906,7 +1906,7 @@ impl Cache {
 
         if let Some(col_num) = col_num {
             col_matrix_lock[(row_num, col_num)] = {
-                let (col, _, _) = &*col_lock
+                let (col, _, _) = &*collateral
                     .get(row_num)
                     .ok_or_else(|| eyre!("sync_data: row = {} not found in collateral", row_num))?
                     .read()
@@ -1918,7 +1918,7 @@ impl Cache {
                     .as_f64_ray()
             };
             bor_matrix_lock[(row_num, col_num)] = {
-                let (bor, _, _) = &*bor_lock
+                let (bor, _, _) = &*borrowed
                     .get(row_num)
                     .ok_or_else(|| eyre!("sync_data: row = {} not found in borrowed", row_num))?
                     .read()
@@ -1928,7 +1928,7 @@ impl Cache {
                     .as_f64_ray()
             };
         } else {
-            let row = col_lock
+            let row = collateral
                 .get(row_num)
                 .ok_or_else(|| eyre!("sync_data: row = {} not found in collateral", row_num))?
                 .read()
@@ -1937,7 +1937,7 @@ impl Cache {
             let row = Array1::from_iter(row.0.iter().map(F64Converter::as_f64_ray));
             col_matrix_lock.row_mut(row_num).assign(&row);
 
-            let row = bor_lock
+            let row = borrowed
                 .get(row_num)
                 .ok_or_else(|| eyre!("sync_data: row = {} not found in borrowed", row_num))?
                 .read()
@@ -1980,8 +1980,8 @@ impl Cache {
 
         if let Some(user) = user {
             let (collateral, borrowed, (li, _), (vbi, _)) = (
-                &*self.collateral.read().await,
-                &*self.borrowed.read().await,
+                self.collateral.read().await.to_vec(),
+                self.borrowed.read().await.to_vec(),
                 &*self.liquidity.read().await,
                 &*self.variable_borrow.read().await,
             );

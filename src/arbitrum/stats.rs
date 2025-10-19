@@ -5,12 +5,11 @@ use crate::arbitrum::arbitrum::{
 use alloy::providers::Provider;
 use alloy::transports::http::reqwest::StatusCode;
 use alloy_primitives::{Address, U256};
-use axum::Json;
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;
+use axum::Json;
 use bitvec::order::Lsb0;
 use bitvec::prelude::BitVec;
-use eyre::eyre;
 use futures::future::try_join_all;
 use itertools::Itertools;
 use ndarray::Axis;
@@ -223,7 +222,7 @@ where
 }
 
 async fn get_reserve(row_num: usize, cache: Arc<Cache>) -> Option<Vec<String>> {
-    let reserve = &*cache.reserve.read().await;
+    let reserve = cache.reserve.read().await.to_vec();
     let row_lock = reserve.get(row_num)?;
     let (row, _, _) = &*row_lock.read().await;
     Some(row.iter().map(U256::to_string).collect())
@@ -262,7 +261,7 @@ where
 
 async fn get_reserve_all(cache: Arc<Cache>) -> Vec<Vec<String>> {
     let mut reserve_vec = vec![];
-    let reserves = &*cache.reserve.read().await;
+    let reserves = cache.reserve.read().await.to_vec();
     for res_lock in reserves {
         let (res, _, _) = &*res_lock.read().await;
         let values = res.iter().map(U256::to_string).collect();
@@ -285,7 +284,7 @@ where
 }
 
 async fn get_collateral(row_num: usize, cache: Arc<Cache>) -> Option<Vec<String>> {
-    let collateral = &*cache.collateral.read().await;
+    let collateral = cache.collateral.read().await.to_vec();
     let col_lock = collateral.get(row_num)?;
     let (row, _, _) = &*col_lock.read().await;
     Some(row.iter().map(U256::to_string).collect())
@@ -324,8 +323,8 @@ where
 
 async fn get_collateral_all(cache: Arc<Cache>) -> Vec<Vec<String>> {
     let mut collateral_vec = vec![];
-    let collaterals = &*cache.collateral.read().await;
-    for col_lock in collaterals {
+    let collateral = cache.collateral.read().await.to_vec();
+    for col_lock in collateral {
         let (col, _, _) = &*col_lock.read().await;
         let values = col.iter().map(U256::to_string).collect();
         collateral_vec.push(values);
@@ -413,7 +412,7 @@ where
 }
 
 async fn get_borrowed(row_num: usize, cache: Arc<Cache>) -> Option<Vec<String>> {
-    let borrowed = &*cache.borrowed.read().await;
+    let borrowed = cache.borrowed.read().await.to_vec();
     let bor_lock = borrowed.get(row_num)?;
     let (row, _, _) = &*bor_lock.read().await;
     Some(row.iter().map(U256::to_string).collect())
@@ -454,7 +453,7 @@ where
 
 async fn get_borrowed_all(cache: Arc<Cache>) -> Vec<Vec<String>> {
     let mut borrowed_vec = vec![];
-    let borrowed = &*cache.borrowed.read().await;
+    let borrowed = cache.borrowed.read().await.to_vec();
     for bor_lock in borrowed {
         let (bor, _, _) = &*bor_lock.read().await;
         let values = bor.iter().map(U256::to_string).collect();
@@ -960,8 +959,9 @@ where
 
     let reserve_scaled = {
         let mut reserve_scaled = vec![];
-        let reserve = &*state.cache.reserve.read().await;
-        for res_lock in reserve[start..start + window_size].iter() {
+        let reserve = state.cache.reserve.read().await[start..start + window_size].to_vec();
+
+        for res_lock in reserve.iter() {
             let (res, _, _) = &*res_lock.read().await;
             reserve_scaled.push(res.to_vec());
         }
@@ -970,7 +970,7 @@ where
 
     let collateral_scaled = {
         let mut collateral_scaled = vec![];
-        let collateral = &*state.cache.collateral.read().await;
+        let collateral = state.cache.collateral.read().await.to_vec();
         for col_lock in collateral[start..start + window_size].iter() {
             let (col, _, _) = &*col_lock.read().await;
             collateral_scaled.push(col.to_vec());
@@ -995,7 +995,7 @@ where
 
     let borrowed_scaled = {
         let mut borrowed_scaled = vec![];
-        let borrowed = &*state.cache.borrowed.read().await;
+        let borrowed = state.cache.borrowed.read().await.to_vec();
         for bor_lock in borrowed[start..start + window_size].iter() {
             let (bor, _, _) = &*bor_lock.read().await;
             borrowed_scaled.push(bor.to_vec());

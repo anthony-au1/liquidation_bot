@@ -192,7 +192,7 @@ where
 
     if user_settings.use_as_collateral[idx] {
         let (last_sync, last_modified) = {
-            let collateral = &*cache.collateral.read().await;
+            let collateral = cache.collateral.read().await.to_vec();
             let (_, last_sync, last_modified) = &*collateral
                 .get(row_num)
                 .ok_or_else(|| {
@@ -210,7 +210,7 @@ where
 
         let (c, s_tx) = (cache.clone(), sync_tx.clone());
         let new_event = async move || {
-            let collateral = &*c.collateral.read().await;
+            let collateral = c.collateral.read().await.to_vec();
             let (col, _, last_modified) = &mut *collateral
                 .get(row_num)
                 .ok_or_else(|| {
@@ -266,7 +266,7 @@ where
         .await?;
     } else {
         let (last_sync, last_modified) = {
-            let reserve = &*cache.reserve.read().await;
+            let reserve = cache.reserve.read().await.to_vec();
             let (_, last_sync, last_modified) = &*reserve
                 .get(row_num)
                 .ok_or_else(|| {
@@ -284,7 +284,7 @@ where
 
         let c = cache.clone();
         let new_event = async move || {
-            let reserve = &*c.reserve.read().await;
+            let reserve = c.reserve.read().await.to_vec();
             let (res, _, last_modified) = &mut *reserve
                 .get(row_num)
                 .ok_or_else(|| {
@@ -407,7 +407,7 @@ where
 
     if user_settings.use_as_collateral[idx] {
         let (last_sync, last_modified) = {
-            let collateral = &*cache.collateral.read().await;
+            let collateral = cache.collateral.read().await.to_vec();
             let (_, last_sync, last_modified) = &*collateral
                 .get(row_num)
                 .ok_or_else(|| {
@@ -425,7 +425,7 @@ where
 
         let (c, s_tx) = (cache.clone(), sync_tx.clone());
         let new_event = async move || {
-            let collateral = &*c.collateral.read().await;
+            let collateral = c.collateral.read().await.to_vec();
             let (col, _, last_modified) = &mut *collateral
                 .get(row_num)
                 .ok_or_else(|| {
@@ -481,7 +481,7 @@ where
         .await?;
     } else {
         let (last_sync, last_modified) = {
-            let reserve = &*cache.reserve.read().await;
+            let reserve = cache.reserve.read().await.to_vec();
             let (_, last_sync, last_modified) = &*reserve
                 .get(row_num)
                 .ok_or_else(|| {
@@ -499,7 +499,7 @@ where
 
         let c = cache.clone();
         let new_event = async move || {
-            let reserve = &*c.reserve.read().await;
+            let reserve = c.reserve.read().await.to_vec();
             let (res, _, last_modified) = &mut *reserve
                 .get(row_num)
                 .ok_or_else(|| {
@@ -621,7 +621,7 @@ where
     let now = Utc::now().timestamp_micros();
 
     let (last_sync, last_modified) = {
-        let borrowed = &*cache.borrowed.read().await;
+        let borrowed = cache.borrowed.read().await.to_vec();
         let (_, last_sync, last_modified) = &*borrowed
             .get(row_num)
             .ok_or_else(|| {
@@ -639,7 +639,7 @@ where
 
     let (c, s_tx) = (cache.clone(), sync_tx.clone());
     let new_event = async move || {
-        let borrowed = &*c.borrowed.read().await;
+        let borrowed = c.borrowed.read().await.to_vec();
         let (bor, _, last_modified) = &mut *borrowed
             .get(row_num)
             .ok_or_else(|| {
@@ -766,7 +766,7 @@ where
     let now = Utc::now().timestamp_micros();
 
     let (last_sync, last_modified) = {
-        let borrowed = &*cache.borrowed.read().await;
+        let borrowed = cache.borrowed.read().await.to_vec();
         let (_, last_sync, last_modified) = &*borrowed
             .get(row_num)
             .ok_or_else(|| {
@@ -784,7 +784,7 @@ where
 
     let (c, s_tx) = (cache.clone(), sync_tx.clone());
     let new_event = async move || {
-        let borrowed = &*c.borrowed.read().await;
+        let borrowed = c.borrowed.read().await.to_vec();
         let (bor, _, last_modified) = &mut *borrowed
             .get(row_num)
             .ok_or_else(|| {
@@ -923,7 +923,7 @@ where
     let now = Utc::now().timestamp_micros();
 
     let (last_sync, last_modified) = {
-        let reserve = &*cache.reserve.read().await;
+        let reserve = cache.reserve.read().await.to_vec();
         let (_, last_sync, last_modified) = &*reserve
             .get(row_num)
             .ok_or_else(|| eyre!("reserve_used_as_collateral_enabled (user = {}): can't get row = {} from reserve", event.user, row_num))?
@@ -946,7 +946,7 @@ where
             .use_as_collateral
             .set(idx, true);
 
-        let reserve = &*c.reserve.read().await;
+        let reserve = c.reserve.read().await.to_vec();
         let (res, _, last_modified) = &mut *reserve
             .get(row_num)
             .ok_or_else(|| eyre!("reserve_used_as_collateral_enabled (user = {}): can't get row = {} from reserve", event.user, row_num))?
@@ -954,7 +954,7 @@ where
             .await;
         *last_modified = now;
 
-        let collateral = &*c.collateral.read().await;
+        let collateral = c.collateral.read().await.to_vec();
         let (col, _, last_modified) = &mut *collateral
             .get(row_num)
             .ok_or_else(|| eyre!("reserve_used_as_collateral_enabled (user = {}): can't get row = {} from collateral", event.user, row_num))?
@@ -1086,7 +1086,7 @@ where
     let now = Utc::now().timestamp_micros();
 
     let (last_sync, last_modified) = {
-        let reserve = &*cache.reserve.read().await;
+        let reserve = cache.reserve.read().await.to_vec();
         let (_, last_sync, last_modified) = &*reserve
             .get(row_num)
             .ok_or_else(|| eyre!("reserve_used_as_collateral_disabled (user = {}): can't get row = {} from reserve", event.user, row_num))?
@@ -1109,7 +1109,7 @@ where
             .use_as_collateral
             .set(idx, false);
 
-        let reserve = &*c.reserve.read().await;
+        let reserve = c.reserve.read().await.to_vec();
         let (res, _, last_modified) = &mut *reserve
             .get(row_num)
             .ok_or_else(|| eyre!("reserve_used_as_collateral_disabled (user = {}): can't get row = {} from reserve", event.user, row_num))?
@@ -1117,7 +1117,7 @@ where
             .await;
         *last_modified = now;
 
-        let collateral = &*c.collateral.read().await;
+        let collateral = c.collateral.read().await.to_vec();
         let (col, _, last_modified) = &mut *collateral
             .get(row_num)
             .ok_or_else(|| eyre!("reserve_used_as_collateral_disabled (user = {}): can't get row = {} from collateral", event.user, row_num))?
@@ -1254,7 +1254,7 @@ where
         .order;
 
     let (last_sync, last_modified) = {
-        let borrowed = &*cache.borrowed.read().await;
+        let borrowed = cache.borrowed.read().await.to_vec();
         let (_, last_sync, last_modified) = &*borrowed
             .get(row_num)
             .ok_or_else(|| {
@@ -1272,7 +1272,7 @@ where
 
     let (c, s_tx) = (cache.clone(), sync_tx.clone());
     let new_event = async move || {
-        let collateral = &*c.collateral.read().await;
+        let collateral = c.collateral.read().await.to_vec();
         let (col, _, last_modified) = &mut *collateral
             .get(row_num)
             .ok_or_else(|| {
@@ -1286,7 +1286,7 @@ where
             .await;
         *last_modified = now;
 
-        let borrowed = &*c.borrowed.read().await;
+        let borrowed = c.borrowed.read().await.to_vec();
         let (bor, _, last_modified) = &mut *borrowed
             .get(row_num)
             .ok_or_else(|| {

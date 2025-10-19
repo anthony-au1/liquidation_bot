@@ -4,10 +4,10 @@ use crate::arbitrum::arbitrum::IL2Pool::{
     ReserveUsedAsCollateralDisabled, ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
 use crate::arbitrum::arbitrum::{
-    AaveEvents, Cache, DataProvider, F64Converter, HFRequest, Index, RayOperations, ReserveData,
-    RqDate, Scaler, SyncRequest, SyncTarget, TokenDetails, UserAccountData, UserData,
-    UserReserveData, UserSettings, liquidation, liquidation_lookup, liquidation_threshold_update,
-    listen_events, listen_hf_calc, listen_prices_update, listen_sync, setup,
+    liquidation, liquidation_lookup, liquidation_threshold_update, listen_events, listen_hf_calc, listen_prices_update, listen_sync, setup,
+    AaveEvents, Cache, DataProvider, F64Converter, HFRequest, Index, RayOperations,
+    ReserveData, RqDate, Scaler, SyncRequest, SyncTarget,
+    TokenDetails, UserAccountData, UserData, UserReserveData, UserSettings,
 };
 use crate::arbitrum::events::{
     borrow, create_user, liquidation_call, repay, reserve_data_updated,
@@ -27,8 +27,8 @@ use std::fmt::Debug;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
 use tokio::sync::mpsc::channel;
+use tokio::sync::RwLock;
 use tokio::task;
 use tokio::time::sleep;
 
@@ -360,25 +360,25 @@ async fn generate_cache_and_tokens(
             user_addr = user_addr.create((i + 1) as u64);
 
             let collaterals = &mut *cache.collateral.write().await;
-            collaterals.push(RwLock::new((
+            collaterals.push(Arc::new(RwLock::new((
                 Array1::from_vec(vec![U256::default(); 3]),
                 now,
                 now,
-            )));
+            ))));
 
             let reserves = &mut *cache.reserve.write().await;
-            reserves.push(RwLock::new((
+            reserves.push(Arc::new(RwLock::new((
                 Array1::from_vec(vec![U256::default(); 3]),
                 now,
                 now,
-            )));
+            ))));
 
             let borrowed = &mut *cache.borrowed.write().await;
-            borrowed.push(RwLock::new((
+            borrowed.push(Arc::new(RwLock::new((
                 Array1::from_vec(vec![U256::default(); 3]),
                 now,
                 now,
-            )));
+            ))));
 
             let (hf, _) = &mut *cache.health_factors.write().await;
             let mut hf_vec = hf.to_vec();
@@ -457,21 +457,21 @@ async fn get_all_user_data(
     user_row_num: usize,
 ) -> eyre::Result<(Vec<U256>, Vec<U256>, Vec<U256>)> {
     let (collateral, reserve, borrowed) = {
-        let collaterals = &*cache.collateral.read().await;
+        let collaterals = cache.collateral.read().await.to_vec();
         let (collateral, _, _) = &*collaterals
             .get(user_row_num)
             .ok_or_else(|| eyre!("row = {} not found in collateral", user_row_num))?
             .read()
             .await;
 
-        let reserves = &*cache.reserve.read().await;
+        let reserves = cache.reserve.read().await.to_vec();
         let (reserve, _, _) = &*reserves
             .get(user_row_num)
             .ok_or_else(|| eyre!("row = {} not found in reserve", user_row_num))?
             .read()
             .await;
 
-        let borrowed = &*cache.borrowed.read().await;
+        let borrowed = cache.borrowed.read().await.to_vec();
         let (borrowed, _, _) = &*borrowed
             .get(user_row_num)
             .ok_or_else(|| eyre!("row = {} not found in borrowed", user_row_num))?
@@ -531,8 +531,11 @@ async fn test_sync_collateral() -> eyre::Result<()> {
     let row = vec![col1, col2, col3];
     let row_len = row.len();
     {
-        *cache.collateral.write().await =
-            vec![RwLock::new((Array1::from_vec(row.clone()), now, now))];
+        *cache.collateral.write().await = vec![Arc::new(RwLock::new((
+            Array1::from_vec(row.clone()),
+            now,
+            now,
+        )))];
         *cache.collateral_matrix.write().await = Array2::from_elem((1, row_len), 0.0);
     }
 
@@ -563,7 +566,7 @@ async fn test_sync_collateral() -> eyre::Result<()> {
     let row = vec![col4, col5, col6];
     {
         let collateral = &mut *cache.collateral.write().await;
-        collateral.push(RwLock::new((Array1::from_vec(row.clone()), 0, 0)));
+        collateral.push(Arc::new(RwLock::new((Array1::from_vec(row.clone()), 0, 0))));
 
         let collateral_matrix = &mut *cache.collateral_matrix.write().await;
         collateral_matrix.push_row(Array1::from_vec(vec![0.0; 3]).view())?;
@@ -600,7 +603,7 @@ async fn test_sync_collateral() -> eyre::Result<()> {
     let row = vec![col7, col8, col9];
     {
         let collateral = &mut *cache.collateral.write().await;
-        collateral.push(RwLock::new((Array1::from_vec(row.clone()), 0, 0)));
+        collateral.push(Arc::new(RwLock::new((Array1::from_vec(row.clone()), 0, 0))));
 
         let collateral_matrix = &mut *cache.collateral_matrix.write().await;
         collateral_matrix.push_row(Array1::from_vec(vec![0.0; 3]).view())?;
@@ -635,7 +638,7 @@ async fn test_sync_collateral() -> eyre::Result<()> {
         .to_scaled(cache.liquidity.read().await.0[2].index);
 
     {
-        let collateral = &mut *cache.collateral.write().await;
+        let collateral = cache.collateral.read().await.to_vec();
         let (col_row, _, _) = &mut *collateral
             .get(1)
             .ok_or_else(|| eyre!("row = 1 not found in collateral"))?
@@ -703,8 +706,11 @@ async fn test_sync_borrowed() -> eyre::Result<()> {
     let row = vec![bor1, bor2, bor3];
     let row_len = row.len();
     {
-        *cache.borrowed.write().await =
-            vec![RwLock::new((Array1::from_vec(row.clone()), now, now))];
+        *cache.borrowed.write().await = vec![Arc::new(RwLock::new((
+            Array1::from_vec(row.clone()),
+            now,
+            now,
+        )))];
         *cache.borrowed_matrix.write().await = Array2::from_elem((1, row_len), 0.0);
     }
 
@@ -735,7 +741,7 @@ async fn test_sync_borrowed() -> eyre::Result<()> {
     let row = vec![bor4, bor5, bor6];
     {
         let borrowed = &mut *cache.borrowed.write().await;
-        borrowed.push(RwLock::new((Array1::from_vec(row.clone()), 0, 0)));
+        borrowed.push(Arc::new(RwLock::new((Array1::from_vec(row.clone()), 0, 0))));
 
         let borrowed_matrix = &mut *cache.borrowed_matrix.write().await;
         borrowed_matrix.push_row(Array1::from_vec(vec![0.0; 3]).view())?;
@@ -772,7 +778,7 @@ async fn test_sync_borrowed() -> eyre::Result<()> {
     let row = vec![bor7, bor8, bor9];
     {
         let borrowed = &mut *cache.borrowed.write().await;
-        borrowed.push(RwLock::new((Array1::from_vec(row.clone()), 0, 0)));
+        borrowed.push(Arc::new(RwLock::new((Array1::from_vec(row.clone()), 0, 0))));
 
         let borrowed_matrix = &mut *cache.borrowed_matrix.write().await;
         borrowed_matrix.push_row(Array1::from_vec(vec![0.0; 3]).view())?;
@@ -807,7 +813,7 @@ async fn test_sync_borrowed() -> eyre::Result<()> {
         .to_scaled(cache.variable_borrow.read().await.0[2].index);
 
     {
-        let borrowed = &mut *cache.borrowed.write().await;
+        let borrowed = cache.borrowed.read().await.to_vec();
         let (bor_row, _, _) = &mut *borrowed
             .get(1)
             .ok_or_else(|| eyre!("row = 1 not found in borrowed"))?
@@ -1106,7 +1112,7 @@ async fn test_subscribe() -> eyre::Result<()> {
         async move {
             assert_eq!(text, test_message);
 
-            let collaterals = &*c.collateral.read().await;
+            let collaterals = c.collateral.read().await.to_vec();
             let (col, _, _) = &mut *collaterals
                 .get(0)
                 .ok_or_else(|| eyre!("row = 0 not found in collateral"))?
@@ -1141,7 +1147,7 @@ async fn test_subscribe() -> eyre::Result<()> {
 
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    let collaterals = &*cache.collateral.read().await;
+    let collaterals = cache.collateral.read().await.to_vec();
     let (col, _, _) = &mut *collaterals
         .get(0)
         .ok_or_else(|| eyre!("row = 0 not found in collateral"))?
@@ -1184,7 +1190,7 @@ async fn test_calc_hf() -> eyre::Result<()> {
         let (hf, _) = &mut *cache.health_factors.write().await;
         *hf = Array1::from_vec(vec![0.0]);
 
-        let collaterals = &*cache.collateral.read().await;
+        let collaterals = &*cache.collateral.read().await.to_vec();
         let (col_row, _, _) = &mut *collaterals
             .get(0)
             .ok_or_else(|| eyre!("row = 0 not found in collateral"))?
@@ -1202,7 +1208,7 @@ async fn test_calc_hf() -> eyre::Result<()> {
                 .to_scaled(cache.liquidity.read().await.0[2].index),
         ]);
 
-        let borrowed = &*cache.borrowed.read().await;
+        let borrowed = cache.borrowed.read().await.to_vec();
         let (bor_row, _, _) = &mut *borrowed
             .get(0)
             .ok_or_else(|| eyre!("row = 0 not found in borrowed"))?
@@ -1260,8 +1266,16 @@ async fn test_calc_hf() -> eyre::Result<()> {
             .to_scaled(cache.liquidity.read().await.0[2].index);
 
         let collaterals = &mut *cache.collateral.write().await;
-        collaterals.push(RwLock::new((Array1::from_vec(vec![col, col2, col3]), 0, 0)));
-        collaterals.push(RwLock::new((Array1::from_vec(vec![col, col2, col3]), 0, 0)));
+        collaterals.push(Arc::new(RwLock::new((
+            Array1::from_vec(vec![col, col2, col3]),
+            0,
+            0,
+        ))));
+        collaterals.push(Arc::new(RwLock::new((
+            Array1::from_vec(vec![col, col2, col3]),
+            0,
+            0,
+        ))));
         let (col_row, _, _) = &mut *collaterals
             .get(0)
             .ok_or_else(|| eyre!("row = 0 not found in collateral"))?
@@ -1279,16 +1293,16 @@ async fn test_calc_hf() -> eyre::Result<()> {
             .to_scaled(cache.variable_borrow.read().await.0[1].index);
 
         let borrowed = &mut *cache.borrowed.write().await;
-        borrowed.push(RwLock::new((
+        borrowed.push(Arc::new(RwLock::new((
             Array1::from_vec(vec![bor, bor2, U256::default()]),
             0,
             0,
-        )));
-        borrowed.push(RwLock::new((
+        ))));
+        borrowed.push(Arc::new(RwLock::new((
             Array1::from_vec(vec![bor, bor2, U256::default()]),
             0,
             0,
-        )));
+        ))));
         let (bor_row, _, _) = &mut *borrowed
             .get(0)
             .ok_or_else(|| eyre!("row = 0 not found in borrowed"))?
@@ -1896,7 +1910,7 @@ async fn test_supply() -> eyre::Result<()> {
     };
 
     {
-        let collateral = &*cache.collateral.read().await;
+        let collateral = cache.collateral.read().await.to_vec();
         let (_, last_sync, last_modified) = &mut *collateral
             .get(0)
             .ok_or_else(|| eyre!("can't get row = 0 from collateral"))?
@@ -2163,7 +2177,7 @@ async fn test_listen_sync() -> eyre::Result<()> {
         .to_scaled(cache.variable_borrow.read().await.0[2].index);
 
     {
-        let collaterals = &*cache.collateral.read().await;
+        let collaterals = cache.collateral.read().await.to_vec();
         let (col, _, _) = &mut *collaterals
             .get(0)
             .ok_or_else(|| eyre::eyre!("no collaterals"))?
@@ -2171,7 +2185,7 @@ async fn test_listen_sync() -> eyre::Result<()> {
             .await;
         *col = Array1::from_vec(vec![col1, col2, col3]);
 
-        let borrowed = &*cache.borrowed.read().await;
+        let borrowed = cache.borrowed.read().await.to_vec();
         let (bor, _, _) = &mut *borrowed
             .get(0)
             .ok_or_else(|| eyre::eyre!("no borrowed"))?
@@ -2277,7 +2291,7 @@ async fn test_hf_calc() -> eyre::Result<()> {
         let (lt, _) = &mut *cache.liquidation_threshold.write().await;
         *lt = Array1::from_vec(vec![0.78, 0.8, 0.75]);
 
-        let collaterals = &*cache.collateral.read().await;
+        let collaterals = cache.collateral.read().await.to_vec();
         let (col, _, _) = &mut *collaterals
             .get(0)
             .ok_or_else(|| eyre::eyre!("no collaterals"))?
@@ -2292,7 +2306,7 @@ async fn test_hf_calc() -> eyre::Result<()> {
             .await;
         *col = Array1::from_vec(vec![col4, col5, col6]);
 
-        let borrowed = &*cache.borrowed.read().await;
+        let borrowed = cache.borrowed.read().await.to_vec();
         let (bor, _, _) = &mut *borrowed
             .get(0)
             .ok_or_else(|| eyre::eyre!("no borrowed"))?
@@ -2488,7 +2502,7 @@ async fn test_withdraw() -> eyre::Result<()> {
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
 
     {
-        let collateral = &*cache.collateral.read().await;
+        let collateral = cache.collateral.read().await.to_vec();
         let (row, _, _) = &mut *collateral
             .get(0)
             .ok_or_else(|| eyre!("can't get row = 0 from collateral"))?
@@ -2573,7 +2587,7 @@ async fn test_withdraw() -> eyre::Result<()> {
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
 
     {
-        let reserve = &*cache.reserve.read().await;
+        let reserve = cache.reserve.read().await.to_vec();
         let (res, _, _) = &mut *reserve
             .get(0)
             .ok_or_else(|| eyre!("can't get row = 0 from collateral"))?
@@ -2742,7 +2756,7 @@ async fn test_withdraw() -> eyre::Result<()> {
     };
 
     {
-        let collateral = &*cache.collateral.read().await;
+        let collateral = cache.collateral.read().await.to_vec();
         let (_, _, last_modified) = &mut *collateral
             .get(0)
             .ok_or_else(|| eyre!("can't get row = 0 from collateral"))?
@@ -2922,7 +2936,7 @@ async fn test_borrow() -> eyre::Result<()> {
     let (decimals, _) = &*cache.decimals.read().await;
 
     {
-        let borrowed = &*cache.borrowed.read().await;
+        let borrowed = cache.borrowed.read().await.to_vec();
         let (bor, _, _) = &mut *borrowed
             .get(0)
             .ok_or_else(|| eyre!("can't get row = 0 from borrowed"))?
@@ -3073,7 +3087,7 @@ async fn test_borrow() -> eyre::Result<()> {
     };
 
     {
-        let borrowed = &*cache.borrowed.read().await;
+        let borrowed = cache.borrowed.read().await.to_vec();
         let (_, _, last_modified) = &mut *borrowed
             .get(0)
             .ok_or_else(|| eyre!("can't get row = 0 from borrowed"))?
@@ -3249,7 +3263,7 @@ async fn test_repay() -> eyre::Result<()> {
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
 
     {
-        let borrowed = &*cache.borrowed.read().await;
+        let borrowed = cache.borrowed.read().await.to_vec();
         let (bor, _, _) = &mut *borrowed
             .get(0)
             .ok_or_else(|| eyre!("can't get row = 0 from borrowed"))?
@@ -3388,7 +3402,7 @@ async fn test_repay() -> eyre::Result<()> {
     };
 
     {
-        let borrowed = &*cache.borrowed.read().await;
+        let borrowed = cache.borrowed.read().await.to_vec();
         let (_, _, last_modified) = &mut *borrowed
             .get(0)
             .ok_or_else(|| eyre!("can't get row = 0 from borrowed"))?
@@ -3561,7 +3575,7 @@ async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
 
     {
-        let reserve = &*cache.reserve.read().await;
+        let reserve = cache.reserve.read().await.to_vec();
         let (res, _, _) = &mut *reserve
             .get(0)
             .ok_or_else(|| eyre!("can't get row = 0 from reserve"))?
@@ -3694,7 +3708,7 @@ async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
     };
 
     {
-        let reserve = &*cache.reserve.read().await;
+        let reserve = cache.reserve.read().await.to_vec();
         let (_, _, last_modified) = &mut *reserve
             .get(0)
             .ok_or_else(|| eyre!("can't get row = 0 from reserve"))?
@@ -3867,7 +3881,7 @@ async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
 
     {
-        let collateral = &*cache.collateral.read().await;
+        let collateral = cache.collateral.read().await.to_vec();
         let (col, _, _) = &mut *collateral
             .get(0)
             .ok_or_else(|| eyre!("can't get row = 0 from collateral"))?
@@ -4000,7 +4014,7 @@ async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
     };
 
     {
-        let reserve = &*cache.reserve.read().await;
+        let reserve = cache.reserve.read().await.to_vec();
         let (_, _, last_modified) = &mut *reserve
             .get(0)
             .ok_or_else(|| eyre!("can't get row = 0 from reserve"))?
@@ -4178,7 +4192,7 @@ async fn test_liquidation_call() -> eyre::Result<()> {
     let (decimal, _) = &*cache.decimals.read().await;
 
     {
-        let collateral = &*cache.collateral.read().await;
+        let collateral = cache.collateral.read().await.to_vec();
         let (col, _, _) = &mut *collateral
             .get(0)
             .ok_or_else(|| eyre!("can't get row = 0 from collateral"))?
@@ -4192,7 +4206,7 @@ async fn test_liquidation_call() -> eyre::Result<()> {
             U256::default(),
         ]);
 
-        let borrowed = &*cache.borrowed.read().await;
+        let borrowed = cache.borrowed.read().await.to_vec();
         let (bor, _, _) = &mut *borrowed
             .get(0)
             .ok_or_else(|| eyre!("can't get row = 0 from borrowed"))?
@@ -4366,7 +4380,7 @@ async fn test_liquidation_call() -> eyre::Result<()> {
     };
 
     {
-        let borrowed = &*cache.borrowed.read().await;
+        let borrowed = cache.borrowed.read().await.to_vec();
         let (_, _, last_modified) = &mut *borrowed
             .get(0)
             .ok_or_else(|| eyre!("can't get row = 0 from borrowed"))?

@@ -19,7 +19,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
-use tokio::task;
+use tokio::{task, time};
 use tokio::time::sleep;
 
 const AAVE: &str = "0x1Ac54C113cefD1792CbFcF41B711824d657eb61D";
@@ -782,59 +782,60 @@ impl DataProvider for DummyDataProvider {
         F: Fn(Vec<f64>) -> Fut + Send + 'static,
         Fut: Future<Output = eyre::Result<()>> + Send,
     {
-        sleep(Duration::from_secs(3)).await;
+        let mut interval = time::interval(Duration::from_secs(3));
+        loop {
+            interval.tick().await;
 
-        let mut prices = vec![];
-        for (idx, token) in tokens.iter().enumerate() {
-            let current = match token {
-                ps if *ps == Address::from_str(AAVE)? => {
-                    let count = {
-                        let mut count = self.listen_price_update_call_counter.lock().await;
-                        *count += 1;
-                        *count
-                    };
+            let mut prices = vec![];
+            for (idx, token) in tokens.iter().enumerate() {
+                let current = match token {
+                    ps if *ps == Address::from_str(AAVE)? => {
+                        let count = {
+                            let mut count = self.listen_price_update_call_counter.lock().await;
+                            *count += 1;
+                            *count
+                        };
 
-                    match count {
-                        1 => 161_230_000_000_000_000_0000_i128,
-                        2 => 131_230_000_000_000_000_0000_i128,
-                        _ => 171_230_000_000_000_000_0000_i128,
+                        match count {
+                            1 => 161_230_000_000_000_000_0000_i128,
+                            2 => 131_230_000_000_000_000_0000_i128,
+                            _ => 171_230_000_000_000_000_0000_i128,
+                        }
                     }
-                }
-                ps if *ps == Address::from_str(USDC)? => {
-                    let count = {
-                        let mut count = self.listen_price_update_call_counter2.lock().await;
-                        *count += 1;
-                        *count
-                    };
+                    ps if *ps == Address::from_str(USDC)? => {
+                        let count = {
+                            let mut count = self.listen_price_update_call_counter2.lock().await;
+                            *count += 1;
+                            *count
+                        };
 
-                    match count {
-                        1 => 261_230_000_0_i128,
-                        2 => 231_230_000_0_i128,
-                        _ => 281_230_000_0_i128,
+                        match count {
+                            1 => 261_230_000_0_i128,
+                            2 => 231_230_000_0_i128,
+                            _ => 281_230_000_0_i128,
+                        }
                     }
-                }
-                ps if *ps == Address::from_str(DAI)? => {
-                    let count = {
-                        let mut count = self.listen_price_update_call_counter3.lock().await;
-                        *count += 1;
-                        *count
-                    };
+                    ps if *ps == Address::from_str(DAI)? => {
+                        let count = {
+                            let mut count = self.listen_price_update_call_counter3.lock().await;
+                            *count += 1;
+                            *count
+                        };
 
-                    match count {
-                        1 => 361_230_000_000_000_0_i128,
-                        2 => 311_230_000_000_000_0_i128,
-                        _ => 401_230_000_000_000_0_i128,
+                        match count {
+                            1 => 361_230_000_000_000_0_i128,
+                            2 => 311_230_000_000_000_0_i128,
+                            _ => 401_230_000_000_000_0_i128,
+                        }
                     }
-                }
-                _ => return Err(eyre!("token = {:?} not found", token)),
-            };
+                    _ => return Err(eyre!("token = {:?} not found", token)),
+                };
 
-            prices.push(U256::from(current).as_f64(price_decimals[idx]));
+                prices.push(U256::from(current).as_f64(price_decimals[idx]));
+            }
+
+            callback(prices).await?;
         }
-
-        callback(prices).await?;
-
-        Ok(())
     }
 
     async fn get_user_account_data(&self, user: &Address) -> eyre::Result<UserAccountData> {
@@ -939,11 +940,11 @@ async fn test_events() -> eyre::Result<()> {
             .to_scaled(1054.as_u256(24));
 
         let reserves = &mut *expected.reserve.write().await;
-        reserves.push(RwLock::new((
+        reserves.push(Arc::new(RwLock::new((
             Array1::from_vec(vec![res1, U256::default(), U256::default()]),
             now,
             now,
-        )));
+        ))));
 
         let mut col2 = 2
             .as_u256_decimal_6()
@@ -981,11 +982,11 @@ async fn test_events() -> eyre::Result<()> {
             .to_scaled(1029.as_u256(24));
 
         let collaterals = &mut *expected.collateral.write().await;
-        collaterals.push(RwLock::new((
+        collaterals.push(Arc::new(RwLock::new((
             Array1::from_vec(vec![U256::default(), col2, col3]),
             now,
             now,
-        )));
+        ))));
 
         let col_matrix = &mut *expected.collateral_matrix.write().await;
         *col_matrix =
@@ -1048,11 +1049,11 @@ async fn test_events() -> eyre::Result<()> {
             .to_scaled(1033.as_u256(24));
 
         let borroweds = &mut *expected.borrowed.write().await;
-        borroweds.push(RwLock::new((
+        borroweds.push(Arc::new(RwLock::new((
             Array1::from_vec(vec![bor1, bor2, bor3]),
             now,
             now,
-        )));
+        ))));
 
         let bor_matrix = &mut *expected.borrowed_matrix.write().await;
         *bor_matrix = Array2::from_shape_vec(
@@ -1119,14 +1120,14 @@ async fn test_events() -> eyre::Result<()> {
     }
 
     {
-        let reserves = &*cache.reserve.read().await;
+        let reserves = cache.reserve.read().await.to_vec();
         let (res, last_sync, last_modified) = &*reserves
             .get(0)
             .ok_or_else(|| eyre!("can't get row = 0 from reserves"))?
             .write()
             .await;
 
-        let reserves_expected = &*expected.reserve.read().await;
+        let reserves_expected = expected.reserve.read().await.to_vec();
         let (res_expected, last_sync_expected, last_modified_expected) = &*reserves_expected
             .get(0)
             .ok_or_else(|| eyre!("can't get row = 0 from reserves expected"))?
@@ -1139,14 +1140,14 @@ async fn test_events() -> eyre::Result<()> {
     }
 
     {
-        let collaterals = &*cache.collateral.read().await;
+        let collaterals = cache.collateral.read().await.to_vec();
         let (col, last_sync, last_modified) = &*collaterals
             .get(0)
             .ok_or_else(|| eyre!("can't get row = 0 from collaterals"))?
             .write()
             .await;
 
-        let collaterals_expected = &*expected.collateral.read().await;
+        let collaterals_expected = expected.collateral.read().await.to_vec();
         let (col_expected, last_sync_expected, last_modified_expected) = &*collaterals_expected
             .get(0)
             .ok_or_else(|| eyre!("can't get row = 0 from collateral expected"))?
@@ -1166,14 +1167,14 @@ async fn test_events() -> eyre::Result<()> {
     }
 
     {
-        let borrowed = &*cache.borrowed.read().await;
+        let borrowed = cache.borrowed.read().await.to_vec();
         let (bor, last_sync, last_modified) = &*borrowed
             .get(0)
             .ok_or_else(|| eyre!("can't get row = 0 from borrowed"))?
             .write()
             .await;
 
-        let borrowed_expected = &*expected.borrowed.read().await;
+        let borrowed_expected = expected.borrowed.read().await.to_vec();
         let (bor_expected, last_sync_expected, last_modified_expected) = &*borrowed_expected
             .get(0)
             .ok_or_else(|| eyre!("can't get row = 0 from borrowed expected"))?
