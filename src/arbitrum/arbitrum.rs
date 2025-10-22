@@ -37,6 +37,7 @@ use tracing::{debug, error, info};
 
 // antonanohin@gmail.com
 pub const WS_URL: &str = "wss://arb-mainnet.g.alchemy.com/v2/7txxkMJILUjSSkDIHoJ8Q";
+pub const RPC_URL: &str = "https://arb1.arbitrum.io/rpc";
 
 const L2_POOL_ADDRESS: &str = "0x794a61358D6845594F94dc1DB02A252b5b4814aD";
 const AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS: &str = "0x14496b405D62c24F91f04Cda1c69Dc526D56fDE5";
@@ -304,27 +305,27 @@ where
     pub(in crate::arbitrum) aave_oracle: IAaveOracleInstance<P>,
     pub(in crate::arbitrum) aave_l2_pool: IL2PoolInstance<P>,
     pub(in crate::arbitrum) provider: P,
+    pub(in crate::arbitrum) rpc_provider: P,
 }
 
 impl<P> AaveDataProvider<P>
 where
     P: Provider + Clone + Send + Sync + 'static,
 {
-    pub fn new(provider: &P) -> eyre::Result<Self> {
+    pub fn new(provider: &P, rpc_provider: &P) -> eyre::Result<Self> {
         let aave_protocol_data_provider = IAaveProtocolDataProvider::new(
             AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS.parse()?,
-            provider.clone(),
+            rpc_provider.clone(),
         );
-
-        let aave_oracle = IAaveOracle::new(AAVE_ORACLE_ADDRESS.parse()?, provider.clone());
-
-        let aave_l2_pool = IL2Pool::new(L2_POOL_ADDRESS.parse()?, provider.clone());
+        let aave_oracle = IAaveOracle::new(AAVE_ORACLE_ADDRESS.parse()?, rpc_provider.clone());
+        let aave_l2_pool = IL2Pool::new(L2_POOL_ADDRESS.parse()?, rpc_provider.clone());
 
         Ok(Self {
             aave_protocol_data_provider,
             aave_oracle,
             aave_l2_pool,
             provider: provider.clone(),
+            rpc_provider: rpc_provider.clone(),
         })
     }
 }

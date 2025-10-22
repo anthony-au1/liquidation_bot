@@ -4,10 +4,10 @@ use crate::arbitrum::arbitrum::IL2Pool::{
     ReserveUsedAsCollateralDisabled, ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
 use crate::arbitrum::arbitrum::{
-    liquidation, liquidation_lookup, liquidation_threshold_update, listen_events, listen_hf_calc, listen_prices_update, listen_sync, setup,
-    AaveEvents, Cache, DataProvider, F64Converter, HFRequest, Index, RayOperations,
-    ReserveData, RqDate, Scaler, SyncRequest, SyncTarget,
-    TokenDetails, UserAccountData, UserData, UserReserveData, UserSettings,
+    AaveEvents, Cache, DataProvider, F64Converter, HFRequest, Index, RayOperations, ReserveData,
+    RqDate, Scaler, SyncRequest, SyncTarget, TokenDetails, UserAccountData, UserData,
+    UserReserveData, UserSettings, liquidation, liquidation_lookup, liquidation_threshold_update,
+    listen_events, listen_hf_calc, listen_prices_update, listen_sync, setup,
 };
 use crate::arbitrum::events::{
     borrow, create_user, liquidation_call, repay, reserve_data_updated,
@@ -20,17 +20,22 @@ use bitvec::bitvec;
 use bitvec::order::Lsb0;
 use bitvec::prelude::BitVec;
 use chrono::Utc;
-use eyre::eyre;
+use circuitbreaker_rs::{CircuitBreaker, DefaultPolicy};
+use eyre::{ErrReport, eyre};
 use ndarray::{Array1, Array2};
 use std::collections::HashMap;
-use std::fmt::Debug;
+use std::error::Error;
+use std::fmt;
+use std::fmt::{Debug, Display, Formatter};
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::mpsc::channel;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
+use tokio::sync::mpsc::channel;
 use tokio::task;
 use tokio::time::sleep;
+use tokio_retry::Retry;
+use tokio_retry::strategy::{FixedInterval, jitter};
 
 trait F64Helper: F64Converter {
     fn as_f64_decimal_18(&self) -> f64;
@@ -4766,4 +4771,129 @@ async fn test_lq_lookup() -> eyre::Result<()> {
     sleep(Duration::from_secs(1)).await;
 
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct Connection(bool);
+struct Api {
+    connection: Connection,
+}
+struct Provider {
+    main_api: Api,
+    api: Vec<(CircuitBreaker<DefaultPolicy, ApiError>, Api)>,
+    api2: Vec<(CircuitBreaker<DefaultPolicy, ApiError>, Api)>,
+}
+
+impl Api {
+    fn new(connection: Connection) -> Self {
+        Self { connection }
+    }
+
+    async fn call(&self) -> eyre::Result<&'static str> {
+        if self.connection.0 {
+            Ok("called")
+        } else {
+            Err(eyre!("failed"))
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ApiError(String);
+
+impl Display for ApiError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "Service error: {}", self.0)
+    }
+}
+
+impl Error for ApiError {}
+impl From<ErrReport> for ApiError {
+    fn from(value: ErrReport) -> Self {
+        Self(value.to_string())
+    }
+}
+
+fn build_breaker() -> CircuitBreaker<DefaultPolicy, ApiError> {
+    CircuitBreaker::<DefaultPolicy, ApiError>::builder()
+        .failure_threshold(0.5)
+        .min_throughput(5)
+        .consecutive_failures(3)
+        .cooldown(Duration::from_secs(5))
+        .probe_interval(2)
+        .build()
+}
+
+#[tokio::test]
+async fn test_providers() -> eyre::Result<()> {
+    let main_connection = Connection(false);
+    let connection = Connection(false);
+    let connection2 = Connection(false);
+    let connection3 = Connection(true);
+
+    let main_api = Api::new(main_connection);
+
+    let api = vec![
+        (build_breaker(), Api::new(connection.clone())),
+        (build_breaker(), Api::new(connection2.clone())),
+        (build_breaker(), Api::new(connection3.clone())),
+    ];
+
+    let api2 = vec![
+        (build_breaker(), Api::new(connection)),
+        (build_breaker(), Api::new(connection2)),
+        (build_breaker(), Api::new(connection3)),
+    ];
+
+    let provider = Arc::new(Provider {
+        main_api,
+        api,
+        api2,
+    });
+
+    let result = provider.main_api.call().await;
+
+    if result.is_ok() {
+        println!("test_providers: main api Ok");
+        return Ok(());
+    }
+
+    // let strategy = FixedInterval::from_millis(10_000).map(jitter).take(3);
+    let strategy = FixedInterval::from_millis(10_000).take(3);
+    for (idx, (breaker, api)) in provider.api.iter().enumerate() {
+        let start = Instant::now();
+        let result = Retry::spawn(strategy.clone(), || async {
+            println!("test_providers: start api = {}", idx);
+
+            let r = breaker
+                .call_async(|| async {
+                    let res = api.call().await?;
+                    Ok(res)
+                })
+                .await;
+
+            println!("test_providers: end api = {}, is_ok = {}", idx, r.is_ok());
+
+            r
+        })
+        .await;
+        let duration = start.elapsed();
+
+        if result.is_ok() {
+            println!(
+                "test_providers: api = {}, duration = {}, Ok",
+                idx,
+                duration.as_secs_f64()
+            );
+            return Ok(());
+        }
+
+        println!(
+            "test_providers: api = {}, duration = {}, Failed",
+            idx,
+            duration.as_secs_f64()
+        );
+    }
+
+    Err(eyre::eyre!("failed test"))
 }

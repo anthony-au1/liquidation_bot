@@ -27,6 +27,7 @@ where
 {
     pub cache: Arc<Cache>,
     pub provider: Arc<P>,
+    pub rpc_provider: Arc<P>,
 }
 
 #[derive(Serialize)]
@@ -764,7 +765,7 @@ where
     P: Provider + Clone + Send + Sync + 'static,
 {
     let data_provider = Arc::new(
-        AaveDataProvider::new(&state.provider)
+        AaveDataProvider::new(&state.provider, &state.rpc_provider)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:?}")))?,
     );
     let uad = data_provider
@@ -885,7 +886,7 @@ where
     P: Provider + Clone + Send + Sync + 'static,
 {
     let data_provider = Arc::new(
-        AaveDataProvider::new(&state.provider)
+        AaveDataProvider::new(&state.provider, &state.rpc_provider)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:?}")))?,
     );
 

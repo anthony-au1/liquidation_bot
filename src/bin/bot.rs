@@ -1,15 +1,13 @@
 extern crate core;
 
-use liquidation_bot;
-use std::panic;
-
 use alloy::providers::{ProviderBuilder, WsConnect};
+use alloy::transports::http::reqwest::Url;
 use axum::routing::get;
 use axum::Router;
 use clap::{Parser, Subcommand};
-use console_subscriber::{init, ConsoleLayer};
-use liquidation_bot::arbitrum::arbitrum::AaveDataProvider;
+use liquidation_bot;
 use liquidation_bot::arbitrum::arbitrum::{start, Cache, WS_URL};
+use liquidation_bot::arbitrum::arbitrum::{AaveDataProvider, RPC_URL};
 use liquidation_bot::arbitrum::stats::{
     get_borrowed_all_state, get_borrowed_matrix_row_state, get_borrowed_matrix_state, get_borrowed_state,
     get_collateral_all_state, get_collateral_matrix_row_state, get_collateral_matrix_state,
@@ -20,6 +18,7 @@ use liquidation_bot::arbitrum::stats::{
     get_user_state, get_users_state, get_variable_borrow_index_state, get_variable_borrow_state,
     AppState,
 };
+use std::panic;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing::{error, info};
@@ -112,11 +111,14 @@ async fn main() -> eyre::Result<()> {
             let provider = ProviderBuilder::new()
                 .connect_ws(WsConnect::new(WS_URL))
                 .await?;
+            let rpc_provider = ProviderBuilder::new().connect_http(Url::parse(RPC_URL)?);
+
             let cache = Arc::new(Cache::default());
 
             let state = AppState {
                 cache: cache.clone(),
                 provider: Arc::new(provider.clone()),
+                rpc_provider: Arc::new(rpc_provider.clone()),
             };
 
             let app = Router::new()
@@ -160,7 +162,7 @@ async fn main() -> eyre::Result<()> {
                 .route("/test_probe/{window_size}", get(get_test_probe_state))
                 .with_state(state);
             let listener = TcpListener::bind("0.0.0.0:3000").await?;
-            let data_provider = Arc::new(AaveDataProvider::new(&provider)?);
+            let data_provider = Arc::new(AaveDataProvider::new(&provider, &rpc_provider)?);
 
             tokio::select! {
                 res = axum::serve(listener, app) => {
