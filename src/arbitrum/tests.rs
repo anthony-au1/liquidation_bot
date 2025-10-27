@@ -4,10 +4,11 @@ use crate::arbitrum::arbitrum::IL2Pool::{
     ReserveUsedAsCollateralDisabled, ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
 use crate::arbitrum::arbitrum::{
-    AaveEvents, Cache, DataProvider, F64Converter, HFRequest, Index, RayOperations, ReserveData,
-    RqDate, Scaler, SyncRequest, SyncTarget, TokenDetails, UserAccountData, UserData,
-    UserReserveData, UserSettings, liquidation, liquidation_lookup, liquidation_threshold_update,
-    listen_events, listen_hf_calc, listen_prices_update, listen_sync, setup,
+    build_breaker, liquidation, liquidation_lookup, liquidation_threshold_update, listen_events, listen_hf_calc, listen_prices_update, listen_sync,
+    setup, AaveEvents, ApiError, Cache, DataProvider, F64Converter, HFRequest, Index,
+    RayOperations, ReserveData, RqDate, Scaler, SyncRequest,
+    SyncTarget, TokenDetails, UserAccountData, UserData, UserReserveData,
+    UserSettings,
 };
 use crate::arbitrum::events::{
     borrow, create_user, liquidation_call, repay, reserve_data_updated,
@@ -21,21 +22,19 @@ use bitvec::order::Lsb0;
 use bitvec::prelude::BitVec;
 use chrono::Utc;
 use circuitbreaker_rs::{CircuitBreaker, DefaultPolicy};
-use eyre::{ErrReport, eyre};
+use eyre::eyre;
 use ndarray::{Array1, Array2};
 use std::collections::HashMap;
-use std::error::Error;
-use std::fmt;
-use std::fmt::{Debug, Display, Formatter};
+use std::fmt::Debug;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
 use tokio::sync::mpsc::channel;
+use tokio::sync::RwLock;
 use tokio::task;
 use tokio::time::sleep;
+use tokio_retry::strategy::FixedInterval;
 use tokio_retry::Retry;
-use tokio_retry::strategy::{FixedInterval, jitter};
 
 trait F64Helper: F64Converter {
     fn as_f64_decimal_18(&self) -> f64;
@@ -4798,32 +4797,6 @@ impl Api {
     }
 }
 
-#[derive(Debug)]
-struct ApiError(String);
-
-impl Display for ApiError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "Service error: {}", self.0)
-    }
-}
-
-impl Error for ApiError {}
-impl From<ErrReport> for ApiError {
-    fn from(value: ErrReport) -> Self {
-        Self(value.to_string())
-    }
-}
-
-fn build_breaker() -> CircuitBreaker<DefaultPolicy, ApiError> {
-    CircuitBreaker::<DefaultPolicy, ApiError>::builder()
-        .failure_threshold(0.5)
-        .min_throughput(5)
-        .consecutive_failures(3)
-        .cooldown(Duration::from_secs(5))
-        .probe_interval(2)
-        .build()
-}
-
 #[tokio::test]
 async fn test_providers() -> eyre::Result<()> {
     let main_connection = Connection(false);
@@ -4867,7 +4840,8 @@ async fn test_providers() -> eyre::Result<()> {
 
             let r = breaker
                 .call_async(|| async {
-                    let res = api.call().await?;
+                    let res = api.call().await
+                        .map_err(|e| ApiError::new(format!("{e:?}")))?;
                     Ok(res)
                 })
                 .await;

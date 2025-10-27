@@ -1,6 +1,7 @@
 use crate::arbitrum::arbitrum::{
-    AaveDataProvider, Cache, DataProvider, F64Converter, Index, RayOperations, ReserveData, Scaler,
-    UserReserveData,
+    build_breaker, AaveDataProvider, Cache, DataProvider,
+    F64Converter, IAaveOracle, IAaveProtocolDataProvider, IL2Pool, Index, RayOperations,
+    ReserveData, Scaler, UserReserveData, AAVE_ORACLE_ADDRESS, AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS, L2_POOL_ADDRESS,
 };
 use alloy::providers::Provider;
 use alloy::transports::http::reqwest::StatusCode;
@@ -26,8 +27,12 @@ where
     P: Provider + Clone + Send + Sync + 'static,
 {
     pub cache: Arc<Cache>,
-    pub provider: Arc<P>,
-    pub rpc_provider: Arc<P>,
+    pub provider: P,
+    pub rpc_provider: P,
+    pub pokt_provider: P,
+    pub grove_provider: P,
+    pub drpc_provider: P,
+    pub ankr_provider: P,
 }
 
 #[derive(Serialize)]
@@ -94,6 +99,110 @@ impl IndexRate {
     fn new(index: String, rate: String) -> Self {
         Self { index, rate }
     }
+}
+
+async fn build_data_provider<P>(
+    provider: &P,
+    rpc_provider: &P,
+    pokt_provider: &P,
+    grove_provider: &P,
+    drpc_provider: &P,
+    ankr_provider: &P,
+) -> eyre::Result<AaveDataProvider<P>>
+where
+    P: Provider + Clone + Send + Sync + 'static,
+{
+    Ok(AaveDataProvider {
+        aave_protocol_data_provider: IAaveProtocolDataProvider::new(
+            AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS.parse()?,
+            rpc_provider.clone(),
+        ),
+        aave_oracle: IAaveOracle::new(AAVE_ORACLE_ADDRESS.parse()?, rpc_provider.clone()),
+        aave_l2_pool: IL2Pool::new(L2_POOL_ADDRESS.parse()?, rpc_provider.clone()),
+        provider: provider.clone(),
+        aave_protocol_data_provider_fallback: vec![
+            (
+                build_breaker(),
+                IAaveProtocolDataProvider::new(
+                    AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS.parse()?,
+                    rpc_provider.clone(),
+                ),
+            ),
+            (
+                build_breaker(),
+                IAaveProtocolDataProvider::new(
+                    AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS.parse()?,
+                    pokt_provider.clone(),
+                ),
+            ),
+            (
+                build_breaker(),
+                IAaveProtocolDataProvider::new(
+                    AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS.parse()?,
+                    grove_provider.clone(),
+                ),
+            ),
+            (
+                build_breaker(),
+                IAaveProtocolDataProvider::new(
+                    AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS.parse()?,
+                    drpc_provider.clone(),
+                ),
+            ),
+            (
+                build_breaker(),
+                IAaveProtocolDataProvider::new(
+                    AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS.parse()?,
+                    ankr_provider.clone(),
+                ),
+            ),
+        ],
+        aave_oracle_fallback: vec![
+            (
+                build_breaker(),
+                IAaveOracle::new(AAVE_ORACLE_ADDRESS.parse()?, rpc_provider.clone()),
+            ),
+            (
+                build_breaker(),
+                IAaveOracle::new(AAVE_ORACLE_ADDRESS.parse()?, pokt_provider.clone()),
+            ),
+            (
+                build_breaker(),
+                IAaveOracle::new(AAVE_ORACLE_ADDRESS.parse()?, grove_provider.clone()),
+            ),
+            (
+                build_breaker(),
+                IAaveOracle::new(AAVE_ORACLE_ADDRESS.parse()?, drpc_provider.clone()),
+            ),
+            (
+                build_breaker(),
+                IAaveOracle::new(AAVE_ORACLE_ADDRESS.parse()?, ankr_provider.clone()),
+            ),
+        ],
+        aave_l2_pool_fallback: vec![
+            (
+                build_breaker(),
+                IL2Pool::new(L2_POOL_ADDRESS.parse()?, rpc_provider.clone()),
+            ),
+            (
+                build_breaker(),
+                IL2Pool::new(L2_POOL_ADDRESS.parse()?, pokt_provider.clone()),
+            ),
+            (
+                build_breaker(),
+                IL2Pool::new(L2_POOL_ADDRESS.parse()?, grove_provider.clone()),
+            ),
+            (
+                build_breaker(),
+                IL2Pool::new(L2_POOL_ADDRESS.parse()?, drpc_provider.clone()),
+            ),
+            (
+                build_breaker(),
+                IL2Pool::new(L2_POOL_ADDRESS.parse()?, ankr_provider.clone()),
+            ),
+        ],
+        provider_fallback: vec![],
+    })
 }
 
 async fn get_user(row_num: usize, cache: Arc<Cache>) -> Option<User> {
@@ -764,10 +873,17 @@ pub async fn get_user_account_data_state<P>(
 where
     P: Provider + Clone + Send + Sync + 'static,
 {
-    let data_provider = Arc::new(
-        AaveDataProvider::new(&state.provider, &state.rpc_provider)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:?}")))?,
-    );
+    let data_provider = build_data_provider(
+        &state.provider,
+        &state.rpc_provider,
+        &state.pokt_provider,
+        &state.grove_provider,
+        &state.drpc_provider,
+        &state.ankr_provider,
+    )
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:?}")))?;
+
     let uad = data_provider
         .get_user_account_data(&user)
         .await
@@ -885,10 +1001,18 @@ pub async fn get_test_probe_state<P>(
 where
     P: Provider + Clone + Send + Sync + 'static,
 {
-    let data_provider = Arc::new(
-        AaveDataProvider::new(&state.provider, &state.rpc_provider)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:?}")))?,
-    );
+    let data_provider = build_data_provider(
+        &state.provider,
+        &state.rpc_provider,
+        &state.pokt_provider,
+        &state.grove_provider,
+        &state.drpc_provider,
+        &state.ankr_provider,
+    )
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:?}")))?;
+
+    let data_provider = Arc::new(data_provider);
 
     let hf = {
         let (hf, _) = &*state.cache.health_factors.read().await;
