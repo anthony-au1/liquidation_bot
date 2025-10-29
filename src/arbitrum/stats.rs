@@ -125,7 +125,7 @@ where
                 build_breaker(),
                 IAaveProtocolDataProvider::new(
                     AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS.parse()?,
-                    rpc_provider.clone(),
+                    provider.clone(),
                 ),
             ),
             (
@@ -160,7 +160,7 @@ where
         aave_oracle_fallback: vec![
             (
                 build_breaker(),
-                IAaveOracle::new(AAVE_ORACLE_ADDRESS.parse()?, rpc_provider.clone()),
+                IAaveOracle::new(AAVE_ORACLE_ADDRESS.parse()?, provider.clone()),
             ),
             (
                 build_breaker(),
@@ -182,7 +182,7 @@ where
         aave_l2_pool_fallback: vec![
             (
                 build_breaker(),
-                IL2Pool::new(L2_POOL_ADDRESS.parse()?, rpc_provider.clone()),
+                IL2Pool::new(L2_POOL_ADDRESS.parse()?, provider.clone()),
             ),
             (
                 build_breaker(),

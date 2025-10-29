@@ -182,8 +182,22 @@ async fn main() -> eyre::Result<()> {
                 ),
                 aave_oracle: IAaveOracle::new(AAVE_ORACLE_ADDRESS.parse()?, rpc_provider.clone()),
                 aave_l2_pool: IL2Pool::new(L2_POOL_ADDRESS.parse()?, rpc_provider.clone()),
-                provider,
+                provider: provider.clone(),
                 aave_protocol_data_provider_fallback: vec![
+                    (
+                        build_breaker(),
+                        IAaveProtocolDataProvider::new(
+                            AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS.parse()?,
+                            rpc_provider.clone(),
+                        ),
+                    ),
+                    (
+                        build_breaker(),
+                        IAaveProtocolDataProvider::new(
+                            AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS.parse()?,
+                            provider.clone(),
+                        ),
+                    ),
                     (
                         build_breaker(),
                         IAaveProtocolDataProvider::new(
@@ -227,6 +241,10 @@ async fn main() -> eyre::Result<()> {
                     ),
                     (
                         build_breaker(),
+                        IAaveOracle::new(AAVE_ORACLE_ADDRESS.parse()?, provider.clone()),
+                    ),
+                    (
+                        build_breaker(),
                         IAaveOracle::new(AAVE_ORACLE_ADDRESS.parse()?, pokt_provider.clone()),
                     ),
                     (
@@ -246,6 +264,10 @@ async fn main() -> eyre::Result<()> {
                     (
                         build_breaker(),
                         IL2Pool::new(L2_POOL_ADDRESS.parse()?, rpc_provider.clone()),
+                    ),
+                    (
+                        build_breaker(),
+                        IL2Pool::new(L2_POOL_ADDRESS.parse()?, provider.clone()),
                     ),
                     (
                         build_breaker(),
