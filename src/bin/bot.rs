@@ -1,30 +1,34 @@
 extern crate core;
 
-use liquidation_bot;
-use std::panic;
-
 use alloy::providers::{ProviderBuilder, WsConnect};
-use axum::routing::get;
+use alloy::transports::http::reqwest::Url;
 use axum::Router;
+use axum::routing::get;
 use clap::{Parser, Subcommand};
-use liquidation_bot::arbitrum::arbitrum::AaveDataProvider;
-use liquidation_bot::arbitrum::arbitrum::{start, Cache, WS_URL};
-use liquidation_bot::arbitrum::stats::{
-    get_borrowed_all_state, get_borrowed_matrix_row_state, get_borrowed_matrix_state, get_borrowed_state,
-    get_collateral_all_state, get_collateral_matrix_row_state, get_collateral_matrix_state,
-    get_collateral_state, get_decimals_state, get_full_state, get_health_factor_state,
-    get_health_factors_state, get_liquidation_threshold_state, get_liquidity_index_state,
-    get_liquidity_state, get_price_decimals_state, get_prices_state, get_reserve_all_state,
-    get_reserve_state, get_test_probe_state, get_tokens_state, get_user_account_data_state,
-    get_user_state, get_users_state, get_variable_borrow_index_state, get_variable_borrow_state,
-    AppState,
+use liquidation_bot;
+use liquidation_bot::arbitrum::arbitrum::{
+    AAVE_ORACLE_ADDRESS, AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS, ANKR_URL, Cache, D_RPC_URL,
+    GROVE_URL, IAaveOracle, IAaveProtocolDataProvider, IL2Pool, L2_POOL_ADDRESS, POKT_URL, WS_URL,
+    build_breaker, start,
 };
+use liquidation_bot::arbitrum::arbitrum::{AaveDataProvider, RPC_URL};
+use liquidation_bot::arbitrum::stats::{
+    AppState, get_borrowed_all_state, get_borrowed_matrix_row_state, get_borrowed_matrix_state,
+    get_borrowed_state, get_collateral_all_state, get_collateral_matrix_row_state,
+    get_collateral_matrix_state, get_collateral_state, get_decimals_state, get_full_state,
+    get_health_factor_state, get_health_factors_state, get_liquidation_threshold_state,
+    get_liquidity_index_state, get_liquidity_state, get_price_decimals_state, get_prices_state,
+    get_reserve_all_state, get_reserve_state, get_test_probe_state, get_tokens_state,
+    get_user_account_data_state, get_user_state, get_users_state, get_variable_borrow_index_state,
+    get_variable_borrow_state,
+};
+use std::panic;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing::{error, info};
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::prelude::*;
-use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 /// Liquidation bot command interface
 #[derive(Debug, Parser)]
@@ -48,6 +52,7 @@ enum Commands {
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
     setup_panic_hook();
+    // init();
 
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,liquidation_bot=debug"));
@@ -110,11 +115,22 @@ async fn main() -> eyre::Result<()> {
             let provider = ProviderBuilder::new()
                 .connect_ws(WsConnect::new(WS_URL))
                 .await?;
+            let rpc_provider = ProviderBuilder::new().connect_http(Url::parse(RPC_URL)?);
+            let pokt_provider = ProviderBuilder::new().connect_http(Url::parse(POKT_URL)?);
+            let grove_provider = ProviderBuilder::new().connect_http(Url::parse(GROVE_URL)?);
+            let drpc_provider = ProviderBuilder::new().connect_http(Url::parse(D_RPC_URL)?);
+            let ankr_provider = ProviderBuilder::new().connect_http(Url::parse(ANKR_URL)?);
+
             let cache = Arc::new(Cache::default());
 
             let state = AppState {
                 cache: cache.clone(),
-                provider: Arc::new(provider.clone()),
+                provider: provider.clone(),
+                rpc_provider: rpc_provider.clone(),
+                pokt_provider: pokt_provider.clone(),
+                grove_provider: grove_provider.clone(),
+                drpc_provider: drpc_provider.clone(),
+                ankr_provider: ankr_provider.clone(),
             };
 
             let app = Router::new()
@@ -158,7 +174,120 @@ async fn main() -> eyre::Result<()> {
                 .route("/test_probe/{window_size}", get(get_test_probe_state))
                 .with_state(state);
             let listener = TcpListener::bind("0.0.0.0:3000").await?;
-            let data_provider = Arc::new(AaveDataProvider::new(&provider)?);
+
+            let data_provider = Arc::new(AaveDataProvider {
+                aave_protocol_data_provider: IAaveProtocolDataProvider::new(
+                    AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS.parse()?,
+                    rpc_provider.clone(),
+                ),
+                aave_oracle: IAaveOracle::new(AAVE_ORACLE_ADDRESS.parse()?, rpc_provider.clone()),
+                aave_l2_pool: IL2Pool::new(L2_POOL_ADDRESS.parse()?, rpc_provider.clone()),
+                provider: provider.clone(),
+                aave_protocol_data_provider_fallback: vec![
+                    (
+                        build_breaker(),
+                        IAaveProtocolDataProvider::new(
+                            AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS.parse()?,
+                            rpc_provider.clone(),
+                        ),
+                    ),
+                    (
+                        build_breaker(),
+                        IAaveProtocolDataProvider::new(
+                            AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS.parse()?,
+                            provider.clone(),
+                        ),
+                    ),
+                    (
+                        build_breaker(),
+                        IAaveProtocolDataProvider::new(
+                            AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS.parse()?,
+                            rpc_provider.clone(),
+                        ),
+                    ),
+                    (
+                        build_breaker(),
+                        IAaveProtocolDataProvider::new(
+                            AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS.parse()?,
+                            pokt_provider.clone(),
+                        ),
+                    ),
+                    (
+                        build_breaker(),
+                        IAaveProtocolDataProvider::new(
+                            AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS.parse()?,
+                            grove_provider.clone(),
+                        ),
+                    ),
+                    (
+                        build_breaker(),
+                        IAaveProtocolDataProvider::new(
+                            AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS.parse()?,
+                            drpc_provider.clone(),
+                        ),
+                    ),
+                    (
+                        build_breaker(),
+                        IAaveProtocolDataProvider::new(
+                            AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS.parse()?,
+                            ankr_provider.clone(),
+                        ),
+                    ),
+                ],
+                aave_oracle_fallback: vec![
+                    (
+                        build_breaker(),
+                        IAaveOracle::new(AAVE_ORACLE_ADDRESS.parse()?, rpc_provider.clone()),
+                    ),
+                    (
+                        build_breaker(),
+                        IAaveOracle::new(AAVE_ORACLE_ADDRESS.parse()?, provider.clone()),
+                    ),
+                    (
+                        build_breaker(),
+                        IAaveOracle::new(AAVE_ORACLE_ADDRESS.parse()?, pokt_provider.clone()),
+                    ),
+                    (
+                        build_breaker(),
+                        IAaveOracle::new(AAVE_ORACLE_ADDRESS.parse()?, grove_provider.clone()),
+                    ),
+                    (
+                        build_breaker(),
+                        IAaveOracle::new(AAVE_ORACLE_ADDRESS.parse()?, drpc_provider.clone()),
+                    ),
+                    (
+                        build_breaker(),
+                        IAaveOracle::new(AAVE_ORACLE_ADDRESS.parse()?, ankr_provider.clone()),
+                    ),
+                ],
+                aave_l2_pool_fallback: vec![
+                    (
+                        build_breaker(),
+                        IL2Pool::new(L2_POOL_ADDRESS.parse()?, rpc_provider.clone()),
+                    ),
+                    (
+                        build_breaker(),
+                        IL2Pool::new(L2_POOL_ADDRESS.parse()?, provider.clone()),
+                    ),
+                    (
+                        build_breaker(),
+                        IL2Pool::new(L2_POOL_ADDRESS.parse()?, pokt_provider.clone()),
+                    ),
+                    (
+                        build_breaker(),
+                        IL2Pool::new(L2_POOL_ADDRESS.parse()?, grove_provider.clone()),
+                    ),
+                    (
+                        build_breaker(),
+                        IL2Pool::new(L2_POOL_ADDRESS.parse()?, drpc_provider.clone()),
+                    ),
+                    (
+                        build_breaker(),
+                        IL2Pool::new(L2_POOL_ADDRESS.parse()?, ankr_provider.clone()),
+                    ),
+                ],
+                provider_fallback: vec![],
+            });
 
             tokio::select! {
                 res = axum::serve(listener, app) => {

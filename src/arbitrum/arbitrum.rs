@@ -1,10 +1,8 @@
 use crate::arbitrum::arbitrum::IAaveOracle::IAaveOracleInstance;
 use crate::arbitrum::arbitrum::IAaveProtocolDataProvider::{
-    getReserveDataReturn, getUserReserveDataReturn, IAaveProtocolDataProviderInstance, TokenData,
+    IAaveProtocolDataProviderInstance, TokenData,
 };
-use crate::arbitrum::arbitrum::IL2Pool::{
-    getUserAccountDataReturn, IL2PoolEvents, IL2PoolInstance,
-};
+use crate::arbitrum::arbitrum::IL2Pool::{IL2PoolEvents, IL2PoolInstance};
 use crate::arbitrum::events::{
     borrow, liquidation_call, repay, reserve_data_updated, reserve_used_as_collateral_disabled,
     reserve_used_as_collateral_enabled, supply, withdraw,
@@ -19,23 +17,39 @@ use alloy_primitives::{Sign, I256, U256, U512};
 use async_trait::async_trait;
 use bitvec::prelude::*;
 use chrono::Utc;
+use circuitbreaker_rs::{CircuitBreaker, DefaultPolicy};
 use dashmap::DashMap;
 use eyre::eyre;
 use futures::future::try_join_all;
 use ndarray::{concatenate, Array1, Array2, Axis};
 use std::collections::HashMap;
 use std::default::Default;
+use std::error::Error;
+use std::fmt;
+use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::RwLock;
 use tokio::{task, time, try_join};
+use tokio_retry::strategy::FixedInterval;
+use tokio_retry::Retry;
 use tracing::{debug, error, info};
 
-pub const WS_URL: &str = "wss://arb-mainnet.g.alchemy.com/v2/9DDcCoPPxnq-aSjQ8k79vxfLvrhBAXjQ";
-const L2_POOL_ADDRESS: &str = "0x794a61358D6845594F94dc1DB02A252b5b4814aD";
-const AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS: &str = "0x14496b405D62c24F91f04Cda1c69Dc526D56fDE5";
-const AAVE_ORACLE_ADDRESS: &str = "0xb56c2F0B653B2e0b10C9b928C8580Ac5Df02C7C7";
+// anthony.anokhin@gmail.com
+// pub const WS_URL: &str = "wss://arb-mainnet.g.alchemy.com/v2/9DDcCoPPxnq-aSjQ8k79vxfLvrhBAXjQ";
+
+// antonanohin@gmail.com
+pub const WS_URL: &str = "wss://arb-mainnet.g.alchemy.com/v2/7txxkMJILUjSSkDIHoJ8Q";
+pub const RPC_URL: &str = "https://arb1.arbitrum.io/rpc";
+pub const POKT_URL: &str = "https://arb-pokt.nodies.app";
+pub const GROVE_URL: &str = "https://arbitrum-one.rpc.grove.city/v1/01fdb492";
+pub const D_RPC_URL: &str = "https://arbitrum.drpc.org";
+pub const ANKR_URL: &str = "https://rpc.ankr.com/arbitrum";
+
+pub const L2_POOL_ADDRESS: &str = "0x794a61358D6845594F94dc1DB02A252b5b4814aD";
+pub const AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS: &str = "0x14496b405D62c24F91f04Cda1c69Dc526D56fDE5";
+pub const AAVE_ORACLE_ADDRESS: &str = "0xb56c2F0B653B2e0b10C9b928C8580Ac5Df02C7C7";
 
 sol! {
     #[sol(rpc)]
@@ -291,37 +305,48 @@ impl UserReserveData {
     }
 }
 
+#[derive(Debug)]
+pub struct ApiError(String);
+
+impl Display for ApiError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "Api call error: {}", self.0)
+    }
+}
+
+impl Error for ApiError {}
+
+impl ApiError {
+    pub fn new(msg: impl Into<String>) -> Self {
+        Self(msg.into())
+    }
+}
+
+pub type ApiCircuitBreaker = CircuitBreaker<DefaultPolicy, ApiError>;
+pub fn build_breaker() -> ApiCircuitBreaker {
+    ApiCircuitBreaker::builder()
+        .failure_threshold(0.5)
+        .min_throughput(5)
+        .consecutive_failures(3)
+        .cooldown(Duration::from_secs(5))
+        .probe_interval(2)
+        .build()
+}
+
 pub struct AaveDataProvider<P>
 where
     P: Provider + Clone + Send + Sync + 'static,
 {
-    pub(in crate::arbitrum) aave_protocol_data_provider: IAaveProtocolDataProviderInstance<P>,
-    pub(in crate::arbitrum) aave_oracle: IAaveOracleInstance<P>,
-    pub(in crate::arbitrum) aave_l2_pool: IL2PoolInstance<P>,
-    pub(in crate::arbitrum) provider: P,
-}
+    pub aave_protocol_data_provider: IAaveProtocolDataProviderInstance<P>,
+    pub aave_oracle: IAaveOracleInstance<P>,
+    pub aave_l2_pool: IL2PoolInstance<P>,
+    pub provider: P,
 
-impl<P> AaveDataProvider<P>
-where
-    P: Provider + Clone + Send + Sync + 'static,
-{
-    pub fn new(provider: &P) -> eyre::Result<Self> {
-        let aave_protocol_data_provider = IAaveProtocolDataProvider::new(
-            AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS.parse()?,
-            provider.clone(),
-        );
-
-        let aave_oracle = IAaveOracle::new(AAVE_ORACLE_ADDRESS.parse()?, provider.clone());
-
-        let aave_l2_pool = IL2Pool::new(L2_POOL_ADDRESS.parse()?, provider.clone());
-
-        Ok(Self {
-            aave_protocol_data_provider,
-            aave_oracle,
-            aave_l2_pool,
-            provider: provider.clone(),
-        })
-    }
+    pub aave_protocol_data_provider_fallback:
+        Vec<(ApiCircuitBreaker, IAaveProtocolDataProviderInstance<P>)>,
+    pub aave_oracle_fallback: Vec<(ApiCircuitBreaker, IAaveOracleInstance<P>)>,
+    pub aave_l2_pool_fallback: Vec<(ApiCircuitBreaker, IL2PoolInstance<P>)>,
+    pub provider_fallback: Vec<(ApiCircuitBreaker, P)>,
 }
 
 #[async_trait]
@@ -334,9 +359,47 @@ where
             .aave_protocol_data_provider
             .getAllReservesTokens()
             .call()
-            .await?;
+            .await;
 
-        Ok(token_data)
+        if let Ok(token_data) = token_data {
+            return Ok(token_data);
+        }
+
+        debug!(
+            "get_all_reserves_tokens: main provider error: {:?}",
+            token_data.err().unwrap()
+        );
+
+        let strategy = FixedInterval::from_millis(10_000).take(3);
+        for (idx, (breaker, api)) in self.aave_protocol_data_provider_fallback.iter().enumerate() {
+            let token_data = Retry::spawn(strategy.clone(), || async {
+                let response = breaker
+                    .call_async(|| async {
+                        let res = api
+                            .getAllReservesTokens()
+                            .call()
+                            .await
+                            .map_err(|e| ApiError::new(format!("{e:?}")))?;
+                        Ok(res)
+                    })
+                    .await;
+
+                if let Err(ref e) = response {
+                    debug!("get_all_reserves_tokens: provider {} error: {:?}", idx, e);
+                }
+
+                response
+            })
+            .await;
+
+            if let Ok(token_data) = token_data {
+                return Ok(token_data);
+            }
+        }
+
+        Err(eyre!(
+            "get_all_reserves_tokens: none of providers could find token data"
+        ))
     }
 
     async fn get_source_of_asset(&self, token: &Address) -> eyre::Result<Address> {
@@ -344,9 +407,52 @@ where
             .aave_oracle
             .getSourceOfAsset(token.clone())
             .call()
-            .await?;
+            .await;
 
-        Ok(asset_source)
+        if let Ok(asset_source) = asset_source {
+            return Ok(asset_source);
+        }
+
+        debug!(
+            "get_source_of_asset: main provider for token {}, error: {:?}",
+            token,
+            asset_source.err().unwrap()
+        );
+
+        let strategy = FixedInterval::from_millis(10_000).take(3);
+        for (idx, (breaker, api)) in self.aave_oracle_fallback.iter().enumerate() {
+            let asset_source = Retry::spawn(strategy.clone(), || async {
+                let response = breaker
+                    .call_async(|| async {
+                        let res = api
+                            .getSourceOfAsset(token.clone())
+                            .call()
+                            .await
+                            .map_err(|e| ApiError::new(format!("{e:?}")))?;
+                        Ok(res)
+                    })
+                    .await;
+
+                if let Err(ref e) = response {
+                    debug!(
+                        "get_source_of_asset: provider {}, token {}, error: {:?}",
+                        idx, token, e
+                    );
+                }
+
+                response
+            })
+            .await;
+
+            if let Ok(asset_source) = asset_source {
+                return Ok(asset_source);
+            }
+        }
+
+        Err(eyre!(
+            "get_source_of_asset: none of providers could find asset source for token {}",
+            token
+        ))
     }
 
     async fn listen_events<F, Fut>(&self, callback: F) -> eyre::Result<()>
@@ -356,15 +462,20 @@ where
     {
         let l2_pool = IL2Pool::new(L2_POOL_ADDRESS.parse()?, self.provider.clone());
         let filter = Filter::new().address(l2_pool.address().clone());
-        let mut stream = self.provider.subscribe_logs(&filter).await?;
+        loop {
+            let stream = self.provider.subscribe_logs(&filter).await;
 
-        while let Ok(log) = stream.recv().await {
-            if let Ok(Log { data, .. }) = IL2PoolEvents::decode_log(log.as_ref()) {
-                callback(data).await?;
+            if let Ok(mut stream) = stream {
+                while let Ok(log) = stream.recv().await {
+                    if let Ok(Log { data, .. }) = IL2PoolEvents::decode_log(log.as_ref()) {
+                        callback(data).await?;
+                    }
+                }
             }
-        }
 
-        Ok(())
+            debug!("listen_events: error listening event");
+            tokio::time::sleep(Duration::from_millis(1000)).await;
+        }
     }
 
     async fn get_reserve_configuration_data(&self, token: &Address) -> eyre::Result<f64> {
@@ -372,9 +483,52 @@ where
             .aave_protocol_data_provider
             .getReserveConfigurationData(token.clone())
             .call()
-            .await?;
+            .await;
 
-        Ok(data.liquidationThreshold.as_f64(10_f64.powi(4)))
+        if let Ok(data) = data {
+            return Ok(data.liquidationThreshold.as_f64(10_f64.powi(4)));
+        }
+
+        debug!(
+            "get_reserve_configuration_data: main provider for token {}, error: {:?}",
+            token,
+            data.err().unwrap()
+        );
+
+        let strategy = FixedInterval::from_millis(10_000).take(3);
+        for (idx, (breaker, api)) in self.aave_protocol_data_provider_fallback.iter().enumerate() {
+            let data = Retry::spawn(strategy.clone(), || async {
+                let response = breaker
+                    .call_async(|| async {
+                        let res = api
+                            .getReserveConfigurationData(token.clone())
+                            .call()
+                            .await
+                            .map_err(|e| ApiError::new(format!("{e:?}")))?;
+                        Ok(res)
+                    })
+                    .await;
+
+                if let Err(ref e) = response {
+                    debug!(
+                        "get_reserve_configuration_data: provider {}, token {}, error: {:?}",
+                        idx, token, e
+                    );
+                }
+
+                response
+            })
+            .await;
+
+            if let Ok(data) = data {
+                return Ok(data.liquidationThreshold.as_f64(10_f64.powi(4)));
+            }
+        }
+
+        Err(eyre!(
+            "get_reserve_configuration_data: none of providers could find reserve configuration data for token {}",
+            token
+        ))
     }
 
     async fn get_user_reserve_data(
@@ -382,75 +536,269 @@ where
         token: &Address,
         user: &Address,
     ) -> eyre::Result<UserReserveData> {
-        let getUserReserveDataReturn {
-            currentATokenBalance: current_atoken_balance,
-            currentVariableDebt: current_variable_debt,
-            usageAsCollateralEnabled: usage_as_collateral_enabled,
-            ..
-        } = self
+        let urd = self
             .aave_protocol_data_provider
             .getUserReserveData(token.clone(), user.clone())
             .call()
-            .await?;
+            .await;
 
-        Ok(UserReserveData::new(
-            current_atoken_balance,
-            current_variable_debt,
-            bool::from(usage_as_collateral_enabled),
+        if let Ok(urd) = urd {
+            return Ok(UserReserveData::new(
+                urd.currentATokenBalance,
+                urd.currentVariableDebt,
+                bool::from(urd.usageAsCollateralEnabled),
+            ));
+        }
+
+        debug!(
+            "get_user_reserve_data: main provider for token {} and user {}, error: {:?}",
+            token,
+            user,
+            urd.err().unwrap()
+        );
+
+        let strategy = FixedInterval::from_millis(10_000).take(3);
+        for (idx, (breaker, api)) in self.aave_protocol_data_provider_fallback.iter().enumerate() {
+            let urd = Retry::spawn(strategy.clone(), || async {
+                let response = breaker
+                    .call_async(|| async {
+                        let res = api
+                            .getUserReserveData(token.clone(), user.clone())
+                            .call()
+                            .await
+                            .map_err(|e| ApiError::new(format!("{e:?}")))?;
+                        Ok(res)
+                    })
+                    .await;
+
+                if let Err(ref e) = response {
+                    debug!(
+                        "get_user_reserve_data: provider {}, token {}, user {}, error: {:?}",
+                        idx, token, user, e
+                    );
+                }
+
+                response
+            })
+            .await;
+
+            if let Ok(urd) = urd {
+                return Ok(UserReserveData::new(
+                    urd.currentATokenBalance,
+                    urd.currentVariableDebt,
+                    bool::from(urd.usageAsCollateralEnabled),
+                ));
+            }
+        }
+
+        Err(eyre!(
+            "get_user_reserve_data: none of providers could find user reserve data for token {} and user {}",
+            token,
+            user
         ))
     }
 
     async fn get_reserve_data(&self, token: &Address) -> eyre::Result<ReserveData> {
-        let getReserveDataReturn {
-            liquidityRate: liquidity_rate,
-            variableBorrowRate: variable_borrow_rate,
-            liquidityIndex: liquidity_index,
-            variableBorrowIndex: variable_borrow_index,
-            lastUpdateTimestamp: last_update_timestamp,
-            ..
-        } = self
+        let rd = self
             .aave_protocol_data_provider
             .getReserveData(token.clone())
             .call()
-            .await?;
+            .await;
 
-        Ok(ReserveData::new(
-            liquidity_rate,
-            variable_borrow_rate,
-            liquidity_index,
-            variable_borrow_index,
-            last_update_timestamp,
+        if let Ok(rd) = rd {
+            return Ok(ReserveData::new(
+                rd.liquidityRate,
+                rd.variableBorrowRate,
+                rd.liquidityIndex,
+                rd.variableBorrowIndex,
+                rd.lastUpdateTimestamp,
+            ));
+        }
+
+        debug!(
+            "get_reserve_data: main provider for token {} error: {:?}",
+            token,
+            rd.err().unwrap()
+        );
+
+        let strategy = FixedInterval::from_millis(10_000).take(3);
+        for (idx, (breaker, api)) in self.aave_protocol_data_provider_fallback.iter().enumerate() {
+            let rd = Retry::spawn(strategy.clone(), || async {
+                let response = breaker
+                    .call_async(|| async {
+                        let res = api
+                            .getReserveData(token.clone())
+                            .call()
+                            .await
+                            .map_err(|e| ApiError::new(format!("{e:?}")))?;
+                        Ok(res)
+                    })
+                    .await;
+
+                if let Err(ref e) = response {
+                    debug!(
+                        "get_reserve_data: provider {}, token {}, error: {:?}",
+                        idx, token, e
+                    );
+                }
+
+                response
+            })
+            .await;
+
+            if let Ok(rd) = rd {
+                return Ok(ReserveData::new(
+                    rd.liquidityRate,
+                    rd.variableBorrowRate,
+                    rd.liquidityIndex,
+                    rd.variableBorrowIndex,
+                    rd.lastUpdateTimestamp,
+                ));
+            }
+        }
+
+        Err(eyre!(
+            "get_reserve_data: none of providers could find reserve data for token {}",
+            token
         ))
     }
 
     async fn get_decimals(&self, token: &Address) -> eyre::Result<f64> {
-        let decimals = IERC20Metadata::new(token.clone(), &self.provider)
-            .decimals()
-            .call()
-            .await?;
+        loop {
+            let decimals = IERC20Metadata::new(token.clone(), &self.provider)
+                .decimals()
+                .call()
+                .await;
 
-        Ok(10_f64.powi(decimals as i32))
+            if let Ok(decimals) = decimals {
+                return Ok(10_f64.powi(decimals as i32));
+            }
+
+            error!(
+                "get_decimals: error retrieving decimals for token {}, error: {:?}",
+                token,
+                decimals.err().unwrap()
+            );
+            tokio::time::sleep(Duration::from_millis(1000)).await;
+        }
     }
 
     async fn get_price_decimals(&self, price_source: &Address) -> eyre::Result<f64> {
-        let decimals = IChainlinkAggregator::new(price_source.clone(), &self.provider)
-            .decimals()
-            .call()
-            .await?;
+        loop {
+            let price_decimals = IChainlinkAggregator::new(price_source.clone(), &self.provider)
+                .decimals()
+                .call()
+                .await;
 
-        Ok(10_f64.powi(decimals as i32))
+            if let Ok(price_decimals) = price_decimals {
+                return Ok(10_f64.powi(price_decimals as i32));
+            }
+
+            error!(
+                "get_price_decimals: error retrieving price decimals for price source {}, error: {:?}",
+                price_source,
+                price_decimals.err().unwrap()
+            );
+            tokio::time::sleep(Duration::from_millis(1000)).await;
+        }
     }
 
     async fn get_asset_prices(&self, tokens: Vec<Address>) -> eyre::Result<Vec<U256>> {
-        let prices = self.aave_oracle.getAssetsPrices(tokens).call().await?;
+        let prices = self
+            .aave_oracle
+            .getAssetsPrices(tokens.clone())
+            .call()
+            .await;
 
-        Ok(prices)
+        if let Ok(prices) = prices {
+            return Ok(prices);
+        }
+
+        debug!(
+            "get_asset_prices: main provider error: {:?}",
+            prices.err().unwrap()
+        );
+
+        let strategy = FixedInterval::from_millis(10_000).take(3);
+        for (idx, (breaker, api)) in self.aave_oracle_fallback.iter().enumerate() {
+            let prices = Retry::spawn(strategy.clone(), || async {
+                let response = breaker
+                    .call_async(|| async {
+                        let res = api
+                            .getAssetsPrices(tokens.clone())
+                            .call()
+                            .await
+                            .map_err(|e| ApiError::new(format!("{e:?}")))?;
+                        Ok(res)
+                    })
+                    .await;
+
+                if let Err(ref e) = response {
+                    debug!("get_asset_prices: provider {} error: {:?}", idx, e);
+                }
+
+                response
+            })
+            .await;
+
+            if let Ok(prices) = prices {
+                return Ok(prices);
+            }
+        }
+
+        Err(eyre!(
+            "get_asset_prices: none of providers could find prices for tokens {:?}",
+            tokens
+        ))
     }
 
     async fn get_asset_price(&self, token: &Address) -> eyre::Result<U256> {
-        let price = self.aave_oracle.getAssetPrice(token.clone()).call().await?;
+        let price = self.aave_oracle.getAssetPrice(token.clone()).call().await;
 
-        Ok(price)
+        if let Ok(price) = price {
+            return Ok(price);
+        }
+
+        debug!(
+            "get_asset_price: main provider for token {}, error: {:?}",
+            token,
+            price.err().unwrap()
+        );
+
+        let strategy = FixedInterval::from_millis(10_000).take(3);
+        for (idx, (breaker, api)) in self.aave_oracle_fallback.iter().enumerate() {
+            let price = Retry::spawn(strategy.clone(), || async {
+                let response = breaker
+                    .call_async(|| async {
+                        let res = api
+                            .getAssetPrice(token.clone())
+                            .call()
+                            .await
+                            .map_err(|e| ApiError::new(format!("{e:?}")))?;
+                        Ok(res)
+                    })
+                    .await;
+
+                if let Err(ref e) = response {
+                    debug!(
+                        "get_asset_price: provider {}, token {}, error: {:?}",
+                        idx, token, e
+                    );
+                }
+
+                response
+            })
+            .await;
+
+            if let Ok(price) = price {
+                return Ok(price);
+            }
+        }
+
+        Err(eyre!(
+            "get_asset_price: none of providers could find price for token {}",
+            token
+        ))
     }
 
     async fn listen_prices_update<F, Fut>(
@@ -463,8 +811,10 @@ where
         F: Fn(Vec<f64>) -> Fut + Send + 'static,
         Fut: Future<Output = eyre::Result<()>> + Send,
     {
-        let mut block_stream = self.provider.subscribe_blocks().await?;
-        while let Ok(_) = block_stream.recv().await {
+        let mut interval = time::interval(Duration::from_secs(10));
+        loop {
+            interval.tick().await;
+
             let prices = self
                 .get_asset_prices(tokens.clone())
                 .await?
@@ -474,31 +824,72 @@ where
                 .collect();
             callback(prices).await?;
         }
-
-        Ok(())
     }
 
     async fn get_user_account_data(&self, user: &Address) -> eyre::Result<UserAccountData> {
-        let getUserAccountDataReturn {
-            totalCollateralBase: total_collateral_base,
-            totalDebtBase: total_debt_base,
-            availableBorrowsBase: available_borrows_base,
-            currentLiquidationThreshold: current_liquidation_threshold,
-            ltv,
-            healthFactor: health_factor,
-        } = self
+        let uad = self
             .aave_l2_pool
             .getUserAccountData(user.clone())
             .call()
-            .await?;
+            .await;
 
-        Ok(UserAccountData::new(
-            total_collateral_base,
-            total_debt_base,
-            available_borrows_base,
-            current_liquidation_threshold,
-            ltv,
-            health_factor,
+        if let Ok(uad) = uad {
+            return Ok(UserAccountData::new(
+                uad.totalCollateralBase,
+                uad.totalDebtBase,
+                uad.availableBorrowsBase,
+                uad.currentLiquidationThreshold,
+                uad.ltv,
+                uad.healthFactor,
+            ));
+        }
+
+        debug!(
+            "get_user_account_data: main provider for user {}, error: {:?}",
+            user,
+            uad.err().unwrap()
+        );
+
+        let strategy = FixedInterval::from_millis(10_000).take(3);
+        for (idx, (breaker, api)) in self.aave_l2_pool_fallback.iter().enumerate() {
+            let uad = Retry::spawn(strategy.clone(), || async {
+                let response = breaker
+                    .call_async(|| async {
+                        let res = api
+                            .getUserAccountData(user.clone())
+                            .call()
+                            .await
+                            .map_err(|e| ApiError::new(format!("{e:?}")))?;
+                        Ok(res)
+                    })
+                    .await;
+
+                if let Err(ref e) = response {
+                    debug!(
+                        "get_user_account_data: provider {}, user {}, error: {:?}",
+                        idx, user, e
+                    );
+                }
+
+                response
+            })
+            .await;
+
+            if let Ok(uad) = uad {
+                return Ok(UserAccountData::new(
+                    uad.totalCollateralBase,
+                    uad.totalDebtBase,
+                    uad.availableBorrowsBase,
+                    uad.currentLiquidationThreshold,
+                    uad.ltv,
+                    uad.healthFactor,
+                ));
+            }
+        }
+
+        Err(eyre!(
+            "get_user_account_data: none of providers could find user account data for user {}",
+            user
         ))
     }
 }
@@ -668,12 +1059,6 @@ where
             AaveEvents::IL2PoolEvents(event, rq_date) => match event {
                 IL2PoolEvents::Supply(ev) => {
                     debug!("start: supply");
-
-                    let n = counters.supply % w_num;
-                    debug!("start: supply - channel = {}, is_closed = {}", n,
-                        supply_txs[n].is_closed());
-
-
                     supply_txs[counters.supply % w_num]
                         .send((
                             ev,
@@ -876,40 +1261,40 @@ where
             &price_decimals.to_vec()
         };
 
-        loop {
-            let hf_tx = hf_tx.clone();
-            let cache = cache.clone();
-            match provider
-                .listen_prices_update(&tokens, &price_decimals, move |prices| {
-                    let hf_tx = hf_tx.clone();
-                    let cache = cache.clone();
-                    async move {
-                        let now = Utc::now().timestamp_micros();
+        let hf_tx = hf_tx.clone();
+        let cache = cache.clone();
+        match provider
+            .listen_prices_update(&tokens, &price_decimals, move |prices| {
+                let hf_tx = hf_tx.clone();
+                let cache = cache.clone();
+                async move {
+                    let now = Utc::now().timestamp_micros();
 
-                        {
-                            let (prices_current, _) = &mut *cache.prices.write().await;
-                            let prices = Array1::from_vec(prices);
+                    {
+                        let (prices_current, _) = &mut *cache.prices.write().await;
+                        let prices = Array1::from_vec(prices);
 
-                            if *prices_current != prices {
-                                *prices_current = prices;
+                        if *prices_current != prices {
+                            *prices_current = prices;
 
-                                if let Err(e) = hf_tx.send(HFRequest::Full(now)).await {
-                                        error!(
-                                        "listen_prices_update: failed to send to hf calculation channel: {:?}",
-                                        e
-                                    );
-                                }
+                            debug!("listen_prices_update: prices_current = {}", prices_current);
+
+                            if let Err(e) = hf_tx.send(HFRequest::Full(now)).await {
+                                    error!(
+                                    "listen_prices_update: failed to send to hf calculation channel: {:?}",
+                                    e
+                                );
                             }
                         }
-
-                        Ok(())
                     }
-                })
-                .await
-            {
-                Ok(_) => debug!("listen_prices_update: Ok"),
-                Err(e) => debug!("listen_prices_update: error = {:?}", e),
-            }
+
+                    Ok(())
+                }
+            })
+            .await
+        {
+            Ok(_) => debug!("listen_prices_update: Ok"),
+            Err(e) => debug!("listen_prices_update: error = {:?}", e),
         }
     });
 
@@ -928,7 +1313,7 @@ where
     task::spawn(async move {
         debug!("liquidation_threshold_update: created thread");
 
-        let mut interval = time::interval(Duration::from_secs(600));
+        let mut interval = time::interval(Duration::from_secs(24 * 60 * 60));
         loop {
             interval.tick().await;
 
@@ -1168,7 +1553,7 @@ pub(crate) async fn liquidation(
 
 pub type UserDetails = DashMap<Address, UserSettings>;
 pub type Array = RwLock<(Array1<f64>, TimeStamp)>;
-pub type Arrays = RwLock<Vec<RwLock<(Array1<U256>, TimeStamp, TimeStamp)>>>;
+pub type Arrays = RwLock<Vec<Arc<RwLock<(Array1<U256>, TimeStamp, TimeStamp)>>>>;
 pub type Matrix = RwLock<Array2<f64>>;
 pub type Indexes = RwLock<(Array1<Index>, TimeStamp)>;
 pub type Addresses = RwLock<(Array1<Address>, TimeStamp)>;
@@ -1359,7 +1744,7 @@ impl Cache {
         self.users.insert(user.clone(), user_settings);
 
         {
-            let collaterals = &*self.collateral.read().await;
+            let collaterals = self.collateral.read().await.to_vec();
             let (col, last_sync, last_modified) = &mut *collaterals
                 .get(row_num)
                 .ok_or_else(|| {
@@ -1379,7 +1764,7 @@ impl Cache {
         }
 
         {
-            let reserves = &*self.reserve.read().await;
+            let reserves = self.reserve.read().await.to_vec();
             let (res, last_sync, last_modified) = &mut *reserves
                 .get(row_num)
                 .ok_or_else(|| {
@@ -1399,7 +1784,7 @@ impl Cache {
         }
 
         {
-            let debt = &*self.borrowed.read().await;
+            let debt = self.borrowed.read().await.to_vec();
             let (bor, last_sync, last_modified) = &mut *debt
                 .get(row_num)
                 .ok_or_else(|| {
@@ -1491,12 +1876,12 @@ impl Cache {
         }
 
         {
-            let (mut user_num_lock, mut collaterals, mut reserves, mut borrowed, mut hf) = tokio::join!(
-                self.users_num.write(),
-                self.collateral.write(),
-                self.reserve.write(),
-                self.borrowed.write(),
-                self.health_factors.write(),
+            let (mut collaterals, mut borrowed, mut user_num_lock, mut reserves, mut hf) = (
+                self.collateral.write().await,
+                self.borrowed.write().await,
+                self.users_num.write().await,
+                self.reserve.write().await,
+                self.health_factors.write().await,
             );
 
             // if we have more than one thread in this fn
@@ -1513,23 +1898,23 @@ impl Cache {
             );
             *user_num_lock += 1;
 
-            reserves.push(RwLock::new((
+            reserves.push(Arc::new(RwLock::new((
                 Array1::from_vec(vec![U256::default(); tokens.len()]),
                 0,
                 0,
-            )));
+            ))));
 
-            collaterals.push(RwLock::new((
+            collaterals.push(Arc::new(RwLock::new((
                 Array1::from_vec(vec![U256::default(); tokens.len()]),
                 0,
                 0,
-            )));
+            ))));
 
-            borrowed.push(RwLock::new((
+            borrowed.push(Arc::new(RwLock::new((
                 Array1::from_vec(vec![U256::default(); tokens.len()]),
                 0,
                 0,
-            )));
+            ))));
 
             let (hf, last_modified) = &mut *hf;
             let mut hf_vec = hf.to_vec();
@@ -1710,12 +2095,12 @@ impl Cache {
         rq_date: TimeStamp,
     ) -> eyre::Result<()> {
         let mut col_matrix_lock = self.collateral_matrix.write().await;
-        let col_lock = self.collateral.read().await;
+        let collateral = self.collateral.read().await.to_vec();
 
         debug!(
-            "sync_collateral: sync target = {:?}, col lock len = {}",
+            "sync_collateral: sync target = {:?}, collateral len = {}",
             target,
-            col_lock.len()
+            collateral.len()
         );
 
         let (row_num, col_num) = match target {
@@ -1725,7 +2110,7 @@ impl Cache {
 
         if let Some(col_num) = col_num {
             col_matrix_lock[(row_num, col_num)] = {
-                let (col, _, _) = &*col_lock
+                let (col, _, _) = &*collateral
                     .get(row_num)
                     .ok_or_else(|| {
                         eyre!("sync_collateral: row = {} not found in collateral", row_num)
@@ -1742,7 +2127,7 @@ impl Cache {
                     .as_f64_ray()
             };
         } else {
-            let row = col_lock
+            let row = collateral
                 .get(row_num)
                 .ok_or_else(|| eyre!("sync_collateral: row = {} not found in collateral", row_num))?
                 .read()
@@ -1773,12 +2158,12 @@ impl Cache {
         rq_date: TimeStamp,
     ) -> eyre::Result<()> {
         let mut bor_matrix_lock = self.borrowed_matrix.write().await;
-        let bor_lock = self.borrowed.read().await;
+        let borrowed = self.borrowed.read().await.to_vec();
 
         debug!(
-            "sync_borrowed: sync target = {:?}, bor lock len = {:?}",
+            "sync_borrowed: sync target = {:?}, borrowed len = {:?}",
             target,
-            bor_lock.len()
+            borrowed.len()
         );
 
         let (row_num, col_num) = match target {
@@ -1788,7 +2173,7 @@ impl Cache {
 
         if let Some(col_num) = col_num {
             bor_matrix_lock[(row_num, col_num)] = {
-                let (bor, _, _) = &*bor_lock
+                let (bor, _, _) = &*borrowed
                     .get(row_num)
                     .ok_or_else(|| eyre!("sync_borrowed: row = {} not found in borrowed", row_num))?
                     .read()
@@ -1800,7 +2185,7 @@ impl Cache {
                     .as_f64_ray()
             };
         } else {
-            let row = bor_lock
+            let row = borrowed
                 .get(row_num)
                 .ok_or_else(|| eyre!("sync_borrowed: row = {} not found in borrowed", row_num))?
                 .read()
@@ -1830,22 +2215,22 @@ impl Cache {
         target: &SyncTarget,
         rq_date: TimeStamp,
     ) -> eyre::Result<()> {
-        let (mut col_matrix_lock, col_lock, mut bor_matrix_lock, bor_lock) = tokio::join!(
-            self.collateral_matrix.write(),
-            self.collateral.read(),
-            self.borrowed_matrix.write(),
-            self.borrowed.read()
+        let (collateral, mut col_matrix_lock, mut bor_matrix_lock, borrowed) = (
+            self.collateral.read().await.to_vec(),
+            self.collateral_matrix.write().await,
+            self.borrowed_matrix.write().await,
+            self.borrowed.read().await.to_vec(),
         );
 
         debug!(
-            "sync_data: sync target = {:?}, col lock len = {}, bor lock len = {}",
+            "sync_data: sync target = {:?}, collateral len = {}, borrowed len = {}",
             target,
-            col_lock.len(),
-            bor_lock.len()
+            collateral.len(),
+            borrowed.len()
         );
 
-        while col_matrix_lock.nrows() < col_lock.len() {
-            let row_lock = col_lock
+        while col_matrix_lock.nrows() < collateral.len() {
+            let row_lock = collateral
                 .get(col_matrix_lock.nrows())
                 .ok_or_else(|| {
                     eyre!(
@@ -1865,8 +2250,8 @@ impl Cache {
         );
 
         let bor_low_bound = bor_matrix_lock.nrows().saturating_sub(1);
-        while bor_matrix_lock.nrows() < bor_lock.len() {
-            let row_lock = bor_lock
+        while bor_matrix_lock.nrows() < borrowed.len() {
+            let row_lock = borrowed
                 .get(bor_matrix_lock.nrows())
                 .ok_or_else(|| {
                     eyre!(
@@ -1907,7 +2292,7 @@ impl Cache {
 
         if let Some(col_num) = col_num {
             col_matrix_lock[(row_num, col_num)] = {
-                let (col, _, _) = &*col_lock
+                let (col, _, _) = &*collateral
                     .get(row_num)
                     .ok_or_else(|| eyre!("sync_data: row = {} not found in collateral", row_num))?
                     .read()
@@ -1919,7 +2304,7 @@ impl Cache {
                     .as_f64_ray()
             };
             bor_matrix_lock[(row_num, col_num)] = {
-                let (bor, _, _) = &*bor_lock
+                let (bor, _, _) = &*borrowed
                     .get(row_num)
                     .ok_or_else(|| eyre!("sync_data: row = {} not found in borrowed", row_num))?
                     .read()
@@ -1929,7 +2314,7 @@ impl Cache {
                     .as_f64_ray()
             };
         } else {
-            let row = col_lock
+            let row = collateral
                 .get(row_num)
                 .ok_or_else(|| eyre!("sync_data: row = {} not found in collateral", row_num))?
                 .read()
@@ -1938,7 +2323,7 @@ impl Cache {
             let row = Array1::from_iter(row.0.iter().map(F64Converter::as_f64_ray));
             col_matrix_lock.row_mut(row_num).assign(&row);
 
-            let row = bor_lock
+            let row = borrowed
                 .get(row_num)
                 .ok_or_else(|| eyre!("sync_data: row = {} not found in borrowed", row_num))?
                 .read()
@@ -1980,11 +2365,11 @@ impl Cache {
         let ltp = &lt * &price;
 
         if let Some(user) = user {
-            let (collateral, li, borrowed, vbi) = tokio::join!(
-                self.collateral.read(),
-                self.liquidity.read(),
-                self.borrowed.read(),
-                self.variable_borrow.read()
+            let (collateral, borrowed, (li, _), (vbi, _)) = (
+                self.collateral.read().await.to_vec(),
+                self.borrowed.read().await.to_vec(),
+                &*self.liquidity.read().await,
+                &*self.variable_borrow.read().await,
             );
 
             let row_num = self
@@ -1994,9 +2379,6 @@ impl Cache {
                 .row_num;
 
             let col_eff = {
-                let collateral = &*collateral;
-                let (li, _) = &*li;
-
                 let col_row_lock = Array1::from_iter(
                     collateral
                         .get(row_num)
@@ -2018,9 +2400,6 @@ impl Cache {
             };
 
             let bor_eff = {
-                let borrowed = &*borrowed;
-                let (vbi, _) = &*vbi;
-
                 let bor_row_lock = Array1::from_iter(
                     borrowed
                         .get(row_num)
@@ -2069,17 +2448,14 @@ impl Cache {
             return Ok(());
         }
 
-        let (collateral, li, borrowed, vbi) = tokio::join!(
-            self.collateral_matrix.read(),
-            self.liquidity_index.read(),
-            self.borrowed_matrix.read(),
-            self.variable_borrow_index.read()
+        let (collateral, borrowed, (li, _), (vbi, _)) = (
+            &*self.collateral_matrix.read().await,
+            &*self.borrowed_matrix.read().await,
+            &*self.liquidity_index.read().await,
+            &*self.variable_borrow_index.read().await,
         );
 
         let col_eff = {
-            let collateral = &*collateral;
-            let (li, _) = &*li;
-
             let scaled = collateral
                 * &li
                     .broadcast((collateral.nrows(), li.len()))
@@ -2089,9 +2465,6 @@ impl Cache {
         };
 
         let bor_eff = {
-            let borrowed = &*borrowed;
-            let (vbi, _) = &*vbi;
-
             let scaled = borrowed
                 * &vbi
                     .broadcast((borrowed.nrows(), vbi.len()))

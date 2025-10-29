@@ -1,20 +1,22 @@
 use crate::arbitrum::arbitrum::{
-    AaveDataProvider, Cache, DataProvider, F64Converter, Index, RayOperations, ReserveData, Scaler,
-    UserReserveData,
+    build_breaker, AaveDataProvider, Cache, DataProvider,
+    F64Converter, IAaveOracle, IAaveProtocolDataProvider, IL2Pool, Index, RayOperations,
+    ReserveData, Scaler, UserReserveData, AAVE_ORACLE_ADDRESS, AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS, L2_POOL_ADDRESS,
 };
 use alloy::providers::Provider;
 use alloy::transports::http::reqwest::StatusCode;
 use alloy_primitives::{Address, U256};
-use axum::Json;
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;
+use axum::Json;
 use bitvec::order::Lsb0;
 use bitvec::prelude::BitVec;
 use futures::future::try_join_all;
 use itertools::Itertools;
 use ndarray::Axis;
 use rand::Rng;
-use serde::Serialize;
+use serde::ser::SerializeSeq;
+use serde::{Serialize, Serializer};
 use std::sync::Arc;
 use tokio::try_join;
 use tracing::info;
@@ -25,7 +27,12 @@ where
     P: Provider + Clone + Send + Sync + 'static,
 {
     pub cache: Arc<Cache>,
-    pub provider: Arc<P>,
+    pub provider: P,
+    pub rpc_provider: P,
+    pub pokt_provider: P,
+    pub grove_provider: P,
+    pub drpc_provider: P,
+    pub ankr_provider: P,
 }
 
 #[derive(Serialize)]
@@ -92,6 +99,110 @@ impl IndexRate {
     fn new(index: String, rate: String) -> Self {
         Self { index, rate }
     }
+}
+
+async fn build_data_provider<P>(
+    provider: &P,
+    rpc_provider: &P,
+    pokt_provider: &P,
+    grove_provider: &P,
+    drpc_provider: &P,
+    ankr_provider: &P,
+) -> eyre::Result<AaveDataProvider<P>>
+where
+    P: Provider + Clone + Send + Sync + 'static,
+{
+    Ok(AaveDataProvider {
+        aave_protocol_data_provider: IAaveProtocolDataProvider::new(
+            AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS.parse()?,
+            rpc_provider.clone(),
+        ),
+        aave_oracle: IAaveOracle::new(AAVE_ORACLE_ADDRESS.parse()?, rpc_provider.clone()),
+        aave_l2_pool: IL2Pool::new(L2_POOL_ADDRESS.parse()?, rpc_provider.clone()),
+        provider: provider.clone(),
+        aave_protocol_data_provider_fallback: vec![
+            (
+                build_breaker(),
+                IAaveProtocolDataProvider::new(
+                    AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS.parse()?,
+                    provider.clone(),
+                ),
+            ),
+            (
+                build_breaker(),
+                IAaveProtocolDataProvider::new(
+                    AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS.parse()?,
+                    pokt_provider.clone(),
+                ),
+            ),
+            (
+                build_breaker(),
+                IAaveProtocolDataProvider::new(
+                    AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS.parse()?,
+                    grove_provider.clone(),
+                ),
+            ),
+            (
+                build_breaker(),
+                IAaveProtocolDataProvider::new(
+                    AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS.parse()?,
+                    drpc_provider.clone(),
+                ),
+            ),
+            (
+                build_breaker(),
+                IAaveProtocolDataProvider::new(
+                    AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS.parse()?,
+                    ankr_provider.clone(),
+                ),
+            ),
+        ],
+        aave_oracle_fallback: vec![
+            (
+                build_breaker(),
+                IAaveOracle::new(AAVE_ORACLE_ADDRESS.parse()?, provider.clone()),
+            ),
+            (
+                build_breaker(),
+                IAaveOracle::new(AAVE_ORACLE_ADDRESS.parse()?, pokt_provider.clone()),
+            ),
+            (
+                build_breaker(),
+                IAaveOracle::new(AAVE_ORACLE_ADDRESS.parse()?, grove_provider.clone()),
+            ),
+            (
+                build_breaker(),
+                IAaveOracle::new(AAVE_ORACLE_ADDRESS.parse()?, drpc_provider.clone()),
+            ),
+            (
+                build_breaker(),
+                IAaveOracle::new(AAVE_ORACLE_ADDRESS.parse()?, ankr_provider.clone()),
+            ),
+        ],
+        aave_l2_pool_fallback: vec![
+            (
+                build_breaker(),
+                IL2Pool::new(L2_POOL_ADDRESS.parse()?, provider.clone()),
+            ),
+            (
+                build_breaker(),
+                IL2Pool::new(L2_POOL_ADDRESS.parse()?, pokt_provider.clone()),
+            ),
+            (
+                build_breaker(),
+                IL2Pool::new(L2_POOL_ADDRESS.parse()?, grove_provider.clone()),
+            ),
+            (
+                build_breaker(),
+                IL2Pool::new(L2_POOL_ADDRESS.parse()?, drpc_provider.clone()),
+            ),
+            (
+                build_breaker(),
+                IL2Pool::new(L2_POOL_ADDRESS.parse()?, ankr_provider.clone()),
+            ),
+        ],
+        provider_fallback: vec![],
+    })
 }
 
 async fn get_user(row_num: usize, cache: Arc<Cache>) -> Option<User> {
@@ -221,7 +332,7 @@ where
 }
 
 async fn get_reserve(row_num: usize, cache: Arc<Cache>) -> Option<Vec<String>> {
-    let reserve = &*cache.reserve.read().await;
+    let reserve = cache.reserve.read().await.to_vec();
     let row_lock = reserve.get(row_num)?;
     let (row, _, _) = &*row_lock.read().await;
     Some(row.iter().map(U256::to_string).collect())
@@ -260,7 +371,7 @@ where
 
 async fn get_reserve_all(cache: Arc<Cache>) -> Vec<Vec<String>> {
     let mut reserve_vec = vec![];
-    let reserves = &*cache.reserve.read().await;
+    let reserves = cache.reserve.read().await.to_vec();
     for res_lock in reserves {
         let (res, _, _) = &*res_lock.read().await;
         let values = res.iter().map(U256::to_string).collect();
@@ -283,7 +394,7 @@ where
 }
 
 async fn get_collateral(row_num: usize, cache: Arc<Cache>) -> Option<Vec<String>> {
-    let collateral = &*cache.collateral.read().await;
+    let collateral = cache.collateral.read().await.to_vec();
     let col_lock = collateral.get(row_num)?;
     let (row, _, _) = &*col_lock.read().await;
     Some(row.iter().map(U256::to_string).collect())
@@ -322,8 +433,8 @@ where
 
 async fn get_collateral_all(cache: Arc<Cache>) -> Vec<Vec<String>> {
     let mut collateral_vec = vec![];
-    let collaterals = &*cache.collateral.read().await;
-    for col_lock in collaterals {
+    let collateral = cache.collateral.read().await.to_vec();
+    for col_lock in collateral {
         let (col, _, _) = &*col_lock.read().await;
         let values = col.iter().map(U256::to_string).collect();
         collateral_vec.push(values);
@@ -411,7 +522,7 @@ where
 }
 
 async fn get_borrowed(row_num: usize, cache: Arc<Cache>) -> Option<Vec<String>> {
-    let borrowed = &*cache.borrowed.read().await;
+    let borrowed = cache.borrowed.read().await.to_vec();
     let bor_lock = borrowed.get(row_num)?;
     let (row, _, _) = &*bor_lock.read().await;
     Some(row.iter().map(U256::to_string).collect())
@@ -452,7 +563,7 @@ where
 
 async fn get_borrowed_all(cache: Arc<Cache>) -> Vec<Vec<String>> {
     let mut borrowed_vec = vec![];
-    let borrowed = &*cache.borrowed.read().await;
+    let borrowed = cache.borrowed.read().await.to_vec();
     for bor_lock in borrowed {
         let (bor, _, _) = &*bor_lock.read().await;
         let values = bor.iter().map(U256::to_string).collect();
@@ -762,10 +873,17 @@ pub async fn get_user_account_data_state<P>(
 where
     P: Provider + Clone + Send + Sync + 'static,
 {
-    let data_provider = Arc::new(
-        AaveDataProvider::new(&state.provider)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:?}")))?,
-    );
+    let data_provider = build_data_provider(
+        &state.provider,
+        &state.rpc_provider,
+        &state.pokt_provider,
+        &state.grove_provider,
+        &state.drpc_provider,
+        &state.ankr_provider,
+    )
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:?}")))?;
+
     let uad = data_provider
         .get_user_account_data(&user)
         .await
@@ -792,38 +910,88 @@ pub struct TestProbe {
     pub decimals: Vec<f64>,
     pub price_decimals: Vec<f64>,
     pub liquidation_threshold: Vec<f64>,
+
+    #[serde(serialize_with = "u256_vec_to_string")]
     pub liquidity: Vec<U256>,
     pub liquidity_index: Vec<f64>,
+
+    #[serde(serialize_with = "u256_vec_to_string")]
     pub variable_borrow: Vec<U256>,
     pub variable_borrow_index: Vec<f64>,
     pub prices: Vec<f64>,
+
+    #[serde(serialize_with = "u256_2d_to_string")]
     pub reserve_scaled: Vec<Vec<U256>>,
+
+    #[serde(serialize_with = "u256_2d_to_string")]
     pub collateral_scaled: Vec<Vec<U256>>,
     pub collateral: Vec<Vec<f64>>,
+
+    #[serde(serialize_with = "u256_2d_to_string")]
     pub borrowed_scaled: Vec<Vec<U256>>,
     pub borrowed: Vec<Vec<f64>>,
 
     pub hf_aave: Vec<f64>,
+
+    #[serde(serialize_with = "u256_vec_to_string")]
     pub liquidity_aave: Vec<U256>,
     pub liquidity_index_aave: Vec<f64>,
+
+    #[serde(serialize_with = "u256_vec_to_string")]
     pub variable_borrow_aave: Vec<U256>,
     pub variable_borrow_index_aave: Vec<f64>,
+
+    #[serde(serialize_with = "u256_2d_to_string")]
     pub reserve_scaled_aave: Vec<Vec<U256>>,
+
+    #[serde(serialize_with = "u256_2d_to_string")]
     pub collateral_scaled_aave: Vec<Vec<U256>>,
     pub collateral_aave: Vec<Vec<f64>>,
+
+    #[serde(serialize_with = "u256_2d_to_string")]
     pub borrowed_scaled_aave: Vec<Vec<U256>>,
     pub borrowed_aave: Vec<Vec<f64>>,
 
     pub hf_diff: Vec<f64>,
+
+    #[serde(serialize_with = "u256_vec_to_string")]
     pub liquidity_diff: Vec<U256>,
     pub liquidity_index_diff: Vec<f64>,
+
+    #[serde(serialize_with = "u256_vec_to_string")]
     pub variable_borrow_diff: Vec<U256>,
     pub variable_borrow_index_diff: Vec<f64>,
+
+    #[serde(serialize_with = "u256_2d_to_string")]
     pub reserve_scaled_diff: Vec<Vec<U256>>,
+
+    #[serde(serialize_with = "u256_2d_to_string")]
     pub collateral_scaled_diff: Vec<Vec<U256>>,
     pub collateral_diff: Vec<Vec<f64>>,
+
+    #[serde(serialize_with = "u256_2d_to_string")]
     pub borrowed_scaled_diff: Vec<Vec<U256>>,
     pub borrowed_diff: Vec<Vec<f64>>,
+}
+
+pub fn u256_vec_to_string<S>(vals: &Vec<U256>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let strs = vals.iter().map(|v| v.to_string()).collect::<Vec<_>>();
+    strs.serialize(serializer)
+}
+
+fn u256_2d_to_string<S>(matrix: &Vec<Vec<U256>>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let mut outer_seq = serializer.serialize_seq(Some(matrix.len()))?;
+    for row in matrix {
+        let row_as_strings = row.iter().map(|v| v.to_string()).collect::<Vec<_>>();
+        outer_seq.serialize_element(&row_as_strings)?;
+    }
+    outer_seq.end()
 }
 
 pub async fn get_test_probe_state<P>(
@@ -833,10 +1001,18 @@ pub async fn get_test_probe_state<P>(
 where
     P: Provider + Clone + Send + Sync + 'static,
 {
-    let data_provider = Arc::new(
-        AaveDataProvider::new(&state.provider)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:?}")))?,
-    );
+    let data_provider = build_data_provider(
+        &state.provider,
+        &state.rpc_provider,
+        &state.pokt_provider,
+        &state.grove_provider,
+        &state.drpc_provider,
+        &state.ankr_provider,
+    )
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:?}")))?;
+
+    let data_provider = Arc::new(data_provider);
 
     let hf = {
         let (hf, _) = &*state.cache.health_factors.read().await;
@@ -908,8 +1084,9 @@ where
 
     let reserve_scaled = {
         let mut reserve_scaled = vec![];
-        let reserve = &*state.cache.reserve.read().await;
-        for res_lock in reserve[start..window_size].iter() {
+        let reserve = state.cache.reserve.read().await[start..start + window_size].to_vec();
+
+        for res_lock in reserve.iter() {
             let (res, _, _) = &*res_lock.read().await;
             reserve_scaled.push(res.to_vec());
         }
@@ -918,8 +1095,8 @@ where
 
     let collateral_scaled = {
         let mut collateral_scaled = vec![];
-        let collateral = &*state.cache.collateral.read().await;
-        for col_lock in collateral[start..window_size].iter() {
+        let collateral = state.cache.collateral.read().await.to_vec();
+        for col_lock in collateral[start..start + window_size].iter() {
             let (col, _, _) = &*col_lock.read().await;
             collateral_scaled.push(col.to_vec());
         }
@@ -929,11 +1106,12 @@ where
     let collateral = {
         let mut collateral = vec![];
         let col = &*state.cache.collateral_matrix.read().await;
-        for idx in start..start + window_size {
-            let row = col.row(idx);
+        for row in start..start + window_size {
+            let row = col.row(row);
             collateral.push(
                 row.iter()
-                    .map(|x| x * liquidity_index[idx])
+                    .enumerate()
+                    .map(|(col, x)| x * liquidity_index[col])
                     .collect::<Vec<_>>(),
             );
         }
@@ -942,8 +1120,8 @@ where
 
     let borrowed_scaled = {
         let mut borrowed_scaled = vec![];
-        let borrowed = &*state.cache.borrowed.read().await;
-        for bor_lock in borrowed[start..window_size].iter() {
+        let borrowed = state.cache.borrowed.read().await.to_vec();
+        for bor_lock in borrowed[start..start + window_size].iter() {
             let (bor, _, _) = &*bor_lock.read().await;
             borrowed_scaled.push(bor.to_vec());
         }
@@ -953,11 +1131,12 @@ where
     let mut borrowed = {
         let mut borrowed = vec![];
         let bor = &*state.cache.borrowed_matrix.read().await;
-        for idx in start..start + window_size {
-            let row = bor.row(idx);
+        for row in start..start + window_size {
+            let row = bor.row(row);
             borrowed.push(
                 row.iter()
-                    .map(|x| x * variable_borrow_index[idx])
+                    .enumerate()
+                    .map(|(col, x)| x * variable_borrow_index[col])
                     .collect::<Vec<_>>(),
             );
         }
@@ -1066,7 +1245,7 @@ where
     let hf_diff = {
         hf_aave
             .iter()
-            .zip(hf.iter())
+            .zip(hf[start..start + window_size].iter())
             .map(|(hf_aave, hf)| (hf_aave - hf).abs())
             .collect::<Vec<_>>()
     };
@@ -1169,7 +1348,7 @@ where
     };
 
     let test_probe = TestProbe {
-        hf: hf[start..window_size].to_vec(),
+        hf: hf[start..start + window_size].to_vec(),
         users,
         tokens,
         decimals,
