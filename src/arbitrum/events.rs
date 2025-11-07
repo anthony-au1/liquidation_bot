@@ -3,8 +3,8 @@ use crate::arbitrum::arbitrum::IL2Pool::{
     ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
 use crate::arbitrum::arbitrum::{
-    Cache, DataProvider, F64Converter, HFRequest, RayOperations, RqDate, Scaler, SyncRequest, SyncTarget,
-    TimeStamp, TokenDetails, Tokens, RAY,
+    Cache, DataProvider, F64Converter, HFRequest, RAY, RayOperations, RqDate, Scaler, SyncRequest,
+    SyncTarget, TimeStamp, TokenDetails, Tokens,
 };
 use alloy_primitives::{Address, U256};
 use chrono::Utc;
@@ -148,8 +148,9 @@ where
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
         format!(
-            "supply (user = {}): rq_date = {}, received = {}, delta = {} μs",
+            "supply (user = {}): amount = {}, rq_date = {}, received = {}, delta = {} μs",
             event.onBehalfOf,
+            event.amount,
             rq_date,
             received,
             received - rq_date
@@ -363,8 +364,9 @@ where
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
         format!(
-            "withdraw (user = {}): rq_date = {}, received = {}, delta = {} μs",
+            "withdraw (user = {}): amount = {}, rq_date = {}, received = {}, delta = {} μs",
             event.user,
+            event.amount,
             rq_date,
             received,
             received - rq_date
@@ -437,10 +439,12 @@ where
                 })?
                 .write()
                 .await;
-            col[idx] -= event
-                .amount
-                .to_ray(decimals[idx])
-                .to_scaled(c.liquidity.read().await.0[idx].index);
+            col[idx] = col[idx].saturating_sub(
+                event
+                    .amount
+                    .to_ray(decimals[idx])
+                    .to_scaled(c.liquidity.read().await.0[idx].index),
+            );
             *last_modified = now;
 
             debug!(
@@ -511,12 +515,13 @@ where
                 })?
                 .write()
                 .await;
-            res[idx] -= event
-                .amount
-                .to_ray(decimals[idx])
-                .to_scaled(c.liquidity.read().await.0[idx].index);
+            res[idx] = res[idx].saturating_sub(
+                event
+                    .amount
+                    .to_ray(decimals[idx])
+                    .to_scaled(c.liquidity.read().await.0[idx].index),
+            );
             *last_modified = now;
-
             debug!(
                 "withdraw (user = {}): reserve amount = {}, res = {}",
                 event.user, event.amount, res
@@ -578,8 +583,9 @@ where
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
         format!(
-            "borrow (user = {}): rq_date = {}, received = {}, delta = {} μs",
+            "borrow (user = {}): amount = {}, rq_date = {}, received = {}, delta = {} μs",
             event.onBehalfOf,
+            event.amount,
             rq_date,
             received,
             received - rq_date
@@ -723,8 +729,9 @@ where
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
         format!(
-            "repay (user = {}): rq_date = {}, received = {}, delta = {} μs",
+            "repay (user = {}): amount = {}, rq_date = {}, received = {}, delta = {} μs",
             event.user,
+            event.amount,
             rq_date,
             received,
             received - rq_date
@@ -796,10 +803,13 @@ where
             })?
             .write()
             .await;
-        bor[idx] -= event
-            .amount
-            .to_ray(decimals[idx])
-            .to_scaled(c.variable_borrow.read().await.0[idx].index);
+
+        bor[idx] = bor[idx].saturating_sub(
+            event
+                .amount
+                .to_ray(decimals[idx])
+                .to_scaled(c.variable_borrow.read().await.0[idx].index),
+        );
         *last_modified = now;
 
         debug!(
@@ -1199,8 +1209,10 @@ where
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
         format!(
-            "liquidation_call (user = {}): rq_date = {}, received = {}, delta = {} μs",
+            "liquidation_call (user = {}): debtToCover = {}, liquidatedCollateralAmount = {}, rq_date = {}, received = {}, delta = {} μs",
             event.user,
+            event.debtToCover,
+            event.liquidatedCollateralAmount,
             rq_date,
             received,
             received - rq_date
@@ -1300,14 +1312,18 @@ where
             .await;
         *last_modified = now;
 
-        bor[bor_idx] -= event
-            .debtToCover
-            .to_ray(decimals[bor_idx])
-            .to_scaled(c.variable_borrow.read().await.0[bor_idx].index);
-        col[col_idx] -= event
-            .liquidatedCollateralAmount
-            .to_ray(decimals[col_idx])
-            .to_scaled(c.liquidity.read().await.0[col_idx].index);
+        bor[bor_idx] = bor[bor_idx].saturating_sub(
+            event
+                .debtToCover
+                .to_ray(decimals[bor_idx])
+                .to_scaled(c.variable_borrow.read().await.0[bor_idx].index),
+        );
+        col[col_idx] = col[col_idx].saturating_sub(
+            event
+                .liquidatedCollateralAmount
+                .to_ray(decimals[col_idx])
+                .to_scaled(c.liquidity.read().await.0[col_idx].index),
+        );
 
         debug!(
             "liquidation_call (user = {}): borrowed repay amount = {}, bor = {},\

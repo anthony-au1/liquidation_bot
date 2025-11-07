@@ -36,11 +36,11 @@ use tokio_retry::strategy::FixedInterval;
 use tokio_retry::Retry;
 use tracing::{debug, error, info};
 
-// anthony.anokhin@gmail.com
-// pub const WS_URL: &str = "wss://arb-mainnet.g.alchemy.com/v2/9DDcCoPPxnq-aSjQ8k79vxfLvrhBAXjQ";
-
 // antonanohin@gmail.com
 pub const WS_URL: &str = "wss://arb-mainnet.g.alchemy.com/v2/7txxkMJILUjSSkDIHoJ8Q";
+// anthony.anokhin@gmail.com
+pub const WS_SECOND_URL: &str =
+    "wss://arb-mainnet.g.alchemy.com/v2/9DDcCoPPxnq-aSjQ8k79vxfLvrhBAXjQ";
 pub const RPC_URL: &str = "https://arb1.arbitrum.io/rpc";
 pub const POKT_URL: &str = "https://arb-pokt.nodies.app";
 pub const GROVE_URL: &str = "https://arbitrum-one.rpc.grove.city/v1/01fdb492";
@@ -465,16 +465,33 @@ where
         loop {
             let stream = self.provider.subscribe_logs(&filter).await;
 
-            if let Ok(mut stream) = stream {
-                while let Ok(log) = stream.recv().await {
-                    if let Ok(Log { data, .. }) = IL2PoolEvents::decode_log(log.as_ref()) {
-                        callback(data).await?;
+            if let Err(e) = stream {
+                debug!("listen_events: error subscribing logs: {e:?}");
+
+                tokio::time::sleep(Duration::from_millis(1000)).await;
+                continue;
+            }
+
+            let mut stream = stream?;
+            loop {
+                match stream.recv().await {
+                    Ok(log) => match IL2PoolEvents::decode_log(log.as_ref()) {
+                        Ok(Log { data, .. }) => {
+                            callback(data).await?;
+                        }
+                        Err(e) => {
+                            debug!("listen_events: error decoding logs: {e:?}");
+                            continue;
+                        }
+                    },
+                    Err(e) => {
+                        debug!("listen_events: error reading logs: {e:?}");
+
+                        tokio::time::sleep(Duration::from_millis(1000)).await;
+                        break;
                     }
                 }
             }
-
-            debug!("listen_events: error listening event");
-            tokio::time::sleep(Duration::from_millis(1000)).await;
         }
     }
 
@@ -824,6 +841,20 @@ where
                 .collect();
             callback(prices).await?;
         }
+
+        // let mut block_stream = self.provider.subscribe_blocks().await?;
+        // while let Ok(_) = block_stream.recv().await {
+        //     let prices = self
+        //         .get_asset_prices(tokens.clone())
+        //         .await?
+        //         .iter()
+        //         .enumerate()
+        //         .map(|(idx, price)| price.as_f64(price_decimals[idx]))
+        //         .collect();
+        //     callback(prices).await?;
+        // }
+
+        // Ok(())
     }
 
     async fn get_user_account_data(&self, user: &Address) -> eyre::Result<UserAccountData> {

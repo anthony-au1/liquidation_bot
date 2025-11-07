@@ -83,7 +83,4 @@
 
 **Future Improvements**
 
-1. we can use one lock at a time, otherwise deadlock
-2. it makes sense to use free providers for all calls and use the paid one for subscriptions.
-3. once done we can run the app and get some stats for analysis.
-4. liquidation part.
+1. transfer from user to user affects collateral
