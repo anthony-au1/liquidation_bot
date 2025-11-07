@@ -6,11 +6,7 @@ use axum::Router;
 use axum::routing::get;
 use clap::{Parser, Subcommand};
 use liquidation_bot;
-use liquidation_bot::arbitrum::arbitrum::{
-    AAVE_ORACLE_ADDRESS, AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS, ANKR_URL, Cache, D_RPC_URL,
-    GROVE_URL, IAaveOracle, IAaveProtocolDataProvider, IL2Pool, L2_POOL_ADDRESS, POKT_URL, WS_URL,
-    build_breaker, start,
-};
+use liquidation_bot::arbitrum::arbitrum::{AAVE_ORACLE_ADDRESS, AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS, ANKR_URL, Cache, D_RPC_URL, GROVE_URL, IAaveOracle, IAaveProtocolDataProvider, IL2Pool, L2_POOL_ADDRESS, POKT_URL, WS_URL, build_breaker, start, WS_SECOND_URL};
 use liquidation_bot::arbitrum::arbitrum::{AaveDataProvider, RPC_URL};
 use liquidation_bot::arbitrum::stats::{
     AppState, get_borrowed_all_state, get_borrowed_matrix_row_state, get_borrowed_matrix_state,
@@ -115,6 +111,9 @@ async fn main() -> eyre::Result<()> {
             let provider = ProviderBuilder::new()
                 .connect_ws(WsConnect::new(WS_URL))
                 .await?;
+            let provider2 = ProviderBuilder::new()
+                .connect_ws(WsConnect::new(WS_SECOND_URL))
+                .await?;
             let rpc_provider = ProviderBuilder::new().connect_http(Url::parse(RPC_URL)?);
             let pokt_provider = ProviderBuilder::new().connect_http(Url::parse(POKT_URL)?);
             let grove_provider = ProviderBuilder::new().connect_http(Url::parse(GROVE_URL)?);
@@ -180,7 +179,7 @@ async fn main() -> eyre::Result<()> {
                     AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS.parse()?,
                     rpc_provider.clone(),
                 ),
-                aave_oracle: IAaveOracle::new(AAVE_ORACLE_ADDRESS.parse()?, rpc_provider.clone()),
+                aave_oracle: IAaveOracle::new(AAVE_ORACLE_ADDRESS.parse()?, provider2.clone()),
                 aave_l2_pool: IL2Pool::new(L2_POOL_ADDRESS.parse()?, rpc_provider.clone()),
                 provider: provider.clone(),
                 aave_protocol_data_provider_fallback: vec![
@@ -237,11 +236,11 @@ async fn main() -> eyre::Result<()> {
                 aave_oracle_fallback: vec![
                     (
                         build_breaker(),
-                        IAaveOracle::new(AAVE_ORACLE_ADDRESS.parse()?, rpc_provider.clone()),
+                        IAaveOracle::new(AAVE_ORACLE_ADDRESS.parse()?, provider.clone()),
                     ),
                     (
                         build_breaker(),
-                        IAaveOracle::new(AAVE_ORACLE_ADDRESS.parse()?, provider.clone()),
+                        IAaveOracle::new(AAVE_ORACLE_ADDRESS.parse()?, rpc_provider.clone()),
                     ),
                     (
                         build_breaker(),

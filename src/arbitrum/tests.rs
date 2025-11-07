@@ -4871,3 +4871,22 @@ async fn test_providers() -> eyre::Result<()> {
 
     Err(eyre::eyre!("failed test"))
 }
+
+#[tokio::test]
+async fn test_calculations() -> eyre::Result<()> {
+    let base = U256::from(11659502822736252202798490923468_u128);
+    let amount = U256::from(14000153720_u128);
+    let target = amount.to_ray(1000_000_f64);
+
+    assert_eq!(target, U256::from(14000153720000000000000000000000_u128));
+
+    let scaled = target.to_scaled(U256::from(1200750489194593789906695605_u128));
+
+    assert_eq!(scaled, U256::from(11659502824263378798423098554681_u128));
+
+    let total = scaled - base;
+
+    assert_eq!(total, U256::from(1527126595624607631213_u128));
+
+   Ok(())
+}
