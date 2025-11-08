@@ -28,6 +28,7 @@ where
 {
     pub cache: Arc<Cache>,
     pub provider: P,
+    pub provider2: P,
     pub rpc_provider: P,
     pub pokt_provider: P,
     pub grove_provider: P,
@@ -103,6 +104,7 @@ impl IndexRate {
 
 async fn build_data_provider<P>(
     provider: &P,
+    provider2: &P,
     rpc_provider: &P,
     pokt_provider: &P,
     grove_provider: &P,
@@ -115,12 +117,19 @@ where
     Ok(AaveDataProvider {
         aave_protocol_data_provider: IAaveProtocolDataProvider::new(
             AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS.parse()?,
-            rpc_provider.clone(),
+            provider2.clone(),
         ),
-        aave_oracle: IAaveOracle::new(AAVE_ORACLE_ADDRESS.parse()?, rpc_provider.clone()),
-        aave_l2_pool: IL2Pool::new(L2_POOL_ADDRESS.parse()?, rpc_provider.clone()),
-        provider: provider.clone(),
+        aave_oracle: IAaveOracle::new(AAVE_ORACLE_ADDRESS.parse()?, provider2.clone()),
+        aave_l2_pool: IL2Pool::new(L2_POOL_ADDRESS.parse()?, provider2.clone()),
+        provider: provider2.clone(),
         aave_protocol_data_provider_fallback: vec![
+            (
+                build_breaker(),
+                IAaveProtocolDataProvider::new(
+                    AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS.parse()?,
+                    provider2.clone(),
+                ),
+            ),
             (
                 build_breaker(),
                 IAaveProtocolDataProvider::new(
@@ -160,6 +169,10 @@ where
         aave_oracle_fallback: vec![
             (
                 build_breaker(),
+                IAaveOracle::new(AAVE_ORACLE_ADDRESS.parse()?, provider2.clone()),
+            ),
+            (
+                build_breaker(),
                 IAaveOracle::new(AAVE_ORACLE_ADDRESS.parse()?, provider.clone()),
             ),
             (
@@ -180,6 +193,10 @@ where
             ),
         ],
         aave_l2_pool_fallback: vec![
+            (
+                build_breaker(),
+                IL2Pool::new(L2_POOL_ADDRESS.parse()?, provider2.clone()),
+            ),
             (
                 build_breaker(),
                 IL2Pool::new(L2_POOL_ADDRESS.parse()?, provider.clone()),
@@ -875,6 +892,7 @@ where
 {
     let data_provider = build_data_provider(
         &state.provider,
+        &state.provider2,
         &state.rpc_provider,
         &state.pokt_provider,
         &state.grove_provider,
@@ -1003,6 +1021,7 @@ where
 {
     let data_provider = build_data_provider(
         &state.provider,
+        &state.provider2,
         &state.rpc_provider,
         &state.pokt_provider,
         &state.grove_provider,

@@ -125,6 +125,7 @@ async fn main() -> eyre::Result<()> {
             let state = AppState {
                 cache: cache.clone(),
                 provider: provider.clone(),
+                provider2: provider2.clone(),
                 rpc_provider: rpc_provider.clone(),
                 pokt_provider: pokt_provider.clone(),
                 grove_provider: grove_provider.clone(),
