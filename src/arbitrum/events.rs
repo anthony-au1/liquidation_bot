@@ -148,9 +148,10 @@ where
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
         format!(
-            "supply (user = {}): amount = {}, rq_date = {}, received = {}, delta = {} μs",
+            "supply (user = {}): amount = {}, reserve = {}, rq_date = {}, received = {}, delta = {} μs",
             event.onBehalfOf,
             event.amount,
+            event.reserve,
             rq_date,
             received,
             received - rq_date
@@ -168,7 +169,6 @@ where
     .await?
     {
         debug!("supply: new user created = {}", event.onBehalfOf);
-
         return Ok(());
     }
 
@@ -364,9 +364,10 @@ where
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
         format!(
-            "withdraw (user = {}): amount = {}, rq_date = {}, received = {}, delta = {} μs",
+            "withdraw (user = {}): amount = {}, reserve = {}, rq_date = {}, received = {}, delta = {} μs",
             event.user,
             event.amount,
+            event.reserve,
             rq_date,
             received,
             received - rq_date
@@ -384,7 +385,6 @@ where
     .await?
     {
         debug!("withdraw: new user created = {}", event.user);
-
         return Ok(());
     }
 
@@ -583,9 +583,10 @@ where
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
         format!(
-            "borrow (user = {}): amount = {}, rq_date = {}, received = {}, delta = {} μs",
+            "borrow (user = {}): amount = {}, reserve = {}, rq_date = {}, received = {}, delta = {} μs",
             event.onBehalfOf,
             event.amount,
+            event.reserve,
             rq_date,
             received,
             received - rq_date
@@ -729,9 +730,10 @@ where
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
         format!(
-            "repay (user = {}): amount = {}, rq_date = {}, received = {}, delta = {} μs",
+            "repay (user = {}): amount = {}, reserve = {}, rq_date = {}, received = {}, delta = {} μs",
             event.user,
             event.amount,
+            event.reserve,
             rq_date,
             received,
             received - rq_date
@@ -883,8 +885,9 @@ where
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
         format!(
-            "reserve_used_as_collateral_enabled (user = {}): rq_date = {}, received = {}, delta = {} μs",
+            "reserve_used_as_collateral_enabled (user = {}): reserve = {}, rq_date = {}, received = {}, delta = {} μs",
             event.user,
+            event.reserve,
             rq_date,
             received,
             received - rq_date
@@ -1046,8 +1049,9 @@ where
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
         format!(
-            "reserve_used_as_collateral_disabled (user = {}): rq_date = {}, received = {}, delta = {} μs",
+            "reserve_used_as_collateral_disabled (user = {}): reserve = {}, rq_date = {}, received = {}, delta = {} μs",
             event.user,
+            event.reserve,
             rq_date,
             received,
             received - rq_date
@@ -1209,10 +1213,13 @@ where
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
         format!(
-            "liquidation_call (user = {}): debtToCover = {}, liquidatedCollateralAmount = {}, rq_date = {}, received = {}, delta = {} μs",
+            "liquidation_call (user = {}): debtToCover = {}, debtReserve = {}, \
+            liquidatedCollateralAmount = {}, liquidatedCollateralReserve = {}, rq_date = {}, received = {}, delta = {} μs",
             event.user,
             event.debtToCover,
+            event.debtAsset,
             event.liquidatedCollateralAmount,
+            event.collateralAsset,
             rq_date,
             received,
             received - rq_date
@@ -1318,12 +1325,12 @@ where
                 .to_ray(decimals[bor_idx])
                 .to_scaled(c.variable_borrow.read().await.0[bor_idx].index),
         );
-        col[col_idx] = col[col_idx].saturating_sub(
-            event
-                .liquidatedCollateralAmount
-                .to_ray(decimals[col_idx])
-                .to_scaled(c.liquidity.read().await.0[col_idx].index),
-        );
+        // col[col_idx] = col[col_idx].saturating_sub(
+        //     event
+        //         .liquidatedCollateralAmount
+        //         .to_ray(decimals[col_idx])
+        //         .to_scaled(c.liquidity.read().await.0[col_idx].index),
+        // );
 
         debug!(
             "liquidation_call (user = {}): borrowed repay amount = {}, bor = {},\
@@ -1331,11 +1338,11 @@ where
             event.user, event.debtToCover, bor, event.liquidatedCollateralAmount, col
         );
 
-        s_tx.send(SyncRequest::Collateral(
-            SyncTarget::Cell(row_num, col_idx),
-            rq_date,
-        ))
-        .await?;
+        // s_tx.send(SyncRequest::Collateral(
+        //     SyncTarget::Cell(row_num, col_idx),
+        //     rq_date,
+        // ))
+        // .await?;
         s_tx.send(SyncRequest::Borrowed(
             SyncTarget::Cell(row_num, bor_idx),
             rq_date,

@@ -13,7 +13,7 @@ use alloy::rpc::types::Filter;
 use alloy::sol;
 use alloy::sol_types::SolEventInterface;
 use alloy_primitives::aliases::U40;
-use alloy_primitives::{Sign, I256, U256, U512};
+use alloy_primitives::{I256, Sign, U256, U512};
 use async_trait::async_trait;
 use bitvec::prelude::*;
 use chrono::Utc;
@@ -21,7 +21,7 @@ use circuitbreaker_rs::{CircuitBreaker, DefaultPolicy};
 use dashmap::DashMap;
 use eyre::eyre;
 use futures::future::try_join_all;
-use ndarray::{concatenate, Array1, Array2, Axis};
+use ndarray::{Array1, Array2, Axis, concatenate};
 use std::collections::HashMap;
 use std::default::Default;
 use std::error::Error;
@@ -29,11 +29,11 @@ use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::RwLock;
+use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::{task, time, try_join};
-use tokio_retry::strategy::FixedInterval;
 use tokio_retry::Retry;
+use tokio_retry::strategy::FixedInterval;
 use tracing::{debug, error, info};
 
 // antonanohin@gmail.com
@@ -971,53 +971,76 @@ where
 
     let w_num = 4;
     let bound = 1000;
-    let lq_lookup_tx = liquidation_lookup(
-        cache.clone(),
-        liquidation(cache.clone(), w_num, bound).await?,
-        bound,
-    )
-    .await?;
+    // let lq_lookup_tx = liquidation_lookup(
+    //     cache.clone(),
+    //     liquidation(cache.clone(), w_num, bound).await?,
+    //     bound,
+    // )
+    // .await?;
     let (mut sync_counter, sync_senders) = (0, listen_sync(cache.clone(), w_num, bound).await?);
-    let (mut hf_counter, hf_senders) = (
-        0,
-        listen_hf_calc(cache.clone(), lq_lookup_tx, w_num, bound).await?,
-    );
+    // let (mut hf_counter, hf_senders) = (
+    //     0,
+    //     listen_hf_calc(cache.clone(), lq_lookup_tx, w_num, bound).await?,
+    // );
 
-    liquidation_threshold_update(
-        cache.clone(),
-        tokens.clone(),
-        provider.clone(),
-        hf_senders[hf_counter % w_num].clone(),
-    )
-    .await?;
-    hf_counter = hf_counter.wrapping_add(1);
+    let mut hf_senders = Vec::with_capacity(w_num);
+    let mut hf_counter = 0;
+    for worker in 0..w_num {
+        let (tx, mut rc) = channel::<HFRequest>(bound);
+        task::spawn(async move {
+            debug!("listen_hf_calc_dummy (worker = {}): created thread", worker);
 
-    listen_prices_update(
-        provider.clone(),
-        cache.clone(),
-        hf_senders[hf_counter % w_num].clone(),
-    )
-    .await?;
-    hf_counter = hf_counter.wrapping_add(1);
+            while let Some(hf_rq) = rc.recv().await {
+                match hf_rq {
+                    HFRequest::User(user, rq_date) => debug!(
+                        "listen_hf_calc_dummy (worker = {}): user = {}, rd_date = {}",
+                        worker, user, rq_date
+                    ),
+                    HFRequest::Full(rq_date) => debug!(
+                        "listen_hf_calc_dummy (worker = {}): rd_date = {}",
+                        worker, rq_date
+                    ),
+                }
+            }
+        });
+        hf_senders.push(tx);
+    }
 
-    let supply_txs = Cache::subscribe(
-        cache.clone(),
-        w_num,
-        bound,
-        provider.clone(),
-        tokens.clone(),
-        supply,
-    )
-    .await?;
-    let withdraw_txs = Cache::subscribe(
-        cache.clone(),
-        w_num,
-        bound,
-        provider.clone(),
-        tokens.clone(),
-        withdraw,
-    )
-    .await?;
+    // liquidation_threshold_update(
+    //     cache.clone(),
+    //     tokens.clone(),
+    //     provider.clone(),
+    //     hf_senders[hf_counter % w_num].clone(),
+    // )
+    // .await?;
+    // hf_counter = hf_counter.wrapping_add(1);
+
+    // listen_prices_update(
+    //     provider.clone(),
+    //     cache.clone(),
+    //     hf_senders[hf_counter % w_num].clone(),
+    // )
+    // .await?;
+    // hf_counter = hf_counter.wrapping_add(1);
+
+    // let supply_txs = Cache::subscribe(
+    //     cache.clone(),
+    //     w_num,
+    //     bound,
+    //     provider.clone(),
+    //     tokens.clone(),
+    //     supply,
+    // )
+    // .await?;
+    // let withdraw_txs = Cache::subscribe(
+    //     cache.clone(),
+    //     w_num,
+    //     bound,
+    //     provider.clone(),
+    //     tokens.clone(),
+    //     withdraw,
+    // )
+    // .await?;
     let borrow_txs = Cache::subscribe(
         cache.clone(),
         w_num,
@@ -1036,24 +1059,24 @@ where
         repay,
     )
     .await?;
-    let reserve_used_as_collateral_enabled_txs = Cache::subscribe(
-        cache.clone(),
-        w_num,
-        bound,
-        provider.clone(),
-        tokens.clone(),
-        reserve_used_as_collateral_enabled,
-    )
-    .await?;
-    let reserve_used_as_collateral_disabled_txs = Cache::subscribe(
-        cache.clone(),
-        w_num,
-        bound,
-        provider.clone(),
-        tokens.clone(),
-        reserve_used_as_collateral_disabled,
-    )
-    .await?;
+    // let reserve_used_as_collateral_enabled_txs = Cache::subscribe(
+    //     cache.clone(),
+    //     w_num,
+    //     bound,
+    //     provider.clone(),
+    //     tokens.clone(),
+    //     reserve_used_as_collateral_enabled,
+    // )
+    // .await?;
+    // let reserve_used_as_collateral_disabled_txs = Cache::subscribe(
+    //     cache.clone(),
+    //     w_num,
+    //     bound,
+    //     provider.clone(),
+    //     tokens.clone(),
+    //     reserve_used_as_collateral_disabled,
+    // )
+    // .await?;
     let liquidation_call_txs = Cache::subscribe(
         cache.clone(),
         w_num,
@@ -1090,29 +1113,29 @@ where
             AaveEvents::IL2PoolEvents(event, rq_date) => match event {
                 IL2PoolEvents::Supply(ev) => {
                     debug!("start: supply");
-                    supply_txs[counters.supply % w_num]
-                        .send((
-                            ev,
-                            sync_senders[sync_counter % w_num].clone(),
-                            hf_senders[hf_counter % w_num].clone(),
-                            RqDate(rq_date),
-                        ))
-                        .await?;
-                    counters.supply = counters.supply.wrapping_add(1);
-                    sync_counter = sync_counter.wrapping_add(1);
+                    // supply_txs[counters.supply % w_num]
+                    //     .send((
+                    //         ev,
+                    //         sync_senders[sync_counter % w_num].clone(),
+                    //         hf_senders[hf_counter % w_num].clone(),
+                    //         RqDate(rq_date),
+                    //     ))
+                    //     .await?;
+                    // counters.supply = counters.supply.wrapping_add(1);
+                    // sync_counter = sync_counter.wrapping_add(1);
                 }
                 IL2PoolEvents::Withdraw(ev) => {
                     debug!("start: withdraw");
-                    withdraw_txs[counters.withdraw % w_num]
-                        .send((
-                            ev,
-                            sync_senders[sync_counter % w_num].clone(),
-                            hf_senders[hf_counter % w_num].clone(),
-                            RqDate(rq_date),
-                        ))
-                        .await?;
-                    counters.withdraw = counters.withdraw.wrapping_add(1);
-                    sync_counter = sync_counter.wrapping_add(1);
+                    // withdraw_txs[counters.withdraw % w_num]
+                    //     .send((
+                    //         ev,
+                    //         sync_senders[sync_counter % w_num].clone(),
+                    //         hf_senders[hf_counter % w_num].clone(),
+                    //         RqDate(rq_date),
+                    //     ))
+                    //     .await?;
+                    // counters.withdraw = counters.withdraw.wrapping_add(1);
+                    // sync_counter = sync_counter.wrapping_add(1);
                 }
                 IL2PoolEvents::Borrow(ev) => {
                     debug!("start: borrow");
@@ -1142,33 +1165,33 @@ where
                 }
                 IL2PoolEvents::ReserveUsedAsCollateralEnabled(ev) => {
                     debug!("start: enable as collateral");
-                    reserve_used_as_collateral_enabled_txs
-                        [counters.reserve_used_as_collateral_enabled % w_num]
-                        .send((
-                            ev,
-                            sync_senders[sync_counter % w_num].clone(),
-                            hf_senders[hf_counter % w_num].clone(),
-                            RqDate(rq_date),
-                        ))
-                        .await?;
-                    counters.reserve_used_as_collateral_enabled =
-                        counters.reserve_used_as_collateral_enabled.wrapping_add(1);
-                    sync_counter = sync_counter.wrapping_add(1);
+                    // reserve_used_as_collateral_enabled_txs
+                    //     [counters.reserve_used_as_collateral_enabled % w_num]
+                    //     .send((
+                    //         ev,
+                    //         sync_senders[sync_counter % w_num].clone(),
+                    //         hf_senders[hf_counter % w_num].clone(),
+                    //         RqDate(rq_date),
+                    //     ))
+                    //     .await?;
+                    // counters.reserve_used_as_collateral_enabled =
+                    //     counters.reserve_used_as_collateral_enabled.wrapping_add(1);
+                    // sync_counter = sync_counter.wrapping_add(1);
                 }
                 IL2PoolEvents::ReserveUsedAsCollateralDisabled(ev) => {
                     debug!("start: disable as collateral");
-                    reserve_used_as_collateral_disabled_txs
-                        [counters.reserve_used_as_collateral_disabled % w_num]
-                        .send((
-                            ev,
-                            sync_senders[sync_counter % w_num].clone(),
-                            hf_senders[hf_counter % w_num].clone(),
-                            RqDate(rq_date),
-                        ))
-                        .await?;
-                    counters.reserve_used_as_collateral_disabled =
-                        counters.reserve_used_as_collateral_disabled.wrapping_add(1);
-                    sync_counter = sync_counter.wrapping_add(1);
+                    // reserve_used_as_collateral_disabled_txs
+                    //     [counters.reserve_used_as_collateral_disabled % w_num]
+                    //     .send((
+                    //         ev,
+                    //         sync_senders[sync_counter % w_num].clone(),
+                    //         hf_senders[hf_counter % w_num].clone(),
+                    //         RqDate(rq_date),
+                    //     ))
+                    //     .await?;
+                    // counters.reserve_used_as_collateral_disabled =
+                    //     counters.reserve_used_as_collateral_disabled.wrapping_add(1);
+                    // sync_counter = sync_counter.wrapping_add(1);
                 }
                 IL2PoolEvents::LiquidationCall(ev) => {
                     debug!("start: liquidation call");
@@ -1754,6 +1777,9 @@ impl Cache {
     where
         P: DataProvider + 'static,
     {
+        // aave doesn't update straight so we have to wait to make sure it has been updated
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
         let UserData {
             reserve_scaled,
             collateral_scaled,
@@ -2033,6 +2059,19 @@ impl Cache {
                     )
                 })?
                 .order;
+
+            debug!(
+                "get_user_data: user = {}, token = {}, \
+            current_atoken_balance = {}, usage_as_collateral_enabled = {}, current_variable_debt = {}, \
+            liquidity_index = {}, variable_borrow_index = {}",
+                user,
+                token_address,
+                current_atoken_balance,
+                usage_as_collateral_enabled,
+                current_variable_debt,
+                liquidity_index,
+                variable_borrow_index
+            );
 
             liquidity_indexes[idx] = liquidity_index;
             liquidity_rates[idx] = liquidity_rate;

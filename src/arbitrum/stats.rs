@@ -19,7 +19,7 @@ use serde::ser::SerializeSeq;
 use serde::{Serialize, Serializer};
 use std::sync::Arc;
 use tokio::try_join;
-use tracing::info;
+use tracing::{debug, info};
 
 #[derive(Clone)]
 pub struct AppState<P>
@@ -1177,6 +1177,12 @@ where
         let user = user.clone();
         let provider = data_provider.clone();
 
+        let mut urd_tasks_log = String::new();
+        urd_tasks_log.push_str("(");
+        urd_tasks_log.push_str(format!("row = {}, user = {}", row, user).as_str());
+        urd_tasks_log.push_str(")");
+        debug!("get_test_probe_state: urd_tasks = {}", urd_tasks_log);
+
         tokens.iter().enumerate().map(move |(col, token)| {
             let provider = provider.clone();
             let token = token.clone();
@@ -1209,6 +1215,8 @@ where
     let mut variable_borrow_aave = vec![U256::default(); tokens.len()];
     let mut variable_borrow_index_aave = vec![0.0; tokens.len()];
 
+    let mut rd_result_log = String::new();
+    rd_result_log.push_str("[");
     for (
         col,
         ReserveData {
@@ -1218,12 +1226,26 @@ where
         },
     ) in rd_results
     {
+        rd_result_log.push_str("(");
+
+        rd_result_log.push_str(format!("col = {}", col).as_str());
+        rd_result_log.push_str(",");
+        rd_result_log.push_str("ReserveData {");
+        rd_result_log.push_str(format!("liquidity_index = {}, variable_borrow_index = {}",
+                                       liquidity_index, variable_borrow_index).as_str());
+        rd_result_log.push_str("}");
+
+        rd_result_log.push_str(")");
+
         liquidity_aave[col] = liquidity_index;
         liquidity_index_aave[col] = liquidity_index.as_f64_ray();
 
         variable_borrow_aave[col] = variable_borrow_index;
         variable_borrow_index_aave[col] = variable_borrow_index.as_f64_ray();
     }
+
+    rd_result_log.push_str("]");
+    debug!("get_test_probe_state: rd_results = {}", rd_result_log);
 
     let mut reserve_scaled_aave = vec![vec![U256::default(); tokens.len()]; window_size];
     let mut reserve_aave = vec![vec![0.0; tokens.len()]; window_size];
@@ -1233,6 +1255,9 @@ where
 
     let mut borrowed_scaled_aave = vec![vec![U256::default(); tokens.len()]; window_size];
     let mut borrowed_aave = vec![vec![0.0; tokens.len()]; window_size];
+
+    let mut urd_result_log = String::new();
+    urd_result_log.push_str("[");
 
     for (
         row,
@@ -1244,6 +1269,19 @@ where
         },
     ) in urd_results
     {
+        urd_result_log.push_str("(");
+
+        urd_result_log.push_str(format!("row = {}", row).as_str());
+        urd_result_log.push_str(",");
+        urd_result_log.push_str(format!("col = {}", col).as_str());
+        urd_result_log.push_str(",");
+        urd_result_log.push_str("UserReserveData {");
+        urd_result_log.push_str(format!("current_atoken_balance = {}, current_variable_debt = {}, usage_as_collateral_enabled = {}",
+                                        current_atoken_balance, current_variable_debt, usage_as_collateral_enabled).as_str());
+        urd_result_log.push_str("}");
+
+        urd_result_log.push_str(")");
+
         if usage_as_collateral_enabled {
             collateral_scaled_aave[row][col] = current_atoken_balance
                 .to_ray(decimals[col])
@@ -1260,6 +1298,9 @@ where
             .to_scaled(variable_borrow_aave[col]);
         borrowed_aave[row][col] = current_variable_debt.as_f64(decimals[col]);
     }
+
+    urd_result_log.push_str("]");
+    debug!("get_test_probe_state: urd_results = {}", urd_result_log);
 
     let hf_diff = {
         hf_aave
