@@ -439,12 +439,12 @@ where
                 })?
                 .write()
                 .await;
-            col[idx] = col[idx].saturating_sub(
+            col[idx] = wipe_dust_ray(col[idx].saturating_sub(
                 event
                     .amount
                     .to_ray(decimals[idx])
                     .to_scaled(c.liquidity.read().await.0[idx].index),
-            );
+            ));
             *last_modified = now;
 
             debug!(
@@ -515,12 +515,12 @@ where
                 })?
                 .write()
                 .await;
-            res[idx] = res[idx].saturating_sub(
+            res[idx] = wipe_dust_ray(res[idx].saturating_sub(
                 event
                     .amount
                     .to_ray(decimals[idx])
                     .to_scaled(c.liquidity.read().await.0[idx].index),
-            );
+            ));
             *last_modified = now;
             debug!(
                 "withdraw (user = {}): reserve amount = {}, res = {}",
@@ -806,12 +806,12 @@ where
             .write()
             .await;
 
-        bor[idx] = bor[idx].saturating_sub(
+        bor[idx] = wipe_dust_ray(bor[idx].saturating_sub(
             event
                 .amount
                 .to_ray(decimals[idx])
                 .to_scaled(c.variable_borrow.read().await.0[idx].index),
-        );
+        ));
         *last_modified = now;
 
         debug!(
@@ -1319,18 +1319,18 @@ where
             .await;
         *last_modified = now;
 
-        bor[bor_idx] = bor[bor_idx].saturating_sub(
+        bor[bor_idx] = wipe_dust_ray(bor[bor_idx].saturating_sub(
             event
                 .debtToCover
                 .to_ray(decimals[bor_idx])
                 .to_scaled(c.variable_borrow.read().await.0[bor_idx].index),
-        );
-        // col[col_idx] = col[col_idx].saturating_sub(
+        ));
+        // col[col_idx] = wipe_dust_ray(col[col_idx].saturating_sub(
         //     event
         //         .liquidatedCollateralAmount
         //         .to_ray(decimals[col_idx])
         //         .to_scaled(c.liquidity.read().await.0[col_idx].index),
-        // );
+        // ));
 
         debug!(
             "liquidation_call (user = {}): borrowed repay amount = {}, bor = {},\
@@ -1484,4 +1484,19 @@ where
     }
 
     Ok(())
+}
+
+pub(crate) fn wipe_dust_ray(x: U256) -> U256 {
+    const DUST_RAY: U256 = U256::from_limbs([
+        0x02C7E14AF6800000,
+        0x000000000000152D,
+        0x0,
+        0x0,
+    ]);
+
+    if x < DUST_RAY {
+        U256::ZERO
+    } else {
+        x
+    }
 }

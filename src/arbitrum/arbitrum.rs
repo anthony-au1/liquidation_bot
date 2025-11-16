@@ -1778,7 +1778,7 @@ impl Cache {
         P: DataProvider + 'static,
     {
         // aave doesn't update straight so we have to wait to make sure it has been updated
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
 
         let UserData {
             reserve_scaled,

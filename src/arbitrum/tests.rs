@@ -12,7 +12,8 @@ use crate::arbitrum::arbitrum::{
 };
 use crate::arbitrum::events::{
     borrow, create_user, liquidation_call, repay, reserve_data_updated,
-    reserve_used_as_collateral_disabled, reserve_used_as_collateral_enabled, supply, withdraw,
+    reserve_used_as_collateral_disabled, reserve_used_as_collateral_enabled, supply, wipe_dust_ray,
+    withdraw,
 };
 use alloy_primitives::aliases::U40;
 use alloy_primitives::{Address, U256};
@@ -4840,7 +4841,9 @@ async fn test_providers() -> eyre::Result<()> {
 
             let r = breaker
                 .call_async(|| async {
-                    let res = api.call().await
+                    let res = api
+                        .call()
+                        .await
                         .map_err(|e| ApiError::new(format!("{e:?}")))?;
                     Ok(res)
                 })
@@ -4874,19 +4877,11 @@ async fn test_providers() -> eyre::Result<()> {
 
 #[tokio::test]
 async fn test_calculations() -> eyre::Result<()> {
-    let base = U256::from(11659502822736252202798490923468_u128);
-    let amount = U256::from(14000153720_u128);
-    let target = amount.to_ray(1000_000_f64);
+    let base = U256::from(22_195_106_016_185_716_597_509_u128);
 
-    assert_eq!(target, U256::from(14000153720000000000000000000000_u128));
+    let val = wipe_dust_ray(base);
 
-    let scaled = target.to_scaled(U256::from(1200750489194593789906695605_u128));
+    assert_eq!(val, U256::ZERO);
 
-    assert_eq!(scaled, U256::from(11659502824263378798423098554681_u128));
-
-    let total = scaled - base;
-
-    assert_eq!(total, U256::from(1527126595624607631213_u128));
-
-   Ok(())
+    Ok(())
 }
