@@ -2648,6 +2648,7 @@ impl RayOperations for U256 {
         let half_b = b / U512::from(2u8);
         let result = (U512::from(self) * U512::from(RAY) + half_b) / b;
         U256::from(result)
+        // U256::from((U512::from(self) * U512::from(RAY)) / U512::from(b))
     }
 
     fn to_ray(self, decimals: f64) -> U256 {

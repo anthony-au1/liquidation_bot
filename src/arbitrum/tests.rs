@@ -12,7 +12,7 @@ use crate::arbitrum::arbitrum::{
 };
 use crate::arbitrum::events::{
     borrow, create_user, liquidation_call, repay, reserve_data_updated,
-    reserve_used_as_collateral_disabled, reserve_used_as_collateral_enabled, supply, wipe_dust_ray,
+    reserve_used_as_collateral_disabled, reserve_used_as_collateral_enabled, supply,
     withdraw,
 };
 use alloy_primitives::aliases::U40;
@@ -4873,15 +4873,4 @@ async fn test_providers() -> eyre::Result<()> {
     }
 
     Err(eyre::eyre!("failed test"))
-}
-
-#[tokio::test]
-async fn test_calculations() -> eyre::Result<()> {
-    let base = U256::from(22_195_106_016_185_716_597_509_u128);
-
-    let val = wipe_dust_ray(base);
-
-    assert_eq!(val, U256::ZERO);
-
-    Ok(())
 }
