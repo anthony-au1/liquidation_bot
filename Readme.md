@@ -82,5 +82,3 @@
 
 
 **Future Improvements**
-
-1. transfer from user to user affects collateral

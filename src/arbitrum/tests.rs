@@ -5,15 +5,14 @@ use crate::arbitrum::arbitrum::IL2Pool::{
 };
 use crate::arbitrum::arbitrum::{
     build_breaker, liquidation, liquidation_lookup, liquidation_threshold_update, listen_events, listen_hf_calc, listen_prices_update, listen_sync,
-    setup, AaveEvents, ApiError, Cache, DataProvider, F64Converter, HFRequest, Index,
-    RayOperations, ReserveData, RqDate, Scaler, SyncRequest,
-    SyncTarget, TokenDetails, UserAccountData, UserData, UserReserveData,
-    UserSettings,
+    setup, AaveEvents, ApiError, Cache, DataProvider, F64Converter, HFRequest,
+    Index, RayOperations, ReserveData, RqDate, Scaler, SyncRequest,
+    SyncTarget, TokenDetails, UserAccountData, UserData,
+    UserReserveData, UserSettings, SECONDS_PER_YEAR,
 };
 use crate::arbitrum::events::{
     borrow, create_user, liquidation_call, repay, reserve_data_updated,
-    reserve_used_as_collateral_disabled, reserve_used_as_collateral_enabled, supply,
-    withdraw,
+    reserve_used_as_collateral_disabled, reserve_used_as_collateral_enabled, supply, withdraw,
 };
 use alloy_primitives::aliases::U40;
 use alloy_primitives::{Address, U256};
@@ -993,11 +992,6 @@ async fn test_get_user_data() -> eyre::Result<()> {
         reserve_scaled,
         collateral_scaled,
         borrowed_scaled,
-        liquidity_indexes,
-        liquidity_rates,
-        variable_borrow_indexes,
-        variable_borrow_rates,
-        last_update_timestamps,
         user_settings,
     } = cache
         .get_user_data(dummy_data_provider, &tokens, &user)
@@ -1045,26 +1039,6 @@ async fn test_get_user_data() -> eyre::Result<()> {
         ]
     );
 
-    assert_eq!(
-        liquidity_indexes,
-        vec![1045.as_u256(24), 1035.as_u256(24), 1025.as_u256(24)]
-    );
-    assert_eq!(
-        liquidity_rates,
-        vec![45.as_u256(24), 35.as_u256(24), 25.as_u256(24)]
-    );
-    assert_eq!(
-        variable_borrow_indexes,
-        vec![105.as_u256(25), 104.as_u256(25), 103.as_u256(25)]
-    );
-    assert_eq!(
-        variable_borrow_rates,
-        vec![5.as_u256(25), 4.as_u256(25), 3.as_u256(25)]
-    );
-    assert_eq!(
-        last_update_timestamps,
-        vec![U40::from(Utc::now().timestamp()); 3]
-    );
     assert_eq!(user_settings.row_num, 0);
     assert_eq!(user_settings.use_as_collateral, bitvec![0, 1, 0]);
 
@@ -1500,11 +1474,6 @@ async fn test_create_user() -> eyre::Result<()> {
         reserve_scaled,
         collateral_scaled,
         borrowed_scaled,
-        liquidity_indexes,
-        liquidity_rates,
-        variable_borrow_indexes,
-        variable_borrow_rates,
-        last_update_timestamps,
         user_settings,
     } = cache
         .get_user_data(dummy_data_provider, &tokens, &user)
@@ -1550,26 +1519,6 @@ async fn test_create_user() -> eyre::Result<()> {
                 .to_ray(decimals[2])
                 .to_scaled(cache.variable_borrow.read().await.0[2].index),
         ]
-    );
-    assert_eq!(
-        liquidity_indexes,
-        vec![1045.as_u256(24), 1035.as_u256(24), 1025.as_u256(24)]
-    );
-    assert_eq!(
-        liquidity_rates,
-        vec![45.as_u256(24), 35.as_u256(24), 25.as_u256(24)]
-    );
-    assert_eq!(
-        variable_borrow_indexes,
-        vec![105.as_u256(25), 104.as_u256(25), 103.as_u256(25)]
-    );
-    assert_eq!(
-        variable_borrow_rates,
-        vec![5.as_u256(25), 4.as_u256(25), 3.as_u256(25)]
-    );
-    assert_eq!(
-        last_update_timestamps,
-        vec![U40::from(Utc::now().timestamp()); 3]
     );
     assert_eq!(user_settings.row_num, 0);
     assert_eq!(user_settings.use_as_collateral, bitvec![0, 1, 0]);
@@ -4644,7 +4593,7 @@ async fn test_some_numbers() -> eyre::Result<()> {
         .to_scaled(1058.as_u256(24));
 
     let dt = U256::from(1);
-    let dt_spy = dt.ray_div(U256::from(31_536_000));
+    let dt_spy = dt.ray_div(U256::from(SECONDS_PER_YEAR));
     let vbi_new = 106.as_u256(25).ray_mul(
         U256::from(1_000_000_000_000_000_000_000_000_000_u128)
             + U256::from(6.as_u256(26)).ray_mul(dt_spy),

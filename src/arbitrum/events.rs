@@ -3,8 +3,9 @@ use crate::arbitrum::arbitrum::IL2Pool::{
     ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
 use crate::arbitrum::arbitrum::{
-    Cache, DataProvider, F64Converter, HFRequest, RAY, RayOperations, RqDate, Scaler, SyncRequest,
-    SyncTarget, TimeStamp, TokenDetails, Tokens,
+    get_latest_liquidity_index, get_latest_variable_borrow_index, Cache, DataProvider, F64Converter, HFRequest, RayOperations, RqDate,
+    Scaler, SyncRequest, SyncTarget, TimeStamp, TokenDetails, Tokens, RAY,
+    SECONDS_PER_YEAR,
 };
 use alloy_primitives::{Address, U256};
 use chrono::Utc;
@@ -223,10 +224,14 @@ where
                 })?
                 .write()
                 .await;
-            col[idx] += event
-                .amount
-                .to_ray(decimals[idx])
-                .to_scaled(c.liquidity.read().await.0[idx].index);
+
+            {
+                let (liquidity_index, _) = &*c.liquidity.read().await;
+                col[idx] += event
+                    .amount
+                    .to_ray(decimals[idx])
+                    .to_scaled(get_latest_liquidity_index(&liquidity_index[idx], now)?);
+            }
             *last_modified = now;
 
             debug!(
@@ -297,10 +302,14 @@ where
                 })?
                 .write()
                 .await;
-            res[idx] += event
-                .amount
-                .to_ray(decimals[idx])
-                .to_scaled(c.liquidity.read().await.0[idx].index);
+
+            {
+                let (liquidity_index, _) = &*c.liquidity.read().await;
+                res[idx] += event
+                    .amount
+                    .to_ray(decimals[idx])
+                    .to_scaled(get_latest_liquidity_index(&liquidity_index[idx], now)?);
+            }
             *last_modified = now;
 
             debug!(
@@ -439,12 +448,16 @@ where
                 })?
                 .write()
                 .await;
-            col[idx] = wipe_dust_ray(col[idx].saturating_sub(
-                event
-                    .amount
-                    .to_ray(decimals[idx])
-                    .to_scaled(c.liquidity.read().await.0[idx].index),
-            ));
+
+            {
+                let (liquidity_index, _) = &*c.liquidity.read().await;
+                col[idx] = col[idx].saturating_sub(
+                    event
+                        .amount
+                        .to_ray(decimals[idx])
+                        .to_scaled(get_latest_liquidity_index(&liquidity_index[idx], now)?),
+                );
+            }
             *last_modified = now;
 
             debug!(
@@ -515,13 +528,18 @@ where
                 })?
                 .write()
                 .await;
-            res[idx] = wipe_dust_ray(res[idx].saturating_sub(
-                event
-                    .amount
-                    .to_ray(decimals[idx])
-                    .to_scaled(c.liquidity.read().await.0[idx].index),
-            ));
+
+            {
+                let (liquidity_index, _) = &*c.liquidity.read().await;
+                res[idx] = res[idx].saturating_sub(
+                    event
+                        .amount
+                        .to_ray(decimals[idx])
+                        .to_scaled(get_latest_liquidity_index(&liquidity_index[idx], now)?),
+                );
+            }
             *last_modified = now;
+
             debug!(
                 "withdraw (user = {}): reserve amount = {}, res = {}",
                 event.user, event.amount, res
@@ -658,10 +676,18 @@ where
             })?
             .write()
             .await;
-        bor[idx] += event
-            .amount
-            .to_ray(decimals[idx])
-            .to_scaled(c.variable_borrow.read().await.0[idx].index);
+
+        {
+            let (variable_borrow_index, _) = &*c.variable_borrow.read().await;
+            bor[idx] +=
+                event
+                    .amount
+                    .to_ray(decimals[idx])
+                    .to_scaled(get_latest_variable_borrow_index(
+                        &variable_borrow_index[idx],
+                        now,
+                    )?);
+        }
         *last_modified = now;
 
         debug!(
@@ -806,12 +832,12 @@ where
             .write()
             .await;
 
-        bor[idx] = wipe_dust_ray(bor[idx].saturating_sub(
-            event
-                .amount
-                .to_ray(decimals[idx])
-                .to_scaled(c.variable_borrow.read().await.0[idx].index),
-        ));
+        {
+            let (variable_borrow_index, _) = &*c.variable_borrow.read().await;
+            bor[idx] = bor[idx].saturating_sub(event.amount.to_ray(decimals[idx]).to_scaled(
+                get_latest_variable_borrow_index(&variable_borrow_index[idx], now)?,
+            ));
+        }
         *last_modified = now;
 
         debug!(
@@ -1319,17 +1345,20 @@ where
             .await;
         *last_modified = now;
 
-        bor[bor_idx] = wipe_dust_ray(bor[bor_idx].saturating_sub(
-            event
-                .debtToCover
-                .to_ray(decimals[bor_idx])
-                .to_scaled(c.variable_borrow.read().await.0[bor_idx].index),
-        ));
+        {
+            let (variable_borrow_index, _) = &*c.variable_borrow.read().await;
+            bor[bor_idx] =
+                bor[bor_idx].saturating_sub(event.debtToCover.to_ray(decimals[bor_idx]).to_scaled(
+                    get_latest_variable_borrow_index(&variable_borrow_index[bor_idx], now)?,
+                ));
+        }
+
+        // let (liquidity_index, _) = &*c.liquidity.read().await;
         // col[col_idx] = wipe_dust_ray(col[col_idx].saturating_sub(
         //     event
         //         .liquidatedCollateralAmount
         //         .to_ray(decimals[col_idx])
-        //         .to_scaled(c.liquidity.read().await.0[col_idx].index),
+        //         .to_scaled(get_latest_liquidity_index(&liquidity_index[col_idx], now)?),
         // ));
 
         debug!(
@@ -1434,32 +1463,18 @@ where
         let (vbii, vbii_last_modified) = &mut *cache.variable_borrow_index.write().await;
         vbii[idx] = event.variableBorrowIndex.as_f64_ray();
 
-        let one_ray: U256 = U256::from(RAY);
-        let seconds_per_year = U256::from(31_536_000);
-
         for (_, TokenDetails { order, .. }) in tokens.iter() {
             let idx2 = order.clone();
             if idx == idx2 {
                 continue;
             }
 
-            let dt = U256::from(now.saturating_sub(li[idx2].last_update) / 1_000_000);
-            let dt_spy = dt.ray_div(seconds_per_year);
-            let li_new = li[idx2]
-                .index
-                .ray_mul(one_ray + li[idx2].rate.ray_mul(dt_spy));
+            let li_new = get_latest_liquidity_index(&li[idx2], now)?;
             (li[idx2].index, li[idx2].last_update) = (li_new, now);
-
             lii[idx2] = li_new.as_f64_ray();
 
-            let dt = U256::from(now.saturating_sub(vbi[idx2].last_update) / 1_000_000);
-
-            let dt_spy = dt.ray_div(seconds_per_year);
-            let vbi_new = vbi[idx2]
-                .index
-                .ray_mul(one_ray + vbi[idx2].rate.ray_mul(dt_spy));
+            let vbi_new = get_latest_variable_borrow_index(&vbi[idx2], now)?;
             (vbi[idx2].index, vbi[idx2].last_update) = (vbi_new, now);
-
             vbii[idx2] = vbi_new.as_f64_ray();
         }
 
@@ -1484,19 +1499,4 @@ where
     }
 
     Ok(())
-}
-
-pub(crate) fn wipe_dust_ray(x: U256) -> U256 {
-    const DUST_RAY: U256 = U256::from_limbs([
-        0x02C7E14AF6800000,
-        0x000000000000152D,
-        0x0,
-        0x0,
-    ]);
-
-    if x < DUST_RAY {
-        U256::ZERO
-    } else {
-        x
-    }
 }

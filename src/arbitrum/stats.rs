@@ -1,14 +1,14 @@
 use crate::arbitrum::arbitrum::{
-    build_breaker, AaveDataProvider, Cache, DataProvider,
-    F64Converter, IAaveOracle, IAaveProtocolDataProvider, IL2Pool, Index, RayOperations,
-    ReserveData, Scaler, UserReserveData, AAVE_ORACLE_ADDRESS, AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS, L2_POOL_ADDRESS,
+    AAVE_ORACLE_ADDRESS, AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS, AaveDataProvider, Cache,
+    DataProvider, F64Converter, IAaveOracle, IAaveProtocolDataProvider, IL2Pool, Index,
+    L2_POOL_ADDRESS, RayOperations, ReserveData, Scaler, UserReserveData, build_breaker,
 };
 use alloy::providers::Provider;
 use alloy::transports::http::reqwest::StatusCode;
 use alloy_primitives::{Address, U256};
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;
-use axum::Json;
 use bitvec::order::Lsb0;
 use bitvec::prelude::BitVec;
 use futures::future::try_join_all;
@@ -1177,11 +1177,10 @@ where
         let user = user.clone();
         let provider = data_provider.clone();
 
-        let mut urd_tasks_log = String::new();
-        urd_tasks_log.push_str("(");
-        urd_tasks_log.push_str(format!("row = {}, user = {}", row, user).as_str());
-        urd_tasks_log.push_str(")");
-        debug!("get_test_probe_state: urd_tasks = {}", urd_tasks_log);
+        debug!(
+            "get_test_probe_state: urd_tasks = (row = {}, user = {})",
+            row, user
+        );
 
         tokens.iter().enumerate().map(move |(col, token)| {
             let provider = provider.clone();
@@ -1226,16 +1225,13 @@ where
         },
     ) in rd_results
     {
-        rd_result_log.push_str("(");
-
-        rd_result_log.push_str(format!("col = {}", col).as_str());
-        rd_result_log.push_str(",");
-        rd_result_log.push_str("ReserveData {");
-        rd_result_log.push_str(format!("liquidity_index = {}, variable_borrow_index = {}",
-                                       liquidity_index, variable_borrow_index).as_str());
-        rd_result_log.push_str("}");
-
-        rd_result_log.push_str(")");
+        rd_result_log.push_str(
+            format!(
+                "(col = {}, ReserveData {{liquidity_index = {}, variable_borrow_index = {}}})",
+                col, liquidity_index, variable_borrow_index
+            )
+            .as_str(),
+        );
 
         liquidity_aave[col] = liquidity_index;
         liquidity_index_aave[col] = liquidity_index.as_f64_ray();
@@ -1269,18 +1265,8 @@ where
         },
     ) in urd_results
     {
-        urd_result_log.push_str("(");
-
-        urd_result_log.push_str(format!("row = {}", row).as_str());
-        urd_result_log.push_str(",");
-        urd_result_log.push_str(format!("col = {}", col).as_str());
-        urd_result_log.push_str(",");
-        urd_result_log.push_str("UserReserveData {");
-        urd_result_log.push_str(format!("current_atoken_balance = {}, current_variable_debt = {}, usage_as_collateral_enabled = {}",
-                                        current_atoken_balance, current_variable_debt, usage_as_collateral_enabled).as_str());
-        urd_result_log.push_str("}");
-
-        urd_result_log.push_str(")");
+        urd_result_log.push_str(format!("(row = {}, col = {}, UserReserveData {{ current_atoken_balance = {}, current_variable_debt = {}, usage_as_collateral_enabled = {}}})",
+                                        row, col, current_atoken_balance, current_variable_debt, usage_as_collateral_enabled).as_str());
 
         if usage_as_collateral_enabled {
             collateral_scaled_aave[row][col] = current_atoken_balance
