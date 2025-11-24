@@ -3,9 +3,9 @@ use crate::arbitrum::arbitrum::IL2Pool::{
     ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
 use crate::arbitrum::arbitrum::{
-    get_latest_liquidity_index, get_latest_variable_borrow_index, Cache, DataProvider, F64Converter, HFRequest, RayOperations, RqDate,
-    Scaler, SyncRequest, SyncTarget, TimeStamp, TokenDetails, Tokens, RAY,
-    SECONDS_PER_YEAR,
+    Cache, DataProvider, F64Converter, HFRequest, RAY, RayOperations, RqDate, SECONDS_PER_YEAR,
+    Scaler, SyncRequest, SyncTarget, TimeStamp, TokenDetails, Tokens, get_latest_liquidity_index,
+    get_latest_variable_borrow_index,
 };
 use alloy_primitives::{Address, U256};
 use chrono::Utc;
@@ -226,18 +226,19 @@ where
                 .await;
 
             {
-                let (liquidity_index, _) = &*c.liquidity.read().await;
+                let (liquidity, _) = &*c.liquidity.read().await;
+                let liquidity_index = get_latest_liquidity_index(&liquidity[idx], now)?;
                 col[idx] += event
                     .amount
                     .to_ray(decimals[idx])
-                    .to_scaled(get_latest_liquidity_index(&liquidity_index[idx], now)?);
+                    .to_scaled(liquidity_index);
+
+                debug!(
+                    "supply (user = {}): collateral amount = {}, col = {}, liquidity = {:?}, liquidity_index_updated = {}",
+                    event.onBehalfOf, event.amount, col, liquidity[idx], liquidity_index
+                );
             }
             *last_modified = now;
-
-            debug!(
-                "supply (user = {}): collateral amount = {}, col = {}",
-                event.onBehalfOf, event.amount, col
-            );
 
             s_tx.send(SyncRequest::Collateral(
                 SyncTarget::Cell(row_num, idx),
@@ -304,18 +305,19 @@ where
                 .await;
 
             {
-                let (liquidity_index, _) = &*c.liquidity.read().await;
+                let (liquidity, _) = &*c.liquidity.read().await;
+                let liquidity_index = get_latest_liquidity_index(&liquidity[idx], now)?;
                 res[idx] += event
                     .amount
                     .to_ray(decimals[idx])
-                    .to_scaled(get_latest_liquidity_index(&liquidity_index[idx], now)?);
+                    .to_scaled(liquidity_index);
+
+                debug!(
+                    "supply (user = {}): reserve amount = {}, res = {}, liquidity = {:?}, liquidity_index_updated = {}",
+                    event.onBehalfOf, event.amount, res, liquidity[idx], liquidity_index
+                );
             }
             *last_modified = now;
-
-            debug!(
-                "supply (user = {}): reserve amount = {}, res = {}",
-                event.onBehalfOf, event.amount, res
-            );
 
             Ok(())
         };
@@ -450,20 +452,21 @@ where
                 .await;
 
             {
-                let (liquidity_index, _) = &*c.liquidity.read().await;
+                let (liquidity, _) = &*c.liquidity.read().await;
+                let liquidity_index = get_latest_liquidity_index(&liquidity[idx], now)?;
                 col[idx] = col[idx].saturating_sub(
                     event
                         .amount
                         .to_ray(decimals[idx])
-                        .to_scaled(get_latest_liquidity_index(&liquidity_index[idx], now)?),
+                        .to_scaled(liquidity_index),
+                );
+
+                debug!(
+                    "withdraw (user = {}): collateral amount = {}, col = {}, liquidity = {:?}, liquidity_index_updated = {}",
+                    event.user, event.amount, col, liquidity[idx], liquidity_index
                 );
             }
             *last_modified = now;
-
-            debug!(
-                "withdraw (user = {}): collateral amount = {}, col = {}",
-                event.user, event.amount, col
-            );
 
             s_tx.send(SyncRequest::Collateral(
                 SyncTarget::Cell(row_num, idx),
@@ -530,20 +533,21 @@ where
                 .await;
 
             {
-                let (liquidity_index, _) = &*c.liquidity.read().await;
+                let (liquidity, _) = &*c.liquidity.read().await;
+                let liquidity_index = get_latest_liquidity_index(&liquidity[idx], now)?;
                 res[idx] = res[idx].saturating_sub(
                     event
                         .amount
                         .to_ray(decimals[idx])
-                        .to_scaled(get_latest_liquidity_index(&liquidity_index[idx], now)?),
+                        .to_scaled(liquidity_index),
+                );
+
+                debug!(
+                    "withdraw (user = {}): reserve amount = {}, res = {}, liquidity = {:?}, liquidity_index_updated = {}",
+                    event.user, event.amount, res, liquidity[idx], liquidity_index
                 );
             }
             *last_modified = now;
-
-            debug!(
-                "withdraw (user = {}): reserve amount = {}, res = {}",
-                event.user, event.amount, res
-            );
 
             Ok(())
         };
@@ -678,22 +682,21 @@ where
             .await;
 
         {
-            let (variable_borrow_index, _) = &*c.variable_borrow.read().await;
-            bor[idx] +=
-                event
-                    .amount
-                    .to_ray(decimals[idx])
-                    .to_scaled(get_latest_variable_borrow_index(
-                        &variable_borrow_index[idx],
-                        now,
-                    )?);
+            let (variable_borrow, _) = &*c.variable_borrow.read().await;
+            let variable_borrow_index =
+                get_latest_variable_borrow_index(&variable_borrow[idx], now)?;
+            bor[idx] += event
+                .amount
+                .to_ray(decimals[idx])
+                .to_scaled(variable_borrow_index);
+
+            debug!(
+                "borrow (user = {}): borrowed amount = {}, bor = {}, \
+                variable_borrow = {:?}, variable_borrow_index_updated = {}",
+                event.onBehalfOf, event.amount, bor, variable_borrow, variable_borrow_index
+            );
         }
         *last_modified = now;
-
-        debug!(
-            "borrow (user = {}): borrowed amount = {}, bor = {}",
-            event.onBehalfOf, event.amount, bor
-        );
 
         s_tx.send(SyncRequest::Borrowed(
             SyncTarget::Cell(row_num, idx),
@@ -833,17 +836,22 @@ where
             .await;
 
         {
-            let (variable_borrow_index, _) = &*c.variable_borrow.read().await;
-            bor[idx] = bor[idx].saturating_sub(event.amount.to_ray(decimals[idx]).to_scaled(
-                get_latest_variable_borrow_index(&variable_borrow_index[idx], now)?,
-            ));
+            let (variable_borrow, _) = &*c.variable_borrow.read().await;
+            let variable_borrow_index =
+                get_latest_variable_borrow_index(&variable_borrow[idx], now)?;
+            bor[idx] = bor[idx].saturating_sub(
+                event
+                    .amount
+                    .to_ray(decimals[idx])
+                    .to_scaled(variable_borrow_index),
+            );
+
+            debug!(
+                "repay (user = {}): borrowed amount = {}, bor = {}, variable_borrow = {:?}, variable_borrow_index_updated = {}",
+                event.user, event.amount, bor, variable_borrow, variable_borrow_index
+            );
         }
         *last_modified = now;
-
-        debug!(
-            "repay (user = {}): borrowed amount = {}, bor = {}",
-            event.user, event.amount, bor
-        );
 
         s_tx.send(SyncRequest::Borrowed(
             SyncTarget::Cell(row_num, idx),
@@ -1346,26 +1354,52 @@ where
         *last_modified = now;
 
         {
-            let (variable_borrow_index, _) = &*c.variable_borrow.read().await;
-            bor[bor_idx] =
-                bor[bor_idx].saturating_sub(event.debtToCover.to_ray(decimals[bor_idx]).to_scaled(
-                    get_latest_variable_borrow_index(&variable_borrow_index[bor_idx], now)?,
-                ));
+            let (variable_borrow, _) = &*c.variable_borrow.read().await;
+            let variable_borrow_index =
+                get_latest_variable_borrow_index(&variable_borrow[bor_idx], now)?;
+            bor[bor_idx] = bor[bor_idx].saturating_sub(
+                event
+                    .debtToCover
+                    .to_ray(decimals[bor_idx])
+                    .to_scaled(variable_borrow_index),
+            );
+
+            // let (liquidity, _) = &*c.liquidity.read().await;
+            // let liquidity_index = get_latest_liquidity_index(&liquidity[col_idx], now)?;
+            // col[col_idx] = col[col_idx].saturating_sub(
+            //     event
+            //         .liquidatedCollateralAmount
+            //         .to_ray(decimals[col_idx])
+            //         .to_scaled(liquidity_index),
+            // );
+
+            // debug!(
+            //     "liquidation_call (user = {}): borrowed repay amount = {}, bor = {},\
+            //  collateral liquidated amount = {}, col = {}, variable_borrow = {:?}, variable_borrow_index_updated = {}, \
+            //  liquidity = {:?}, liquidity_index_updated = {}",
+            //     event.user,
+            //     event.debtToCover,
+            //     bor,
+            //     event.liquidatedCollateralAmount,
+            //     col,
+            //     variable_borrow,
+            //     variable_borrow_index,
+            //     liquidity,
+            //     liquidity_index
+            // );
+
+            debug!(
+                "liquidation_call (user = {}): borrowed repay amount = {}, bor = {},\
+             collateral liquidated amount = {}, col = {}, variable_borrow = {:?}, variable_borrow_index_updated = {}",
+                event.user,
+                event.debtToCover,
+                bor,
+                event.liquidatedCollateralAmount,
+                col,
+                variable_borrow,
+                variable_borrow_index,
+            );
         }
-
-        // let (liquidity_index, _) = &*c.liquidity.read().await;
-        // col[col_idx] = wipe_dust_ray(col[col_idx].saturating_sub(
-        //     event
-        //         .liquidatedCollateralAmount
-        //         .to_ray(decimals[col_idx])
-        //         .to_scaled(get_latest_liquidity_index(&liquidity_index[col_idx], now)?),
-        // ));
-
-        debug!(
-            "liquidation_call (user = {}): borrowed repay amount = {}, bor = {},\
-         collateral liquidated amount = {}, col = {}",
-            event.user, event.debtToCover, bor, event.liquidatedCollateralAmount, col
-        );
 
         // s_tx.send(SyncRequest::Collateral(
         //     SyncTarget::Cell(row_num, col_idx),

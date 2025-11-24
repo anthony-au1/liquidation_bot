@@ -10,7 +10,7 @@ use alloy::rpc::types::Filter;
 use alloy::sol;
 use alloy::sol_types::SolEventInterface;
 use alloy_primitives::aliases::U40;
-use alloy_primitives::{Sign, I256, U256, U512};
+use alloy_primitives::{I256, Sign, U256, U512};
 use async_trait::async_trait;
 use bitvec::prelude::*;
 use chrono::Utc;
@@ -18,7 +18,7 @@ use circuitbreaker_rs::{CircuitBreaker, DefaultPolicy};
 use dashmap::DashMap;
 use eyre::eyre;
 use futures::future::try_join_all;
-use ndarray::{concatenate, Array1, Array2, Axis};
+use ndarray::{Array1, Array2, Axis, concatenate};
 use std::collections::HashMap;
 use std::default::Default;
 use std::error::Error;
@@ -26,11 +26,11 @@ use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::RwLock;
+use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::{task, time, try_join};
-use tokio_retry::strategy::FixedInterval;
 use tokio_retry::Retry;
+use tokio_retry::strategy::FixedInterval;
 use tracing::{debug, error, info};
 
 // antonanohin@gmail.com
@@ -2022,19 +2022,25 @@ impl Cache {
                 })?
                 .order;
 
-            debug!("get_user_data: user = {}, token = {}, \
-            current_atoken_balance = {}, usage_as_collateral_enabled = {}, current_variable_debt = {}",
+            let now = Utc::now().timestamp_micros();
+            let liquidity_index = get_latest_liquidity_index(&liquidity[idx], now)?;
+            let variable_borrow_index =
+                get_latest_variable_borrow_index(&variable_borrow[idx], now)?;
+
+            debug!(
+                "get_user_data: user = {}, token = {}, \
+            current_atoken_balance = {}, usage_as_collateral_enabled = {}, current_variable_debt = {} \
+            liquidity = {:?}, liquidity_index_updated = {}, variable_borrow = {:?}, variable_borrow_index_updated = {}",
                 user,
                 token_address,
                 current_atoken_balance,
                 usage_as_collateral_enabled,
                 current_variable_debt,
+                liquidity,
+                liquidity_index,
+                variable_borrow,
+                variable_borrow_index,
             );
-
-            let now = Utc::now().timestamp_micros();
-            let liquidity_index = get_latest_liquidity_index(&liquidity[idx], now)?;
-            let variable_borrow_index =
-                get_latest_variable_borrow_index(&variable_borrow[idx], now)?;
 
             if usage_as_collateral_enabled {
                 collateral_scaled[idx] = current_atoken_balance
@@ -2524,6 +2530,11 @@ pub(in crate::arbitrum) fn get_latest_liquidity_index(
     let dt = U256::from(now.saturating_sub(liquidity_index.last_update) / 1_000_000);
 
     if dt.is_zero() {
+        debug!(
+            "get_latest_liquidity_index: index = {}, rate = {}, last_update = {}, dt = {}",
+            liquidity_index.index, liquidity_index.rate, liquidity_index.last_update, dt
+        );
+
         return Ok(liquidity_index.index);
     }
 
@@ -2531,6 +2542,11 @@ pub(in crate::arbitrum) fn get_latest_liquidity_index(
     let li_new = liquidity_index
         .index
         .ray_mul(one_ray + liquidity_index.rate.ray_mul(dt_spy));
+
+    debug!(
+        "get_latest_liquidity_index: index = {}, rate = {}, last_update = {}, dt = {}, update_index = {}",
+        liquidity_index.index, liquidity_index.rate, liquidity_index.last_update, dt, li_new
+    );
 
     Ok(li_new)
 }
@@ -2545,6 +2561,14 @@ pub(in crate::arbitrum) fn get_latest_variable_borrow_index(
     let dt = U256::from(now.saturating_sub(variable_borrow_index.last_update) / 1_000_000);
 
     if dt.is_zero() {
+        debug!(
+            "get_latest_variable_borrow_index: index = {}, rate = {}, last_update = {}, dt = {}",
+            variable_borrow_index.index,
+            variable_borrow_index.rate,
+            variable_borrow_index.last_update,
+            dt
+        );
+
         return Ok(variable_borrow_index.index);
     }
 
@@ -2552,6 +2576,15 @@ pub(in crate::arbitrum) fn get_latest_variable_borrow_index(
     let vbi_new = variable_borrow_index
         .index
         .ray_mul(one_ray + variable_borrow_index.rate.ray_mul(dt_spy));
+
+    debug!(
+        "get_latest_variable_borrow_index: index = {}, rate = {}, last_update = {}, dt = {}, update_index = {}",
+        variable_borrow_index.index,
+        variable_borrow_index.rate,
+        variable_borrow_index.last_update,
+        dt,
+        vbi_new
+    );
 
     Ok(vbi_new)
 }
