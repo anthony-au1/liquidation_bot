@@ -3,8 +3,8 @@ use crate::arbitrum::arbitrum::IL2Pool::{
     ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
 use crate::arbitrum::arbitrum::{
-    Cache, DataProvider, F64Converter, HFRequest, RAY, RayOperations, RqDate, SECONDS_PER_YEAR,
-    Scaler, SyncRequest, SyncTarget, TimeStamp, TokenDetails, Tokens, get_latest_liquidity_index,
+    BlockTimeStamp, Cache, DataProvider, F64Converter, HFRequest, RayOperations, RqDate, Scaler,
+    SyncRequest, SyncTarget, TimeStamp, TokenDetails, Tokens, get_latest_liquidity_index,
     get_latest_variable_borrow_index,
 };
 use alloy_primitives::{Address, U256};
@@ -139,12 +139,18 @@ pub(crate) async fn supply<P>(
     cache: Arc<Cache>,
     provider: Arc<P>,
     tokens: Arc<Tokens>,
-    event: (Supply, Sender<SyncRequest>, Sender<HFRequest>, RqDate),
+    event: (
+        Supply,
+        Sender<SyncRequest>,
+        Sender<HFRequest>,
+        BlockTimeStamp,
+        RqDate,
+    ),
 ) -> eyre::Result<()>
 where
     P: DataProvider + 'static,
 {
-    let (event, sync_tx, _, RqDate(rq_date)) = event;
+    let (event, sync_tx, _, _, RqDate(rq_date)) = event;
 
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
@@ -365,12 +371,18 @@ pub(crate) async fn withdraw<P>(
     cache: Arc<Cache>,
     provider: Arc<P>,
     tokens: Arc<Tokens>,
-    event: (Withdraw, Sender<SyncRequest>, Sender<HFRequest>, RqDate),
+    event: (
+        Withdraw,
+        Sender<SyncRequest>,
+        Sender<HFRequest>,
+        BlockTimeStamp,
+        RqDate,
+    ),
 ) -> eyre::Result<()>
 where
     P: DataProvider + 'static,
 {
-    let (event, sync_tx, _, RqDate(rq_date)) = event;
+    let (event, sync_tx, _, _, RqDate(rq_date)) = event;
 
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
@@ -595,12 +607,18 @@ pub(crate) async fn borrow<P>(
     cache: Arc<Cache>,
     provider: Arc<P>,
     tokens: Arc<Tokens>,
-    event: (Borrow, Sender<SyncRequest>, Sender<HFRequest>, RqDate),
+    event: (
+        Borrow,
+        Sender<SyncRequest>,
+        Sender<HFRequest>,
+        BlockTimeStamp,
+        RqDate,
+    ),
 ) -> eyre::Result<()>
 where
     P: DataProvider + 'static,
 {
-    let (event, sync_tx, _, RqDate(rq_date)) = event;
+    let (event, sync_tx, _, _, RqDate(rq_date)) = event;
 
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
@@ -693,7 +711,7 @@ where
             debug!(
                 "borrow (user = {}): borrowed amount = {}, bor = {}, \
                 variable_borrow = {:?}, variable_borrow_index_updated = {}",
-                event.onBehalfOf, event.amount, bor, variable_borrow, variable_borrow_index
+                event.onBehalfOf, event.amount, bor, variable_borrow[idx], variable_borrow_index
             );
         }
         *last_modified = now;
@@ -749,12 +767,18 @@ pub(crate) async fn repay<P>(
     cache: Arc<Cache>,
     provider: Arc<P>,
     tokens: Arc<Tokens>,
-    event: (Repay, Sender<SyncRequest>, Sender<HFRequest>, RqDate),
+    event: (
+        Repay,
+        Sender<SyncRequest>,
+        Sender<HFRequest>,
+        BlockTimeStamp,
+        RqDate,
+    ),
 ) -> eyre::Result<()>
 where
     P: DataProvider + 'static,
 {
-    let (event, sync_tx, _, RqDate(rq_date)) = event;
+    let (event, sync_tx, _, _, RqDate(rq_date)) = event;
 
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
@@ -848,7 +872,7 @@ where
 
             debug!(
                 "repay (user = {}): borrowed amount = {}, bor = {}, variable_borrow = {:?}, variable_borrow_index_updated = {}",
-                event.user, event.amount, bor, variable_borrow, variable_borrow_index
+                event.user, event.amount, bor, variable_borrow[idx], variable_borrow_index
             );
         }
         *last_modified = now;
@@ -908,13 +932,14 @@ pub(crate) async fn reserve_used_as_collateral_enabled<P>(
         ReserveUsedAsCollateralEnabled,
         Sender<SyncRequest>,
         Sender<HFRequest>,
+        BlockTimeStamp,
         RqDate,
     ),
 ) -> eyre::Result<()>
 where
     P: DataProvider + 'static,
 {
-    let (event, sync_tx, _, RqDate(rq_date)) = event;
+    let (event, sync_tx, _, _, RqDate(rq_date)) = event;
 
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
@@ -1072,13 +1097,14 @@ pub(crate) async fn reserve_used_as_collateral_disabled<P>(
         ReserveUsedAsCollateralDisabled,
         Sender<SyncRequest>,
         Sender<HFRequest>,
+        BlockTimeStamp,
         RqDate,
     ),
 ) -> eyre::Result<()>
 where
     P: DataProvider + 'static,
 {
-    let (event, sync_tx, _, RqDate(rq_date)) = event;
+    let (event, sync_tx, _, _, RqDate(rq_date)) = event;
 
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
@@ -1236,13 +1262,14 @@ pub(crate) async fn liquidation_call<P>(
         LiquidationCall,
         Sender<SyncRequest>,
         Sender<HFRequest>,
+        BlockTimeStamp,
         RqDate,
     ),
 ) -> eyre::Result<()>
 where
     P: DataProvider + 'static,
 {
-    let (event, sync_tx, _, RqDate(rq_date)) = event;
+    let (event, sync_tx, _, _, RqDate(rq_date)) = event;
 
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
@@ -1382,9 +1409,9 @@ where
             //     bor,
             //     event.liquidatedCollateralAmount,
             //     col,
-            //     variable_borrow,
+            //     variable_borrow[bor_idx],
             //     variable_borrow_index,
-            //     liquidity,
+            //     liquidity[col_idx],
             //     liquidity_index
             // );
 
@@ -1396,7 +1423,7 @@ where
                 bor,
                 event.liquidatedCollateralAmount,
                 col,
-                variable_borrow,
+                variable_borrow[bor_idx],
                 variable_borrow_index,
             );
         }
@@ -1457,12 +1484,17 @@ pub(crate) async fn reserve_data_updated<P>(
     cache: Arc<Cache>,
     _: Arc<P>,
     tokens: Arc<Tokens>,
-    event: (ReserveDataUpdated, Sender<HFRequest>, RqDate),
+    event: (
+        ReserveDataUpdated,
+        Sender<HFRequest>,
+        BlockTimeStamp,
+        RqDate,
+    ),
 ) -> eyre::Result<()>
 where
     P: DataProvider + 'static,
 {
-    let (event, hf_tx, RqDate(rq_date)) = event;
+    let (event, hf_tx, BlockTimeStamp(block_timestamp), RqDate(rq_date)) = event;
 
     debug!("{}", {
         let received = Utc::now().timestamp_micros();
@@ -1475,8 +1507,6 @@ where
         )
     });
 
-    let now = Utc::now().timestamp_micros();
-
     let idx = tokens
         .get(&event.reserve)
         .ok_or_else(|| eyre::eyre!("reserve_data_updated: {} token not found", event.reserve))?
@@ -1485,14 +1515,17 @@ where
     {
         let (li, li_last_modified) = &mut *cache.liquidity.write().await;
         (li[idx].index, li[idx].rate, li[idx].last_update) =
-            (event.liquidityIndex, event.liquidityRate, now);
+            (event.liquidityIndex, event.liquidityRate, block_timestamp);
 
         let (lii, lii_last_modified) = &mut *cache.liquidity_index.write().await;
         lii[idx] = event.liquidityIndex.as_f64_ray();
 
         let (vbi, vbi_last_modified) = &mut *cache.variable_borrow.write().await;
-        (vbi[idx].index, vbi[idx].rate, vbi[idx].last_update) =
-            (event.variableBorrowIndex, event.variableBorrowRate, now);
+        (vbi[idx].index, vbi[idx].rate, vbi[idx].last_update) = (
+            event.variableBorrowIndex,
+            event.variableBorrowRate,
+            block_timestamp,
+        );
 
         let (vbii, vbii_last_modified) = &mut *cache.variable_borrow_index.write().await;
         vbii[idx] = event.variableBorrowIndex.as_f64_ray();
@@ -1503,12 +1536,12 @@ where
                 continue;
             }
 
-            let li_new = get_latest_liquidity_index(&li[idx2], now)?;
-            (li[idx2].index, li[idx2].last_update) = (li_new, now);
+            let li_new = get_latest_liquidity_index(&li[idx2], block_timestamp)?;
+            (li[idx2].index, li[idx2].last_update) = (li_new, block_timestamp);
             lii[idx2] = li_new.as_f64_ray();
 
-            let vbi_new = get_latest_variable_borrow_index(&vbi[idx2], now)?;
-            (vbi[idx2].index, vbi[idx2].last_update) = (vbi_new, now);
+            let vbi_new = get_latest_variable_borrow_index(&vbi[idx2], block_timestamp)?;
+            (vbi[idx2].index, vbi[idx2].last_update) = (vbi_new, block_timestamp);
             vbii[idx2] = vbi_new.as_f64_ray();
         }
 
@@ -1517,7 +1550,12 @@ where
             *lii_last_modified,
             *vbi_last_modified,
             *vbii_last_modified,
-        ) = (now, now, now, now);
+        ) = (
+            block_timestamp,
+            block_timestamp,
+            block_timestamp,
+            block_timestamp,
+        );
 
         debug!(
             "reserve_data_updated (token = {}): li = {:?}, lii = {}, vbi = {:?}, vbii = {}",

@@ -4,11 +4,11 @@ use crate::arbitrum::arbitrum::IL2Pool::{
     ReserveUsedAsCollateralDisabled, ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
 use crate::arbitrum::arbitrum::{
-    build_breaker, liquidation, liquidation_lookup, liquidation_threshold_update, listen_events, listen_hf_calc, listen_prices_update, listen_sync,
-    setup, AaveEvents, ApiError, Cache, DataProvider, F64Converter, HFRequest,
-    Index, RayOperations, ReserveData, RqDate, Scaler, SyncRequest,
-    SyncTarget, TokenDetails, UserAccountData, UserData,
-    UserReserveData, UserSettings, SECONDS_PER_YEAR,
+    AaveEvents, ApiError, BlockTimeStamp, Cache, DataProvider, F64Converter, HFRequest, Index,
+    RayOperations, ReserveData, RqDate, SECONDS_PER_YEAR, Scaler, SyncRequest, SyncTarget,
+    TokenDetails, UserAccountData, UserData, UserReserveData, UserSettings, build_breaker,
+    liquidation, liquidation_lookup, liquidation_threshold_update, listen_events, listen_hf_calc,
+    listen_prices_update, listen_sync, setup,
 };
 use crate::arbitrum::events::{
     borrow, create_user, liquidation_call, repay, reserve_data_updated,
@@ -29,12 +29,12 @@ use std::fmt::Debug;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc::channel;
 use tokio::sync::RwLock;
+use tokio::sync::mpsc::channel;
 use tokio::task;
 use tokio::time::sleep;
-use tokio_retry::strategy::FixedInterval;
 use tokio_retry::Retry;
+use tokio_retry::strategy::FixedInterval;
 
 trait F64Helper: F64Converter {
     fn as_f64_decimal_18(&self) -> f64;
@@ -130,7 +130,7 @@ impl DataProvider for DummyDataProvider {
 
     async fn listen_events<F, Fut>(&self, callback: F) -> eyre::Result<()>
     where
-        F: Fn(IL2PoolEvents) -> Fut + Send + 'static,
+        F: Fn(IL2PoolEvents, BlockTimeStamp) -> Fut + Send + 'static,
         Fut: Future<Output = eyre::Result<()>> + Send,
     {
         let user = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
@@ -141,7 +141,11 @@ impl DataProvider for DummyDataProvider {
             amount: 6.as_u256_decimal_18(),
             referralCode: 0,
         };
-        callback(IL2PoolEvents::Supply(event)).await
+        callback(
+            IL2PoolEvents::Supply(event),
+            BlockTimeStamp(Utc::now().timestamp_micros()),
+        )
+        .await
     }
 
     async fn get_reserve_configuration_data(&self, token: &Address) -> eyre::Result<f64> {
@@ -1350,7 +1354,7 @@ impl DataProvider for CreateUserDataProvider {
 
     async fn listen_events<F, Fut>(&self, _: F) -> eyre::Result<()>
     where
-        F: Fn(IL2PoolEvents) -> Fut + Send + 'static,
+        F: Fn(IL2PoolEvents, BlockTimeStamp) -> Fut + Send + 'static,
         Fut: Future<Output = eyre::Result<()>> + Send,
     {
         todo!()
@@ -1555,6 +1559,7 @@ async fn test_supply() -> eyre::Result<()> {
 
     let user = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
     let rq_date = Utc::now().timestamp_micros();
+    let block_timestamp = rq_date;
 
     let event = Supply {
         reserve: tokens
@@ -1588,7 +1593,13 @@ async fn test_supply() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         Arc::new(tokens),
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
     let _ = sync_handler.await?;
@@ -1682,7 +1693,13 @@ async fn test_supply() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         Arc::new(tokens),
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
     let _ = sync_handler.await?;
@@ -1737,7 +1754,13 @@ async fn test_supply() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         Arc::new(tokens),
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
 
@@ -1790,7 +1813,13 @@ async fn test_supply() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         Arc::new(tokens),
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
 
@@ -1834,7 +1863,13 @@ async fn test_supply() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         Arc::new(tokens),
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
 
@@ -1893,7 +1928,13 @@ async fn test_supply() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         Arc::new(tokens),
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
     let _ = sync_handler.await?;
@@ -1995,9 +2036,9 @@ async fn test_listen_events() -> eyre::Result<()> {
             .await
             .ok_or_else(|| eyre::eyre!("event channel closed"))?;
 
-        assert!(matches!(event, AaveEvents::IL2PoolEvents(_, _)));
+        assert!(matches!(event, AaveEvents::IL2PoolEvents(_, _, _)));
 
-        if let AaveEvents::IL2PoolEvents(event, _) = event {
+        if let AaveEvents::IL2PoolEvents(event, _, _) = event {
             let supply = {
                 if let IL2PoolEvents::Supply(s) = event {
                     assert_eq!(s.reserve, supply_event.reserve);
@@ -2369,6 +2410,7 @@ async fn test_withdraw() -> eyre::Result<()> {
 
     let user = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
     let rq_date = Utc::now().timestamp_micros();
+    let block_timestamp = rq_date;
 
     let event = Withdraw {
         reserve: tokens
@@ -2400,7 +2442,13 @@ async fn test_withdraw() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
     let _ = sync_handler.await?;
@@ -2511,7 +2559,13 @@ async fn test_withdraw() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
     let _ = sync_handler.await?;
@@ -2583,7 +2637,13 @@ async fn test_withdraw() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
 
@@ -2636,7 +2696,13 @@ async fn test_withdraw() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
 
@@ -2680,7 +2746,13 @@ async fn test_withdraw() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
 
@@ -2739,7 +2811,13 @@ async fn test_withdraw() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
     let _ = sync_handler.await?;
@@ -2799,6 +2877,7 @@ async fn test_borrow() -> eyre::Result<()> {
 
     let user = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
     let rq_date = Utc::now().timestamp_micros();
+    let block_timestamp = rq_date;
 
     let event = Borrow {
         reserve: tokens
@@ -2833,7 +2912,13 @@ async fn test_borrow() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
     let _ = sync_handler.await?;
@@ -2945,7 +3030,13 @@ async fn test_borrow() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
     let _ = sync_handler.await?;
@@ -3005,7 +3096,13 @@ async fn test_borrow() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
 
@@ -3069,7 +3166,13 @@ async fn test_borrow() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
     let _ = sync_handler.await?;
@@ -3129,6 +3232,7 @@ async fn test_repay() -> eyre::Result<()> {
 
     let user = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
     let rq_date = Utc::now().timestamp_micros();
+    let block_timestamp = rq_date;
 
     let event = Repay {
         reserve: tokens
@@ -3161,7 +3265,13 @@ async fn test_repay() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
     let _ = sync_handler.await?;
@@ -3270,7 +3380,13 @@ async fn test_repay() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
     let _ = sync_handler.await?;
@@ -3325,7 +3441,13 @@ async fn test_repay() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
 
@@ -3344,6 +3466,7 @@ async fn test_repay() -> eyre::Result<()> {
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
     let rq_date = Utc::now().timestamp_micros();
+    let block_timestamp = rq_date;
     let user = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
     let token = Address::from_str("0x1Ac54C113cefD1792CbFcF41B711824d657eb61D")?;
 
@@ -3384,7 +3507,13 @@ async fn test_repay() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
     let _ = sync_handler.await?;
@@ -3444,6 +3573,7 @@ async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
 
     let user = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
     let rq_date = Utc::now().timestamp_micros();
+    let block_timestamp = rq_date;
 
     let event = ReserveUsedAsCollateralEnabled {
         reserve: tokens
@@ -3473,7 +3603,13 @@ async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
     let _ = sync_handler.await?;
@@ -3554,6 +3690,7 @@ async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
     let token = Address::from_str("0x1Af54C113cefD1792CbFcF41B711824d657eb61D")?;
 
     let rq_date = Utc::now().timestamp_micros();
+    let block_timestamp = rq_date;
 
     let event = ReserveUsedAsCollateralEnabled {
         reserve: token,
@@ -3582,7 +3719,13 @@ async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
     let _ = sync_handler.await?;
@@ -3634,7 +3777,13 @@ async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
 
@@ -3690,7 +3839,13 @@ async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
     let _ = sync_handler.await?;
@@ -3750,6 +3905,7 @@ async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
 
     let user = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
     let rq_date = Utc::now().timestamp_micros();
+    let block_timestamp = rq_date;
 
     let event = ReserveUsedAsCollateralDisabled {
         reserve: tokens
@@ -3779,7 +3935,13 @@ async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
     let _ = sync_handler.await?;
@@ -3888,7 +4050,13 @@ async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
     let _ = sync_handler.await?;
@@ -3940,7 +4108,13 @@ async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
 
@@ -3959,6 +4133,7 @@ async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
     let rq_date = Utc::now().timestamp_micros();
+    let block_timestamp = rq_date;
     let user = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
     let token = Address::from_str("0x1Ac54C113cefD1792CbFcF41B711824d657eb61D")?;
 
@@ -3996,7 +4171,13 @@ async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
     let _ = sync_handler.await?;
@@ -4056,6 +4237,7 @@ async fn test_liquidation_call() -> eyre::Result<()> {
 
     let user = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
     let rq_date = Utc::now().timestamp_micros();
+    let block_timestamp = rq_date;
 
     let col_token = Address::from_str("0x1Ac54C113cefD1792CbFcF41B711824d657eb61D")?;
     let bor_token = Address::from_str("0x1Af54C113cefD1792CbFcF41B711834d657ea61D")?;
@@ -4089,7 +4271,13 @@ async fn test_liquidation_call() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
     let _ = sync_handler.await?;
@@ -4188,6 +4376,7 @@ async fn test_liquidation_call() -> eyre::Result<()> {
     let bor_token = Address::from_str("0x1Af54C113cefD1792CbFcF41B711834d657ea61D")?;
 
     let rq_date = Utc::now().timestamp_micros();
+    let block_timestamp = rq_date;
 
     let event = LiquidationCall {
         collateralAsset: col_token,
@@ -4227,7 +4416,13 @@ async fn test_liquidation_call() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
     let _ = sync_handler.await?;
@@ -4299,7 +4494,13 @@ async fn test_liquidation_call() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
 
@@ -4362,7 +4563,13 @@ async fn test_liquidation_call() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
     let _ = sync_handler.await?;
@@ -4455,6 +4662,7 @@ async fn test_reserve_data_updated() -> eyre::Result<()> {
     };
 
     let rq_date = Utc::now().timestamp_micros();
+    let block_timestamp = rq_date;
 
     let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
 
@@ -4474,7 +4682,12 @@ async fn test_reserve_data_updated() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         tokens.clone(),
-        (event, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
     let _ = hf_handler.await?;

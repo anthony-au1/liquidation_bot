@@ -11,7 +11,8 @@ use liquidation_bot::arbitrum::arbitrum::IL2Pool::{
     ReserveUsedAsCollateralDisabled, ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
 use liquidation_bot::arbitrum::arbitrum::{
-    start, Cache, DataProvider, Index, ReserveData, UserAccountData, UserReserveData, UserSettings,
+    BlockTimeStamp, Cache, DataProvider, Index, ReserveData, UserAccountData, UserReserveData,
+    UserSettings, start,
 };
 use ndarray::{Array1, Array2};
 use std::fmt::Debug;
@@ -19,8 +20,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
-use tokio::{task, time};
 use tokio::time::sleep;
+use tokio::{task, time};
 
 const AAVE: &str = "0x1Ac54C113cefD1792CbFcF41B711824d657eb61D";
 const USDC: &str = "0x1Af54C113cefD1792CbFcF41B711834d657ea61D";
@@ -188,7 +189,7 @@ impl DataProvider for SharedDataProvider {
 
     async fn listen_events<F, Fut>(&self, _: F) -> eyre::Result<()>
     where
-        F: Fn(IL2PoolEvents) -> Fut + Send + 'static,
+        F: Fn(IL2PoolEvents, BlockTimeStamp) -> Fut + Send + 'static,
         Fut: Future<Output = eyre::Result<()>> + Send,
     {
         unimplemented!("listen_events not implemented")
@@ -388,7 +389,7 @@ impl DataProvider for DummyDataProvider {
 
     async fn listen_events<F, Fut>(&self, callback: F) -> eyre::Result<()>
     where
-        F: Fn(IL2PoolEvents) -> Fut + Send + 'static,
+        F: Fn(IL2PoolEvents, BlockTimeStamp) -> Fut + Send + 'static,
         Fut: Future<Output = eyre::Result<()>> + Send,
     {
         sleep(Duration::from_secs(1)).await;
@@ -401,333 +402,426 @@ impl DataProvider for DummyDataProvider {
             *count
         };
 
+        let block_timestamp = BlockTimeStamp(Utc::now().timestamp_micros());
+
         match count {
             1 => {
-                callback(IL2PoolEvents::ReserveDataUpdated(ReserveDataUpdated {
-                    reserve: Address::from_str(AAVE)?,
-                    liquidityRate: 55.as_u256(25),
-                    stableBorrowRate: 6.as_u256(26),
-                    variableBorrowRate: 6.as_u256(26),
-                    liquidityIndex: 105.as_u256(25),
-                    variableBorrowIndex: 1055.as_u256(24),
-                }))
+                callback(
+                    IL2PoolEvents::ReserveDataUpdated(ReserveDataUpdated {
+                        reserve: Address::from_str(AAVE)?,
+                        liquidityRate: 55.as_u256(25),
+                        stableBorrowRate: 6.as_u256(26),
+                        variableBorrowRate: 6.as_u256(26),
+                        liquidityIndex: 105.as_u256(25),
+                        variableBorrowIndex: 1055.as_u256(24),
+                    }),
+                    block_timestamp,
+                )
                 .await
             }
             2 => {
-                callback(IL2PoolEvents::Supply(Supply {
-                    reserve: Address::from_str(AAVE)?,
-                    user,
-                    onBehalfOf: user,
-                    amount: 1.as_u256_decimal_18(),
-                    referralCode: 0,
-                }))
+                callback(
+                    IL2PoolEvents::Supply(Supply {
+                        reserve: Address::from_str(AAVE)?,
+                        user,
+                        onBehalfOf: user,
+                        amount: 1.as_u256_decimal_18(),
+                        referralCode: 0,
+                    }),
+                    block_timestamp,
+                )
                 .await
             }
             3 => {
-                callback(IL2PoolEvents::ReserveDataUpdated(ReserveDataUpdated {
-                    reserve: Address::from_str(USDC)?,
-                    liquidityRate: 35.as_u256(25),
-                    stableBorrowRate: 4.as_u256(26),
-                    variableBorrowRate: 4.as_u256(26),
-                    liquidityIndex: 1035.as_u256(24),
-                    variableBorrowIndex: 104.as_u256(25),
-                }))
+                callback(
+                    IL2PoolEvents::ReserveDataUpdated(ReserveDataUpdated {
+                        reserve: Address::from_str(USDC)?,
+                        liquidityRate: 35.as_u256(25),
+                        stableBorrowRate: 4.as_u256(26),
+                        variableBorrowRate: 4.as_u256(26),
+                        liquidityIndex: 1035.as_u256(24),
+                        variableBorrowIndex: 104.as_u256(25),
+                    }),
+                    block_timestamp,
+                )
                 .await
             }
             4 => {
-                callback(IL2PoolEvents::Supply(Supply {
-                    reserve: Address::from_str(USDC)?,
-                    user,
-                    onBehalfOf: user,
-                    amount: 2.as_u256_decimal_6(),
-                    referralCode: 0,
-                }))
+                callback(
+                    IL2PoolEvents::Supply(Supply {
+                        reserve: Address::from_str(USDC)?,
+                        user,
+                        onBehalfOf: user,
+                        amount: 2.as_u256_decimal_6(),
+                        referralCode: 0,
+                    }),
+                    block_timestamp,
+                )
                 .await
             }
             5 => {
-                callback(IL2PoolEvents::ReserveDataUpdated(ReserveDataUpdated {
-                    reserve: Address::from_str(DAI)?,
-                    liquidityRate: 25.as_u256(25),
-                    stableBorrowRate: 3.as_u256(26),
-                    variableBorrowRate: 3.as_u256(26),
-                    liquidityIndex: 1025.as_u256(24),
-                    variableBorrowIndex: 103.as_u256(25),
-                }))
+                callback(
+                    IL2PoolEvents::ReserveDataUpdated(ReserveDataUpdated {
+                        reserve: Address::from_str(DAI)?,
+                        liquidityRate: 25.as_u256(25),
+                        stableBorrowRate: 3.as_u256(26),
+                        variableBorrowRate: 3.as_u256(26),
+                        liquidityIndex: 1025.as_u256(24),
+                        variableBorrowIndex: 103.as_u256(25),
+                    }),
+                    block_timestamp,
+                )
                 .await
             }
             6 => {
-                callback(IL2PoolEvents::Supply(Supply {
-                    reserve: Address::from_str(DAI)?,
-                    user,
-                    onBehalfOf: user,
-                    amount: 30.as_u256_decimal_12(),
-                    referralCode: 0,
-                }))
+                callback(
+                    IL2PoolEvents::Supply(Supply {
+                        reserve: Address::from_str(DAI)?,
+                        user,
+                        onBehalfOf: user,
+                        amount: 30.as_u256_decimal_12(),
+                        referralCode: 0,
+                    }),
+                    block_timestamp,
+                )
                 .await
             }
             7 => {
-                callback(IL2PoolEvents::ReserveDataUpdated(ReserveDataUpdated {
-                    reserve: Address::from_str(AAVE)?,
-                    liquidityRate: 55.as_u256(25),
-                    stableBorrowRate: 6.as_u256(26),
-                    variableBorrowRate: 6.as_u256(26),
-                    liquidityIndex: 1051.as_u256(24),
-                    variableBorrowIndex: 1056.as_u256(24),
-                }))
+                callback(
+                    IL2PoolEvents::ReserveDataUpdated(ReserveDataUpdated {
+                        reserve: Address::from_str(AAVE)?,
+                        liquidityRate: 55.as_u256(25),
+                        stableBorrowRate: 6.as_u256(26),
+                        variableBorrowRate: 6.as_u256(26),
+                        liquidityIndex: 1051.as_u256(24),
+                        variableBorrowIndex: 1056.as_u256(24),
+                    }),
+                    block_timestamp,
+                )
                 .await
             }
             8 => {
-                callback(IL2PoolEvents::Withdraw(Withdraw {
-                    reserve: Address::from_str(AAVE)?,
-                    user,
-                    to: user,
-                    amount: 1.as_u256_decimal_18(),
-                }))
+                callback(
+                    IL2PoolEvents::Withdraw(Withdraw {
+                        reserve: Address::from_str(AAVE)?,
+                        user,
+                        to: user,
+                        amount: 1.as_u256_decimal_18(),
+                    }),
+                    block_timestamp,
+                )
                 .await
             }
             9 => {
-                callback(IL2PoolEvents::ReserveDataUpdated(ReserveDataUpdated {
-                    reserve: Address::from_str(USDC)?,
-                    liquidityRate: 35.as_u256(25),
-                    stableBorrowRate: 4.as_u256(26),
-                    variableBorrowRate: 4.as_u256(26),
-                    liquidityIndex: 1036.as_u256(24),
-                    variableBorrowIndex: 1041.as_u256(24),
-                }))
+                callback(
+                    IL2PoolEvents::ReserveDataUpdated(ReserveDataUpdated {
+                        reserve: Address::from_str(USDC)?,
+                        liquidityRate: 35.as_u256(25),
+                        stableBorrowRate: 4.as_u256(26),
+                        variableBorrowRate: 4.as_u256(26),
+                        liquidityIndex: 1036.as_u256(24),
+                        variableBorrowIndex: 1041.as_u256(24),
+                    }),
+                    block_timestamp,
+                )
                 .await
             }
             10 => {
-                callback(IL2PoolEvents::Withdraw(Withdraw {
-                    reserve: Address::from_str(USDC)?,
-                    user,
-                    to: user,
-                    amount: 1.as_u256_decimal_6(),
-                }))
+                callback(
+                    IL2PoolEvents::Withdraw(Withdraw {
+                        reserve: Address::from_str(USDC)?,
+                        user,
+                        to: user,
+                        amount: 1.as_u256_decimal_6(),
+                    }),
+                    block_timestamp,
+                )
                 .await
             }
             11 => {
-                callback(IL2PoolEvents::ReserveDataUpdated(ReserveDataUpdated {
-                    reserve: Address::from_str(DAI)?,
-                    liquidityRate: 25.as_u256(25),
-                    stableBorrowRate: 3.as_u256(26),
-                    variableBorrowRate: 3.as_u256(26),
-                    liquidityIndex: 1026.as_u256(24),
-                    variableBorrowIndex: 1031.as_u256(24),
-                }))
+                callback(
+                    IL2PoolEvents::ReserveDataUpdated(ReserveDataUpdated {
+                        reserve: Address::from_str(DAI)?,
+                        liquidityRate: 25.as_u256(25),
+                        stableBorrowRate: 3.as_u256(26),
+                        variableBorrowRate: 3.as_u256(26),
+                        liquidityIndex: 1026.as_u256(24),
+                        variableBorrowIndex: 1031.as_u256(24),
+                    }),
+                    block_timestamp,
+                )
                 .await
             }
             12 => {
-                callback(IL2PoolEvents::Withdraw(Withdraw {
-                    reserve: Address::from_str(DAI)?,
-                    user,
-                    to: user,
-                    amount: 13.as_u256_decimal_12(),
-                }))
+                callback(
+                    IL2PoolEvents::Withdraw(Withdraw {
+                        reserve: Address::from_str(DAI)?,
+                        user,
+                        to: user,
+                        amount: 13.as_u256_decimal_12(),
+                    }),
+                    block_timestamp,
+                )
                 .await
             }
             13 => {
-                callback(IL2PoolEvents::ReserveDataUpdated(ReserveDataUpdated {
-                    reserve: Address::from_str(AAVE)?,
-                    liquidityRate: 55.as_u256(25),
-                    stableBorrowRate: 6.as_u256(26),
-                    variableBorrowRate: 6.as_u256(26),
-                    liquidityIndex: 1052.as_u256(24),
-                    variableBorrowIndex: 1057.as_u256(24),
-                }))
+                callback(
+                    IL2PoolEvents::ReserveDataUpdated(ReserveDataUpdated {
+                        reserve: Address::from_str(AAVE)?,
+                        liquidityRate: 55.as_u256(25),
+                        stableBorrowRate: 6.as_u256(26),
+                        variableBorrowRate: 6.as_u256(26),
+                        liquidityIndex: 1052.as_u256(24),
+                        variableBorrowIndex: 1057.as_u256(24),
+                    }),
+                    block_timestamp,
+                )
                 .await
             }
             14 => {
-                callback(IL2PoolEvents::Borrow(Borrow {
-                    reserve: Address::from_str(AAVE)?,
-                    user: user.clone(),
-                    onBehalfOf: user,
-                    amount: 10.as_u256_decimal_18(),
-                    interestRateMode: 2,
-                    borrowRate: U256::from(5_000_000_000_000_000_000_000_0000u128),
-                    referralCode: 0,
-                }))
+                callback(
+                    IL2PoolEvents::Borrow(Borrow {
+                        reserve: Address::from_str(AAVE)?,
+                        user: user.clone(),
+                        onBehalfOf: user,
+                        amount: 10.as_u256_decimal_18(),
+                        interestRateMode: 2,
+                        borrowRate: U256::from(5_000_000_000_000_000_000_000_0000u128),
+                        referralCode: 0,
+                    }),
+                    block_timestamp,
+                )
                 .await
             }
             15 => {
-                callback(IL2PoolEvents::ReserveDataUpdated(ReserveDataUpdated {
-                    reserve: Address::from_str(USDC)?,
-                    liquidityRate: 35.as_u256(25),
-                    stableBorrowRate: 4.as_u256(26),
-                    variableBorrowRate: 4.as_u256(26),
-                    liquidityIndex: 1037.as_u256(24),
-                    variableBorrowIndex: 1042.as_u256(24),
-                }))
+                callback(
+                    IL2PoolEvents::ReserveDataUpdated(ReserveDataUpdated {
+                        reserve: Address::from_str(USDC)?,
+                        liquidityRate: 35.as_u256(25),
+                        stableBorrowRate: 4.as_u256(26),
+                        variableBorrowRate: 4.as_u256(26),
+                        liquidityIndex: 1037.as_u256(24),
+                        variableBorrowIndex: 1042.as_u256(24),
+                    }),
+                    block_timestamp,
+                )
                 .await
             }
             16 => {
-                callback(IL2PoolEvents::Borrow(Borrow {
-                    reserve: Address::from_str(USDC)?,
-                    user: user.clone(),
-                    onBehalfOf: user,
-                    amount: 20.as_u256_decimal_6(),
-                    interestRateMode: 2,
-                    borrowRate: U256::from(5_000_000_000_000_000_000_000_0000u128),
-                    referralCode: 0,
-                }))
+                callback(
+                    IL2PoolEvents::Borrow(Borrow {
+                        reserve: Address::from_str(USDC)?,
+                        user: user.clone(),
+                        onBehalfOf: user,
+                        amount: 20.as_u256_decimal_6(),
+                        interestRateMode: 2,
+                        borrowRate: U256::from(5_000_000_000_000_000_000_000_0000u128),
+                        referralCode: 0,
+                    }),
+                    block_timestamp,
+                )
                 .await
             }
             17 => {
-                callback(IL2PoolEvents::ReserveDataUpdated(ReserveDataUpdated {
-                    reserve: Address::from_str(DAI)?,
-                    liquidityRate: 25.as_u256(25),
-                    stableBorrowRate: 3.as_u256(26),
-                    variableBorrowRate: 3.as_u256(26),
-                    liquidityIndex: 1027.as_u256(24),
-                    variableBorrowIndex: 1032.as_u256(24),
-                }))
+                callback(
+                    IL2PoolEvents::ReserveDataUpdated(ReserveDataUpdated {
+                        reserve: Address::from_str(DAI)?,
+                        liquidityRate: 25.as_u256(25),
+                        stableBorrowRate: 3.as_u256(26),
+                        variableBorrowRate: 3.as_u256(26),
+                        liquidityIndex: 1027.as_u256(24),
+                        variableBorrowIndex: 1032.as_u256(24),
+                    }),
+                    block_timestamp,
+                )
                 .await
             }
             18 => {
-                callback(IL2PoolEvents::Borrow(Borrow {
-                    reserve: Address::from_str(DAI)?,
-                    user: user.clone(),
-                    onBehalfOf: user,
-                    amount: 30.as_u256_decimal_12(),
-                    interestRateMode: 2,
-                    borrowRate: U256::from(5_000_000_000_000_000_000_000_0000u128),
-                    referralCode: 0,
-                }))
+                callback(
+                    IL2PoolEvents::Borrow(Borrow {
+                        reserve: Address::from_str(DAI)?,
+                        user: user.clone(),
+                        onBehalfOf: user,
+                        amount: 30.as_u256_decimal_12(),
+                        interestRateMode: 2,
+                        borrowRate: U256::from(5_000_000_000_000_000_000_000_0000u128),
+                        referralCode: 0,
+                    }),
+                    block_timestamp,
+                )
                 .await
             }
             19 => {
-                callback(IL2PoolEvents::ReserveDataUpdated(ReserveDataUpdated {
-                    reserve: Address::from_str(AAVE)?,
-                    liquidityRate: 55.as_u256(25),
-                    stableBorrowRate: 6.as_u256(26),
-                    variableBorrowRate: 6.as_u256(26),
-                    liquidityIndex: 1053.as_u256(24),
-                    variableBorrowIndex: 1058.as_u256(24),
-                }))
+                callback(
+                    IL2PoolEvents::ReserveDataUpdated(ReserveDataUpdated {
+                        reserve: Address::from_str(AAVE)?,
+                        liquidityRate: 55.as_u256(25),
+                        stableBorrowRate: 6.as_u256(26),
+                        variableBorrowRate: 6.as_u256(26),
+                        liquidityIndex: 1053.as_u256(24),
+                        variableBorrowIndex: 1058.as_u256(24),
+                    }),
+                    block_timestamp,
+                )
                 .await
             }
             20 => {
-                callback(IL2PoolEvents::Repay(Repay {
-                    reserve: Address::from_str(AAVE)?,
-                    user: user.clone(),
-                    repayer: user,
-                    amount: 10.as_u256_decimal_18(),
-                    useATokens: false,
-                }))
+                callback(
+                    IL2PoolEvents::Repay(Repay {
+                        reserve: Address::from_str(AAVE)?,
+                        user: user.clone(),
+                        repayer: user,
+                        amount: 10.as_u256_decimal_18(),
+                        useATokens: false,
+                    }),
+                    block_timestamp,
+                )
                 .await
             }
             21 => {
-                callback(IL2PoolEvents::ReserveDataUpdated(ReserveDataUpdated {
-                    reserve: Address::from_str(USDC)?,
-                    liquidityRate: 35.as_u256(25),
-                    stableBorrowRate: 4.as_u256(26),
-                    variableBorrowRate: 4.as_u256(26),
-                    liquidityIndex: 1038.as_u256(24),
-                    variableBorrowIndex: 1043.as_u256(24),
-                }))
+                callback(
+                    IL2PoolEvents::ReserveDataUpdated(ReserveDataUpdated {
+                        reserve: Address::from_str(USDC)?,
+                        liquidityRate: 35.as_u256(25),
+                        stableBorrowRate: 4.as_u256(26),
+                        variableBorrowRate: 4.as_u256(26),
+                        liquidityIndex: 1038.as_u256(24),
+                        variableBorrowIndex: 1043.as_u256(24),
+                    }),
+                    block_timestamp,
+                )
                 .await
             }
             22 => {
-                callback(IL2PoolEvents::Repay(Repay {
-                    reserve: Address::from_str(USDC)?,
-                    user: user.clone(),
-                    repayer: user,
-                    amount: 20.as_u256_decimal_6(),
-                    useATokens: false,
-                }))
+                callback(
+                    IL2PoolEvents::Repay(Repay {
+                        reserve: Address::from_str(USDC)?,
+                        user: user.clone(),
+                        repayer: user,
+                        amount: 20.as_u256_decimal_6(),
+                        useATokens: false,
+                    }),
+                    block_timestamp,
+                )
                 .await
             }
             23 => {
-                callback(IL2PoolEvents::ReserveDataUpdated(ReserveDataUpdated {
-                    reserve: Address::from_str(DAI)?,
-                    liquidityRate: 25.as_u256(25),
-                    stableBorrowRate: 3.as_u256(26),
-                    variableBorrowRate: 3.as_u256(26),
-                    liquidityIndex: 1028.as_u256(24),
-                    variableBorrowIndex: 1033.as_u256(24),
-                }))
+                callback(
+                    IL2PoolEvents::ReserveDataUpdated(ReserveDataUpdated {
+                        reserve: Address::from_str(DAI)?,
+                        liquidityRate: 25.as_u256(25),
+                        stableBorrowRate: 3.as_u256(26),
+                        variableBorrowRate: 3.as_u256(26),
+                        liquidityIndex: 1028.as_u256(24),
+                        variableBorrowIndex: 1033.as_u256(24),
+                    }),
+                    block_timestamp,
+                )
                 .await
             }
             24 => {
-                callback(IL2PoolEvents::Repay(Repay {
-                    reserve: Address::from_str(DAI)?,
-                    user: user.clone(),
-                    repayer: user,
-                    amount: 30.as_u256_decimal_12(),
-                    useATokens: false,
-                }))
+                callback(
+                    IL2PoolEvents::Repay(Repay {
+                        reserve: Address::from_str(DAI)?,
+                        user: user.clone(),
+                        repayer: user,
+                        amount: 30.as_u256_decimal_12(),
+                        useATokens: false,
+                    }),
+                    block_timestamp,
+                )
                 .await
             }
             25 => {
-                callback(IL2PoolEvents::ReserveDataUpdated(ReserveDataUpdated {
-                    reserve: Address::from_str(AAVE)?,
-                    liquidityRate: 55.as_u256(25),
-                    stableBorrowRate: 6.as_u256(26),
-                    variableBorrowRate: 6.as_u256(26),
-                    liquidityIndex: 1054.as_u256(24),
-                    variableBorrowIndex: 1059.as_u256(24),
-                }))
+                callback(
+                    IL2PoolEvents::ReserveDataUpdated(ReserveDataUpdated {
+                        reserve: Address::from_str(AAVE)?,
+                        liquidityRate: 55.as_u256(25),
+                        stableBorrowRate: 6.as_u256(26),
+                        variableBorrowRate: 6.as_u256(26),
+                        liquidityIndex: 1054.as_u256(24),
+                        variableBorrowIndex: 1059.as_u256(24),
+                    }),
+                    block_timestamp,
+                )
                 .await
             }
             26 => {
-                callback(IL2PoolEvents::Supply(Supply {
-                    reserve: Address::from_str(AAVE)?,
-                    user,
-                    onBehalfOf: user,
-                    amount: 10.as_u256_decimal_18(),
-                    referralCode: 0,
-                }))
+                callback(
+                    IL2PoolEvents::Supply(Supply {
+                        reserve: Address::from_str(AAVE)?,
+                        user,
+                        onBehalfOf: user,
+                        amount: 10.as_u256_decimal_18(),
+                        referralCode: 0,
+                    }),
+                    block_timestamp,
+                )
                 .await
             }
             27 => {
-                callback(IL2PoolEvents::ReserveUsedAsCollateralEnabled(
-                    ReserveUsedAsCollateralEnabled {
+                callback(
+                    IL2PoolEvents::ReserveUsedAsCollateralEnabled(ReserveUsedAsCollateralEnabled {
                         reserve: Address::from_str(AAVE)?,
                         user,
-                    },
-                ))
+                    }),
+                    block_timestamp,
+                )
                 .await
             }
             28 => {
-                callback(IL2PoolEvents::ReserveUsedAsCollateralDisabled(
-                    ReserveUsedAsCollateralDisabled {
-                        reserve: Address::from_str(AAVE)?,
-                        user,
-                    },
-                ))
+                callback(
+                    IL2PoolEvents::ReserveUsedAsCollateralDisabled(
+                        ReserveUsedAsCollateralDisabled {
+                            reserve: Address::from_str(AAVE)?,
+                            user,
+                        },
+                    ),
+                    block_timestamp,
+                )
                 .await
             }
             29 => {
-                callback(IL2PoolEvents::ReserveDataUpdated(ReserveDataUpdated {
-                    reserve: Address::from_str(AAVE)?,
-                    liquidityRate: 55.as_u256(25),
-                    stableBorrowRate: 6.as_u256(26),
-                    variableBorrowRate: 6.as_u256(26),
-                    liquidityIndex: 1055.as_u256(24),
-                    variableBorrowIndex: 106.as_u256(25),
-                }))
+                callback(
+                    IL2PoolEvents::ReserveDataUpdated(ReserveDataUpdated {
+                        reserve: Address::from_str(AAVE)?,
+                        liquidityRate: 55.as_u256(25),
+                        stableBorrowRate: 6.as_u256(26),
+                        variableBorrowRate: 6.as_u256(26),
+                        liquidityIndex: 1055.as_u256(24),
+                        variableBorrowIndex: 106.as_u256(25),
+                    }),
+                    block_timestamp,
+                )
                 .await
             }
             30 => {
-                callback(IL2PoolEvents::ReserveDataUpdated(ReserveDataUpdated {
-                    reserve: Address::from_str(DAI)?,
-                    liquidityRate: 25.as_u256(25),
-                    stableBorrowRate: 3.as_u256(26),
-                    variableBorrowRate: 3.as_u256(26),
-                    liquidityIndex: 1029.as_u256(24),
-                    variableBorrowIndex: 1034.as_u256(24),
-                }))
+                callback(
+                    IL2PoolEvents::ReserveDataUpdated(ReserveDataUpdated {
+                        reserve: Address::from_str(DAI)?,
+                        liquidityRate: 25.as_u256(25),
+                        stableBorrowRate: 3.as_u256(26),
+                        variableBorrowRate: 3.as_u256(26),
+                        liquidityIndex: 1029.as_u256(24),
+                        variableBorrowIndex: 1034.as_u256(24),
+                    }),
+                    block_timestamp,
+                )
                 .await
             }
             31 => {
-                callback(IL2PoolEvents::LiquidationCall(LiquidationCall {
-                    collateralAsset: Address::from_str(DAI)?,
-                    debtAsset: Address::from_str(AAVE)?,
-                    user: user.clone(),
-                    debtToCover: 1.as_u256_decimal_18(),
-                    liquidatedCollateralAmount: 10.as_u256_decimal_12(),
-                    liquidator: user,
-                    receiveAToken: false,
-                }))
+                callback(
+                    IL2PoolEvents::LiquidationCall(LiquidationCall {
+                        collateralAsset: Address::from_str(DAI)?,
+                        debtAsset: Address::from_str(AAVE)?,
+                        user: user.clone(),
+                        debtToCover: 1.as_u256_decimal_18(),
+                        liquidatedCollateralAmount: 10.as_u256_decimal_12(),
+                        liquidator: user,
+                        receiveAToken: false,
+                    }),
+                    block_timestamp,
+                )
                 .await
             }
             _ => Err(eyre!("no listen_events events")),

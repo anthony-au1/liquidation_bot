@@ -202,7 +202,7 @@ pub trait DataProvider: Send + Sync {
     async fn get_source_of_asset(&self, token: &Address) -> eyre::Result<Address>;
     async fn listen_events<F, Fut>(&self, callback: F) -> eyre::Result<()>
     where
-        F: Fn(IL2PoolEvents) -> Fut + Send + 'static,
+        F: Fn(IL2PoolEvents, BlockTimeStamp) -> Fut + Send + 'static,
         Fut: Future<Output = eyre::Result<()>> + Send;
     async fn get_reserve_configuration_data(&self, token: &Address) -> eyre::Result<f64>;
     async fn get_user_reserve_data(
@@ -454,7 +454,7 @@ where
 
     async fn listen_events<F, Fut>(&self, callback: F) -> eyre::Result<()>
     where
-        F: Fn(IL2PoolEvents) -> Fut + Send + 'static,
+        F: Fn(IL2PoolEvents, BlockTimeStamp) -> Fut + Send + 'static,
         Fut: Future<Output = eyre::Result<()>> + Send,
     {
         let l2_pool = IL2Pool::new(L2_POOL_ADDRESS.parse()?, self.provider.clone());
@@ -474,7 +474,14 @@ where
                 match stream.recv().await {
                     Ok(log) => match IL2PoolEvents::decode_log(log.as_ref()) {
                         Ok(Log { data, .. }) => {
-                            callback(data).await?;
+                            let block_timestamp = log
+                                .block_timestamp
+                                .ok_or_else(|| eyre!("block timestamp is not found"))?;
+                            let block_ts_micros: i64 = (block_timestamp as i64)
+                                .checked_mul(1_000_000)
+                                .ok_or_else(|| eyre!("timestamp overflow"))?;
+
+                            callback(data, BlockTimeStamp(block_ts_micros)).await?;
                         }
                         Err(e) => {
                             debug!("listen_events: error decoding logs: {e:?}");
@@ -951,7 +958,8 @@ impl TokenDetails {
     }
 }
 
-pub(crate) struct RqDate(pub(crate) TimeStamp);
+pub struct RqDate(pub TimeStamp);
+pub struct BlockTimeStamp(pub TimeStamp);
 
 pub async fn start<P>(cache: Arc<Cache>, provider: Arc<P>) -> eyre::Result<()>
 where
@@ -1107,7 +1115,7 @@ where
     let mut counters = EventCounter::default();
     while let Some(event) = rc_events.recv().await {
         match event {
-            AaveEvents::IL2PoolEvents(event, rq_date) => match event {
+            AaveEvents::IL2PoolEvents(event, block_timestamp, rq_date) => match event {
                 IL2PoolEvents::Supply(ev) => {
                     debug!("start: supply");
                     // supply_txs[counters.supply % w_num]
@@ -1115,7 +1123,8 @@ where
                     //         ev,
                     //         sync_senders[sync_counter % w_num].clone(),
                     //         hf_senders[hf_counter % w_num].clone(),
-                    //         RqDate(rq_date),
+                    //         block_timestamp,
+                    //         rq_date,
                     //     ))
                     //     .await?;
                     // counters.supply = counters.supply.wrapping_add(1);
@@ -1128,7 +1137,8 @@ where
                     //         ev,
                     //         sync_senders[sync_counter % w_num].clone(),
                     //         hf_senders[hf_counter % w_num].clone(),
-                    //         RqDate(rq_date),
+                    //         block_timestamp,
+                    //         rq_date,
                     //     ))
                     //     .await?;
                     // counters.withdraw = counters.withdraw.wrapping_add(1);
@@ -1141,7 +1151,8 @@ where
                             ev,
                             sync_senders[sync_counter % w_num].clone(),
                             hf_senders[hf_counter % w_num].clone(),
-                            RqDate(rq_date),
+                            block_timestamp,
+                            rq_date,
                         ))
                         .await?;
                     counters.borrow = counters.borrow.wrapping_add(1);
@@ -1154,7 +1165,8 @@ where
                             ev,
                             sync_senders[sync_counter % w_num].clone(),
                             hf_senders[hf_counter % w_num].clone(),
-                            RqDate(rq_date),
+                            block_timestamp,
+                            rq_date,
                         ))
                         .await?;
                     counters.repay = counters.repay.wrapping_add(1);
@@ -1168,7 +1180,8 @@ where
                     //         ev,
                     //         sync_senders[sync_counter % w_num].clone(),
                     //         hf_senders[hf_counter % w_num].clone(),
-                    //         RqDate(rq_date),
+                    //         block_timestamp,
+                    //         rq_date,
                     //     ))
                     //     .await?;
                     // counters.reserve_used_as_collateral_enabled =
@@ -1183,7 +1196,8 @@ where
                     //         ev,
                     //         sync_senders[sync_counter % w_num].clone(),
                     //         hf_senders[hf_counter % w_num].clone(),
-                    //         RqDate(rq_date),
+                    //         block_timestamp,
+                    //         rq_date,
                     //     ))
                     //     .await?;
                     // counters.reserve_used_as_collateral_disabled =
@@ -1197,7 +1211,8 @@ where
                             ev,
                             sync_senders[sync_counter % w_num].clone(),
                             hf_senders[hf_counter % w_num].clone(),
-                            RqDate(rq_date),
+                            block_timestamp,
+                            rq_date,
                         ))
                         .await?;
                     counters.liquidation_call = counters.liquidation_call.wrapping_add(1);
@@ -1206,7 +1221,12 @@ where
                 IL2PoolEvents::ReserveDataUpdated(ev) => {
                     debug!("start: reserve data updated");
                     reserve_data_updated_txs[counters.reserve_data_updated % w_num]
-                        .send((ev, hf_senders[hf_counter % w_num].clone(), RqDate(rq_date)))
+                        .send((
+                            ev,
+                            hf_senders[hf_counter % w_num].clone(),
+                            block_timestamp,
+                            rq_date,
+                        ))
                         .await?;
                     counters.reserve_data_updated = counters.reserve_data_updated.wrapping_add(1);
                 }
@@ -1252,7 +1272,7 @@ where
 pub type TimeStamp = i64;
 
 pub(crate) enum AaveEvents {
-    IL2PoolEvents(IL2PoolEvents, TimeStamp),
+    IL2PoolEvents(IL2PoolEvents, BlockTimeStamp, RqDate),
 }
 
 pub(crate) async fn listen_events<P>(provider: Arc<P>, tx: Sender<AaveEvents>) -> eyre::Result<()>
@@ -1265,13 +1285,14 @@ where
 
             let tx = tx.clone();
             match provider
-                .listen_events(move |data| {
+                .listen_events(move |data, block_timestamp| {
                     let tx = tx.clone();
                     async move {
                         if let Err(e) = tx
                             .send(AaveEvents::IL2PoolEvents(
                                 data,
-                                Utc::now().timestamp_micros(),
+                                block_timestamp,
+                                RqDate(Utc::now().timestamp_micros()),
                             ))
                             .await
                         {
@@ -2036,9 +2057,9 @@ impl Cache {
                 current_atoken_balance,
                 usage_as_collateral_enabled,
                 current_variable_debt,
-                liquidity,
+                liquidity[idx],
                 liquidity_index,
-                variable_borrow,
+                variable_borrow[idx],
                 variable_borrow_index,
             );
 
@@ -2562,7 +2583,7 @@ pub(in crate::arbitrum) fn get_latest_variable_borrow_index(
 
     if dt.is_zero() {
         debug!(
-            "get_latest_variable_borrow_index: index = {}, rate = {}, last_update = {}, dt = {}",
+            "get_latest_variable_borrow_index: index = {}, rate = {}, last_update = {}, dt = {} seconds",
             variable_borrow_index.index,
             variable_borrow_index.rate,
             variable_borrow_index.last_update,
@@ -2578,7 +2599,7 @@ pub(in crate::arbitrum) fn get_latest_variable_borrow_index(
         .ray_mul(one_ray + variable_borrow_index.rate.ray_mul(dt_spy));
 
     debug!(
-        "get_latest_variable_borrow_index: index = {}, rate = {}, last_update = {}, dt = {}, update_index = {}",
+        "get_latest_variable_borrow_index: index = {}, rate = {}, last_update = {}, dt = {} seconds, update_index = {}",
         variable_borrow_index.index,
         variable_borrow_index.rate,
         variable_borrow_index.last_update,
