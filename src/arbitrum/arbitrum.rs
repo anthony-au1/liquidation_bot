@@ -4,13 +4,14 @@ use crate::arbitrum::arbitrum::IAaveProtocolDataProvider::{
 };
 use crate::arbitrum::arbitrum::IL2Pool::{IL2PoolEvents, IL2PoolInstance};
 use crate::arbitrum::events::{borrow, liquidation_call, repay, reserve_data_updated};
+use alloy::eips::BlockId;
 use alloy::primitives::{Address, Log};
 use alloy::providers::Provider;
 use alloy::rpc::types::Filter;
 use alloy::sol;
 use alloy::sol_types::SolEventInterface;
 use alloy_primitives::aliases::U40;
-use alloy_primitives::{I256, Sign, U256, U512};
+use alloy_primitives::{Sign, I256, U256, U512};
 use async_trait::async_trait;
 use bitvec::prelude::*;
 use chrono::Utc;
@@ -18,7 +19,7 @@ use circuitbreaker_rs::{CircuitBreaker, DefaultPolicy};
 use dashmap::DashMap;
 use eyre::eyre;
 use futures::future::try_join_all;
-use ndarray::{Array1, Array2, Axis, concatenate};
+use ndarray::{concatenate, Array1, Array2, Axis};
 use std::collections::HashMap;
 use std::default::Default;
 use std::error::Error;
@@ -26,11 +27,11 @@ use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::RwLock;
-use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::{task, time, try_join};
-use tokio_retry::Retry;
 use tokio_retry::strategy::FixedInterval;
+use tokio_retry::Retry;
 use tracing::{debug, error, info};
 
 // antonanohin@gmail.com
@@ -470,18 +471,18 @@ where
             }
 
             let mut stream = stream?;
+            let mut block_cache = BlockCache::default();
             loop {
                 match stream.recv().await {
                     Ok(log) => match IL2PoolEvents::decode_log(log.as_ref()) {
                         Ok(Log { data, .. }) => {
-                            let block_timestamp = log
-                                .block_timestamp
-                                .ok_or_else(|| eyre!("block timestamp is not found"))?;
-                            let block_ts_micros: i64 = (block_timestamp as i64)
-                                .checked_mul(1_000_000)
-                                .ok_or_else(|| eyre!("timestamp overflow"))?;
+                            let block_number =
+                                log.block_number.ok_or_else(|| eyre!("no block number"))?;
 
-                            callback(data, BlockTimeStamp(block_ts_micros)).await?;
+                            let block_timestamp =
+                                block_cache.get(&self.provider, block_number).await?;
+
+                            callback(data, BlockTimeStamp(block_timestamp)).await?;
                         }
                         Err(e) => {
                             debug!("listen_events: error decoding logs: {e:?}");
@@ -2718,5 +2719,34 @@ impl Scaler for U256 {
 
     fn to_current(self, index: U256) -> U256 {
         self.ray_mul(index) // (self * index) / RAY
+    }
+}
+
+#[derive(Default, Debug)]
+struct BlockCache {
+    last_block: u64,
+    last_ts: TimeStamp,
+}
+
+impl BlockCache {
+    async fn get<P>(&mut self, provider: &P, block_number: u64) -> eyre::Result<TimeStamp>
+    where
+        P: Provider + Clone + Send + Sync + 'static,
+    {
+        if block_number == self.last_block {
+            return Ok(self.last_ts);
+        }
+
+        let block = provider
+            .get_block(BlockId::from(block_number))
+            .await?
+            .ok_or_else(|| eyre!("block not found"))?;
+
+        let ts_micros = (block.header.timestamp as i64) * 1_000_000;
+
+        self.last_block = block_number;
+        self.last_ts = ts_micros;
+
+        Ok(ts_micros)
     }
 }
