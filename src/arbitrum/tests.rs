@@ -4,11 +4,12 @@ use crate::arbitrum::arbitrum::IL2Pool::{
     ReserveUsedAsCollateralDisabled, ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
 use crate::arbitrum::arbitrum::{
-    AaveEvents, ApiError, BlockTimeStamp, Cache, DataProvider, F64Converter, HFRequest, Index,
-    RayOperations, ReserveData, RqDate, SECONDS_PER_YEAR, Scaler, SyncRequest, SyncTarget,
-    TokenDetails, UserAccountData, UserData, UserReserveData, UserSettings, build_breaker,
-    liquidation, liquidation_lookup, liquidation_threshold_update, listen_events, listen_hf_calc,
-    listen_prices_update, listen_sync, setup,
+    build_breaker, get_latest_liquidity_index, get_latest_variable_borrow_index, liquidation, liquidation_lookup, liquidation_threshold_update, listen_events, listen_hf_calc,
+    listen_prices_update, listen_sync, setup, AaveEvents, ApiError, BlockTimeStamp, Cache, Clock,
+    DataProvider, F64Converter, HFRequest, Index, RayOperations, ReserveData,
+    RqDate, Scaler, SyncRequest, SyncTarget,
+    TokenDetails, UserAccountData, UserData, UserReserveData, UserSettings,
+    SECONDS_PER_YEAR,
 };
 use crate::arbitrum::events::{
     borrow, create_user, liquidation_call, repay, reserve_data_updated,
@@ -20,7 +21,7 @@ use async_trait::async_trait;
 use bitvec::bitvec;
 use bitvec::order::Lsb0;
 use bitvec::prelude::BitVec;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use circuitbreaker_rs::{CircuitBreaker, DefaultPolicy};
 use eyre::eyre;
 use ndarray::{Array1, Array2};
@@ -29,12 +30,12 @@ use std::fmt::Debug;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
 use tokio::sync::mpsc::channel;
+use tokio::sync::RwLock;
 use tokio::task;
 use tokio::time::sleep;
-use tokio_retry::Retry;
 use tokio_retry::strategy::FixedInterval;
+use tokio_retry::Retry;
 
 trait F64Helper: F64Converter {
     fn as_f64_decimal_18(&self) -> f64;
@@ -95,16 +96,23 @@ impl F64Helper for U256 {
     }
 }
 
-struct DummyDataProvider;
+struct DummyProvider;
 
-impl DummyDataProvider {
+impl DummyProvider {
     fn new() -> Self {
         Self {}
     }
 }
 
+impl Clock for DummyProvider {
+    #[inline]
+    fn now(&self) -> DateTime<Utc> {
+        Utc::now()
+    }
+}
+
 #[async_trait]
-impl DataProvider for DummyDataProvider {
+impl DataProvider for DummyProvider {
     async fn get_all_reserves_tokens(&self) -> eyre::Result<Vec<TokenData>> {
         let mut token_data = vec![];
         let (_, tokens) = generate_cache_and_tokens(0).await?;
@@ -848,7 +856,7 @@ async fn test_sync_borrowed() -> eyre::Result<()> {
 
 #[tokio::test]
 async fn test_sync_user() -> eyre::Result<()> {
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1).await?;
     let user = cache
         .users
@@ -911,7 +919,7 @@ async fn test_sync_user() -> eyre::Result<()> {
 async fn test_init_user() -> eyre::Result<()> {
     // 1 case - cache has this user
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1).await?;
     let user = cache
         .users
@@ -928,7 +936,7 @@ async fn test_init_user() -> eyre::Result<()> {
 
     // 2 case - new user
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(0).await?;
     let user = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
 
@@ -982,7 +990,7 @@ async fn test_init_user() -> eyre::Result<()> {
 
 #[tokio::test]
 async fn test_get_user_data() -> eyre::Result<()> {
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1).await?;
     let user = cache
         .users
@@ -1084,7 +1092,7 @@ async fn test_remove_user() -> eyre::Result<()> {
 
 #[tokio::test]
 async fn test_subscribe() -> eyre::Result<()> {
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1).await?;
     let test_message = String::from("test_message");
     struct Message(String);
@@ -1209,7 +1217,11 @@ async fn test_calc_hf() -> eyre::Result<()> {
     }
 
     cache
-        .calc_hf(Some(&user), Utc::now().timestamp_millis())
+        .calc_hf(
+            Some(&user),
+            &DummyProvider::new(),
+            Utc::now().timestamp_micros(),
+        )
         .await?;
 
     let hf = {
@@ -1315,7 +1327,9 @@ async fn test_calc_hf() -> eyre::Result<()> {
             .push_row(Array1::from_vec(vec![bor.as_f64_ray(), bor2.as_f64_ray(), 0.0]).view())?;
     }
 
-    cache.calc_hf(None, Utc::now().timestamp_millis()).await?;
+    cache
+        .calc_hf(None, &DummyProvider::new(), Utc::now().timestamp_millis())
+        .await?;
 
     let hf = {
         let (hf, _) = &*cache.health_factors.read().await;
@@ -1334,16 +1348,23 @@ async fn test_calc_hf() -> eyre::Result<()> {
     Ok(())
 }
 
-struct CreateUserDataProvider;
+struct CreateUserProvider;
 
-impl CreateUserDataProvider {
+impl CreateUserProvider {
     fn new() -> Self {
         Self {}
     }
 }
 
+impl Clock for CreateUserProvider {
+    #[inline]
+    fn now(&self) -> DateTime<Utc> {
+        Utc::now()
+    }
+}
+
 #[async_trait]
-impl DataProvider for CreateUserDataProvider {
+impl DataProvider for CreateUserProvider {
     async fn get_all_reserves_tokens(&self) -> eyre::Result<Vec<TokenData>> {
         todo!()
     }
@@ -1414,7 +1435,7 @@ impl DataProvider for CreateUserDataProvider {
 async fn test_create_user() -> eyre::Result<()> {
     // 1 case - user exists
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1).await?;
     let user = cache
         .users
@@ -1444,7 +1465,7 @@ async fn test_create_user() -> eyre::Result<()> {
 
     // 2 case - create new user
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(0).await?;
     let rq_date = Utc::now().timestamp_micros();
     let user = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
@@ -1529,7 +1550,7 @@ async fn test_create_user() -> eyre::Result<()> {
 
     // 3 case - error
 
-    let create_user_data_provider = Arc::new(CreateUserDataProvider::new());
+    let create_user_data_provider = Arc::new(CreateUserProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(0).await?;
 
     let err = create_user(
@@ -1554,7 +1575,7 @@ async fn test_create_user() -> eyre::Result<()> {
 async fn test_supply() -> eyre::Result<()> {
     // 1 case - create new user
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(0).await?;
 
     let user = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
@@ -1649,7 +1670,7 @@ async fn test_supply() -> eyre::Result<()> {
 
     // 2 case - collateral new event
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1).await?;
     let cache = Arc::new(cache);
     let user = cache
@@ -1723,7 +1744,7 @@ async fn test_supply() -> eyre::Result<()> {
 
     // 3 case - reserve new event
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1).await?;
     let cache = Arc::new(cache);
     let user = cache
@@ -1784,7 +1805,7 @@ async fn test_supply() -> eyre::Result<()> {
     // 4 case - collateral skip event
 
     let rq_date = Utc::now().timestamp_micros();
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1).await?;
     let cache = Arc::new(cache);
     let user = cache
@@ -1834,7 +1855,7 @@ async fn test_supply() -> eyre::Result<()> {
     // 5 case - reserve skip event
 
     let rq_date = Utc::now().timestamp_micros();
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1).await?;
     let cache = Arc::new(cache);
     let user = cache
@@ -1883,7 +1904,7 @@ async fn test_supply() -> eyre::Result<()> {
 
     // 6 case - sync event
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(10).await?;
     let cache = Arc::new(cache);
     let rq_date = Utc::now().timestamp_micros();
@@ -1985,7 +2006,7 @@ async fn test_supply() -> eyre::Result<()> {
 
 #[tokio::test]
 async fn test_setup() -> eyre::Result<()> {
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (_, t) = generate_cache_and_tokens(0).await?;
 
     let tokens = setup(dummy_data_provider).await?;
@@ -2018,7 +2039,7 @@ async fn test_setup() -> eyre::Result<()> {
 
 #[tokio::test]
 async fn test_listen_events() -> eyre::Result<()> {
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (event_tx, mut event_rc) = channel::<AaveEvents>(1);
 
     let user = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
@@ -2066,7 +2087,7 @@ async fn test_listen_events() -> eyre::Result<()> {
 
 #[tokio::test]
 async fn test_listen_prices_update() -> eyre::Result<()> {
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
 
     let cache = generate_cache_and_tokens(1)
         .await
@@ -2094,7 +2115,7 @@ async fn test_listen_prices_update() -> eyre::Result<()> {
 
 #[tokio::test]
 async fn test_liquidation_threshold_update() -> eyre::Result<()> {
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1).await?;
     let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
     let cache = Arc::new(cache);
@@ -2333,7 +2354,14 @@ async fn test_hf_calc() -> eyre::Result<()> {
         Ok::<_, eyre::Error>(call_counter)
     });
 
-    let senders = listen_hf_calc(cache.clone(), lq_lookup_tx, 1, 1).await?;
+    let senders = listen_hf_calc(
+        cache.clone(),
+        Arc::new(DummyProvider::new()),
+        lq_lookup_tx,
+        1,
+        1,
+    )
+    .await?;
     let sender = senders.get(0).ok_or_else(|| eyre::eyre!("senders empty"))?;
     let rq_date = Utc::now().timestamp_micros();
     sender.send(HFRequest::User(user.clone(), rq_date)).await?;
@@ -2403,7 +2431,7 @@ async fn test_hf_calc() -> eyre::Result<()> {
 async fn test_withdraw() -> eyre::Result<()> {
     // 1 case - create new user
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(0)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
@@ -2498,7 +2526,7 @@ async fn test_withdraw() -> eyre::Result<()> {
 
     // 2 case - collateral new event
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
@@ -2589,7 +2617,7 @@ async fn test_withdraw() -> eyre::Result<()> {
 
     // 3 case - reserve new event
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
@@ -2667,7 +2695,7 @@ async fn test_withdraw() -> eyre::Result<()> {
     // 4 case - collateral skip event
 
     let rq_date = Utc::now().timestamp_micros();
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
@@ -2717,7 +2745,7 @@ async fn test_withdraw() -> eyre::Result<()> {
     // 5 case - reserve skip event
 
     let rq_date = Utc::now().timestamp_micros();
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
@@ -2766,7 +2794,7 @@ async fn test_withdraw() -> eyre::Result<()> {
 
     // 6 case - sync event
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(10)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
@@ -2870,7 +2898,7 @@ async fn test_withdraw() -> eyre::Result<()> {
 async fn test_borrow() -> eyre::Result<()> {
     // 1 case - create new user
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(0)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
@@ -2929,46 +2957,59 @@ async fn test_borrow() -> eyre::Result<()> {
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
     let (decimals, _) = &*cache.decimals.read().await;
 
+    let now = Utc::now().timestamp_micros();
+
+    let liquidity_index1 = get_latest_liquidity_index(&cache.liquidity.read().await.0[1], now)?;
     assert_eq!(
         collateral,
         vec![
             U256::default(),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.liquidity.read().await.0[1].index),
+                .to_scaled(liquidity_index1),
             U256::default()
         ]
     );
+
+    let liquidity_index = get_latest_liquidity_index(&cache.liquidity.read().await.0[0], now)?;
+    let liquidity_index2 = get_latest_liquidity_index(&cache.liquidity.read().await.0[2], now)?;
     assert_eq!(
         reserve,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.liquidity.read().await.0[0].index),
+                .to_scaled(liquidity_index),
             U256::default(),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.liquidity.read().await.0[2].index),
+                .to_scaled(liquidity_index2),
         ]
     );
+
+    let variable_borrow_index =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[0], now)?;
+    let variable_borrow_index1 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[1], now)?;
+    let variable_borrow_index2 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[2], now)?;
     assert_eq!(
         borrowed,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+                .to_scaled(variable_borrow_index),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.variable_borrow.read().await.0[1].index),
+                .to_scaled(variable_borrow_index1),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.variable_borrow.read().await.0[2].index),
+                .to_scaled(variable_borrow_index2),
         ]
     );
 
     // 2 case - borrowed new event
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
@@ -3061,7 +3102,7 @@ async fn test_borrow() -> eyre::Result<()> {
     // 3 case - borrowed skip event
 
     let rq_date = Utc::now().timestamp_micros();
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
@@ -3116,7 +3157,7 @@ async fn test_borrow() -> eyre::Result<()> {
 
     // 4 case - sync event
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(10)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
@@ -3225,7 +3266,7 @@ async fn test_borrow() -> eyre::Result<()> {
 async fn test_repay() -> eyre::Result<()> {
     // 1 case - create new user
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(0)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
@@ -3321,7 +3362,7 @@ async fn test_repay() -> eyre::Result<()> {
 
     // 2 case - repay new event
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
@@ -3411,7 +3452,7 @@ async fn test_repay() -> eyre::Result<()> {
     // 3 case - borrowed skip event
 
     let rq_date = Utc::now().timestamp_micros();
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
@@ -3461,7 +3502,7 @@ async fn test_repay() -> eyre::Result<()> {
 
     // 4 case - sync event
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(10)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
@@ -3566,7 +3607,7 @@ async fn test_repay() -> eyre::Result<()> {
 async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
     // 1 case - create new user
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(0)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
@@ -3659,7 +3700,7 @@ async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
 
     // 2 case - reserve_used_as_collateral_enabled new event
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
@@ -3750,7 +3791,7 @@ async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
     // 3 case - reserve_used_as_collateral_enabled skip event
 
     let rq_date = Utc::now().timestamp_micros();
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
@@ -3797,7 +3838,7 @@ async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
 
     // 4 case - reserve_used_as_collateral_enabled sync event
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(10)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
@@ -3898,7 +3939,7 @@ async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
 async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
     // 1 case - create new user
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(0)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
@@ -3991,7 +4032,7 @@ async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
 
     // 2 case - reserve_used_as_collateral_disabled new event
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
@@ -4081,7 +4122,7 @@ async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
     // 3 case - reserve_used_as_collateral_disabled skip event
 
     let rq_date = Utc::now().timestamp_micros();
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
@@ -4128,7 +4169,7 @@ async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
 
     // 4 case - reserve_used_as_collateral_disabled sync event
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(10)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
@@ -4230,7 +4271,7 @@ async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
 async fn test_liquidation_call() -> eyre::Result<()> {
     // 1 case - create new user
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(0)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
@@ -4327,7 +4368,7 @@ async fn test_liquidation_call() -> eyre::Result<()> {
 
     // 2 case - liquidation_call new event
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
@@ -4460,7 +4501,7 @@ async fn test_liquidation_call() -> eyre::Result<()> {
     // 3 case - liquidation_call skip event
 
     let rq_date = Utc::now().timestamp_micros();
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
@@ -4514,7 +4555,7 @@ async fn test_liquidation_call() -> eyre::Result<()> {
 
     // 4 case - liquidation_call sync event
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(10)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
@@ -4648,7 +4689,7 @@ async fn test_reserve_data_updated() -> eyre::Result<()> {
     let (cache, tokens) = generate_cache_and_tokens(1)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
 
     let token = Address::from_str("0x1Ac54C113cefD1792CbFcF41B711824d657eb61D")?;
 

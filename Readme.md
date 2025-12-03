@@ -84,4 +84,3 @@
 **Future Improvements**
 
 1. we need to catch event when we move collateral from user to user
-2. we need to provide last update timestamp when calc indexes in the event

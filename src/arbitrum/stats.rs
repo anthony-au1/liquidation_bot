@@ -1,5 +1,5 @@
 use crate::arbitrum::arbitrum::{
-    AAVE_ORACLE_ADDRESS, AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS, AaveDataProvider, Cache,
+    AAVE_ORACLE_ADDRESS, AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS, AaveProvider, Cache,
     DataProvider, F64Converter, IAaveOracle, IAaveProtocolDataProvider, IL2Pool, Index,
     L2_POOL_ADDRESS, RayOperations, ReserveData, Scaler, UserReserveData, build_breaker,
 };
@@ -110,11 +110,11 @@ async fn build_data_provider<P>(
     grove_provider: &P,
     drpc_provider: &P,
     ankr_provider: &P,
-) -> eyre::Result<AaveDataProvider<P>>
+) -> eyre::Result<AaveProvider<P>>
 where
     P: Provider + Clone + Send + Sync + 'static,
 {
-    Ok(AaveDataProvider {
+    Ok(AaveProvider {
         aave_protocol_data_provider: IAaveProtocolDataProvider::new(
             AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS.parse()?,
             provider2.clone(),

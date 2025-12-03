@@ -7,7 +7,7 @@ use axum::routing::get;
 use clap::{Parser, Subcommand};
 use liquidation_bot;
 use liquidation_bot::arbitrum::arbitrum::{AAVE_ORACLE_ADDRESS, AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS, ANKR_URL, Cache, D_RPC_URL, GROVE_URL, IAaveOracle, IAaveProtocolDataProvider, IL2Pool, L2_POOL_ADDRESS, POKT_URL, WS_URL, build_breaker, start, WS_SECOND_URL};
-use liquidation_bot::arbitrum::arbitrum::{AaveDataProvider, RPC_URL};
+use liquidation_bot::arbitrum::arbitrum::{AaveProvider, RPC_URL};
 use liquidation_bot::arbitrum::stats::{
     AppState, get_borrowed_all_state, get_borrowed_matrix_row_state, get_borrowed_matrix_state,
     get_borrowed_state, get_collateral_all_state, get_collateral_matrix_row_state,
@@ -175,7 +175,7 @@ async fn main() -> eyre::Result<()> {
                 .with_state(state);
             let listener = TcpListener::bind("0.0.0.0:3000").await?;
 
-            let data_provider = Arc::new(AaveDataProvider {
+            let data_provider = Arc::new(AaveProvider {
                 aave_protocol_data_provider: IAaveProtocolDataProvider::new(
                     AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS.parse()?,
                     rpc_provider.clone(),

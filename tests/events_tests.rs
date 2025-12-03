@@ -3,7 +3,7 @@ use alloy_primitives::{Address, U256, U512};
 use async_trait::async_trait;
 use bitvec::bitvec;
 use bitvec::prelude::Lsb0;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use eyre::eyre;
 use liquidation_bot::arbitrum::arbitrum::IAaveProtocolDataProvider::TokenData;
 use liquidation_bot::arbitrum::arbitrum::IL2Pool::{
@@ -11,8 +11,8 @@ use liquidation_bot::arbitrum::arbitrum::IL2Pool::{
     ReserveUsedAsCollateralDisabled, ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
 use liquidation_bot::arbitrum::arbitrum::{
-    BlockTimeStamp, Cache, DataProvider, Index, ReserveData, UserAccountData, UserReserveData,
-    UserSettings, start,
+    start, BlockTimeStamp, Cache, Clock, DataProvider, Index, ReserveData,
+    UserAccountData, UserReserveData, UserSettings,
 };
 use ndarray::{Array1, Array2};
 use std::fmt::Debug;
@@ -154,10 +154,18 @@ impl Scaler for U256 {
     }
 }
 
-struct SharedDataProvider;
+struct SharedProvider;
+
+impl Clock for SharedProvider {
+
+    #[inline]
+    fn now(&self) -> DateTime<Utc> {
+        Utc::now()
+    }
+}
 
 #[async_trait]
-impl DataProvider for SharedDataProvider {
+impl DataProvider for SharedProvider {
     async fn get_all_reserves_tokens(&self) -> eyre::Result<Vec<TokenData>> {
         let mut token_data = Vec::with_capacity(3);
         token_data.push(TokenData {
@@ -357,18 +365,18 @@ impl DataProvider for SharedDataProvider {
     }
 }
 
-struct DummyDataProvider {
-    shared_data_provider: SharedDataProvider,
+struct DummyProvider {
+    shared_data_provider: SharedProvider,
     listen_events_call_counter: Mutex<usize>,
     listen_price_update_call_counter: Mutex<usize>,
     listen_price_update_call_counter2: Mutex<usize>,
     listen_price_update_call_counter3: Mutex<usize>,
 }
 
-impl DummyDataProvider {
+impl DummyProvider {
     fn new() -> Self {
         Self {
-            shared_data_provider: SharedDataProvider {},
+            shared_data_provider: SharedProvider {},
             listen_events_call_counter: Mutex::new(0),
             listen_price_update_call_counter: Mutex::new(0),
             listen_price_update_call_counter2: Mutex::new(0),
@@ -377,8 +385,16 @@ impl DummyDataProvider {
     }
 }
 
+impl Clock for DummyProvider {
+
+    #[inline]
+    fn now(&self) -> DateTime<Utc> {
+        Utc::now()
+    }
+}
+
 #[async_trait]
-impl DataProvider for DummyDataProvider {
+impl DataProvider for DummyProvider {
     async fn get_all_reserves_tokens(&self) -> eyre::Result<Vec<TokenData>> {
         self.shared_data_provider.get_all_reserves_tokens().await
     }
@@ -940,7 +956,7 @@ impl DataProvider for DummyDataProvider {
 #[tokio::test]
 async fn test_events() -> eyre::Result<()> {
     let cache = Arc::new(Cache::default());
-    let provider = Arc::new(DummyDataProvider::new());
+    let provider = Arc::new(DummyProvider::new());
 
     let c = cache.clone();
     task::spawn(async move {
