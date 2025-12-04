@@ -21,7 +21,7 @@ use async_trait::async_trait;
 use bitvec::bitvec;
 use bitvec::order::Lsb0;
 use bitvec::prelude::BitVec;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
 use circuitbreaker_rs::{CircuitBreaker, DefaultPolicy};
 use eyre::eyre;
 use ndarray::{Array1, Array2};
@@ -107,7 +107,12 @@ impl DummyProvider {
 impl Clock for DummyProvider {
     #[inline]
     fn now(&self) -> DateTime<Utc> {
-        Utc::now()
+        let date = NaiveDate::from_ymd_opt(2025, 1, 2).unwrap();
+        let time = NaiveTime::from_hms_opt(0, 0, 0).unwrap();
+
+        let naive = date.and_time(time);
+        let dt: DateTime<Utc> = DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc);
+        dt
     }
 }
 
@@ -363,7 +368,13 @@ async fn generate_cache_and_tokens(
         ),
     );
 
-    let now = Utc::now().timestamp_micros();
+    let date = NaiveDate::from_ymd_opt(2025, 1, 1).unwrap();
+    let time = NaiveTime::from_hms_opt(0, 0, 0).unwrap();
+
+    let naive = date.and_time(time);
+    let dt: DateTime<Utc> = DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc);
+    let now = dt.timestamp_micros();
+
     *cache.health_factors.write().await = (Array1::from_elem(0, 0.0), now);
     if user_num > 0 {
         let mut user_addr = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
@@ -875,40 +886,53 @@ async fn test_sync_user() -> eyre::Result<()> {
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
     let (decimal, _) = &*cache.decimals.read().await;
 
+    let now = dummy_data_provider.now().timestamp_micros();
+
+    let liquidity_index1 = get_latest_liquidity_index(&cache.liquidity.read().await.0[1], now)?;
     assert_eq!(
         collateral,
         vec![
             U256::default(),
             20.as_u256_decimal_6()
                 .to_ray(decimal[1])
-                .to_scaled(cache.liquidity.read().await.0[1].index),
+                .to_scaled(liquidity_index1),
             U256::default()
         ]
     );
+
+    let liquidity_index = get_latest_liquidity_index(&cache.liquidity.read().await.0[0], now)?;
+    let liquidity_index2 = get_latest_liquidity_index(&cache.liquidity.read().await.0[2], now)?;
     assert_eq!(
         reserve,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimal[0])
-                .to_scaled(cache.liquidity.read().await.0[0].index),
+                .to_scaled(liquidity_index),
             U256::default(),
             30.as_u256_decimal_12()
                 .to_ray(decimal[2])
-                .to_scaled(cache.liquidity.read().await.0[2].index),
+                .to_scaled(liquidity_index2),
         ]
     );
+
+    let variable_borrow_index =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[0], now)?;
+    let variable_borrow_index1 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[1], now)?;
+    let variable_borrow_index2 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[2], now)?;
     assert_eq!(
         borrowed,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimal[0])
-                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+                .to_scaled(variable_borrow_index),
             20.as_u256_decimal_6()
                 .to_ray(decimal[1])
-                .to_scaled(cache.variable_borrow.read().await.0[1].index),
+                .to_scaled(variable_borrow_index1),
             30.as_u256_decimal_12()
                 .to_ray(decimal[2])
-                .to_scaled(cache.variable_borrow.read().await.0[2].index),
+                .to_scaled(variable_borrow_index2),
         ]
     );
 
@@ -940,7 +964,9 @@ async fn test_init_user() -> eyre::Result<()> {
     let (cache, tokens) = generate_cache_and_tokens(0).await?;
     let user = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
 
-    cache.init_user(&user, &tokens, dummy_data_provider).await?;
+    cache
+        .init_user(&user, &tokens, dummy_data_provider.clone())
+        .await?;
 
     assert_eq!(cache.contains(&user), true);
     assert_eq!(cache.users.len(), 1);
@@ -948,40 +974,53 @@ async fn test_init_user() -> eyre::Result<()> {
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
     let (decimals, _) = &*cache.decimals.read().await;
 
+    let now = dummy_data_provider.now().timestamp_micros();
+
+    let liquidity_index1 = get_latest_liquidity_index(&cache.liquidity.read().await.0[1], now)?;
     assert_eq!(
         collateral,
         vec![
             U256::default(),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.liquidity.read().await.0[1].index),
+                .to_scaled(liquidity_index1),
             U256::default()
         ]
     );
+
+    let liquidity_index = get_latest_liquidity_index(&cache.liquidity.read().await.0[0], now)?;
+    let liquidity_index2 = get_latest_liquidity_index(&cache.liquidity.read().await.0[2], now)?;
     assert_eq!(
         reserve,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.liquidity.read().await.0[0].index),
+                .to_scaled(liquidity_index),
             U256::default(),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.liquidity.read().await.0[2].index),
+                .to_scaled(liquidity_index2),
         ]
     );
+
+    let variable_borrow_index =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[0], now)?;
+    let variable_borrow_index1 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[1], now)?;
+    let variable_borrow_index2 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[2], now)?;
     assert_eq!(
         borrowed,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+                .to_scaled(variable_borrow_index),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.variable_borrow.read().await.0[1].index),
+                .to_scaled(variable_borrow_index1),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.variable_borrow.read().await.0[2].index),
+                .to_scaled(variable_borrow_index2),
         ]
     );
 
@@ -1006,7 +1045,7 @@ async fn test_get_user_data() -> eyre::Result<()> {
         borrowed_scaled,
         user_settings,
     } = cache
-        .get_user_data(dummy_data_provider, &tokens, &user)
+        .get_user_data(dummy_data_provider.clone(), &tokens, &user)
         .await?;
 
     assert_eq!(cache.contains(&user), true);
@@ -1014,40 +1053,53 @@ async fn test_get_user_data() -> eyre::Result<()> {
 
     let (decimals, _) = &*cache.decimals.read().await;
 
+    let now = dummy_data_provider.now().timestamp_micros();
+
+    let liquidity_index1 = get_latest_liquidity_index(&cache.liquidity.read().await.0[1], now)?;
     assert_eq!(
         collateral_scaled,
         vec![
             U256::default(),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.liquidity.read().await.0[1].index),
+                .to_scaled(liquidity_index1),
             U256::default()
         ]
     );
+
+    let liquidity_index = get_latest_liquidity_index(&cache.liquidity.read().await.0[0], now)?;
+    let liquidity_index2 = get_latest_liquidity_index(&cache.liquidity.read().await.0[2], now)?;
     assert_eq!(
         reserve_scaled,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.liquidity.read().await.0[0].index),
+                .to_scaled(liquidity_index),
             U256::default(),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.liquidity.read().await.0[2].index),
+                .to_scaled(liquidity_index2),
         ]
     );
+
+    let variable_borrow_index =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[0], now)?;
+    let variable_borrow_index1 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[1], now)?;
+    let variable_borrow_index2 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[2], now)?;
     assert_eq!(
         borrowed_scaled,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+                .to_scaled(variable_borrow_index),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.variable_borrow.read().await.0[1].index),
+                .to_scaled(variable_borrow_index1),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.variable_borrow.read().await.0[2].index),
+                .to_scaled(variable_borrow_index2),
         ]
     );
 
@@ -1501,7 +1553,7 @@ async fn test_create_user() -> eyre::Result<()> {
         borrowed_scaled,
         user_settings,
     } = cache
-        .get_user_data(dummy_data_provider, &tokens, &user)
+        .get_user_data(dummy_data_provider.clone(), &tokens, &user)
         .await?;
 
     assert_eq!(cache.contains(&user), true);
@@ -1509,40 +1561,53 @@ async fn test_create_user() -> eyre::Result<()> {
 
     let (decimals, _) = &*cache.decimals.read().await;
 
+    let now = dummy_data_provider.now().timestamp_micros();
+
+    let liquidity_index1 = get_latest_liquidity_index(&cache.liquidity.read().await.0[1], now)?;
     assert_eq!(
         collateral_scaled,
         vec![
             U256::default(),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.liquidity.read().await.0[1].index),
+                .to_scaled(liquidity_index1),
             U256::default()
         ]
     );
+
+    let liquidity_index = get_latest_liquidity_index(&cache.liquidity.read().await.0[0], now)?;
+    let liquidity_index2 = get_latest_liquidity_index(&cache.liquidity.read().await.0[2], now)?;
     assert_eq!(
         reserve_scaled,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.liquidity.read().await.0[0].index),
+                .to_scaled(liquidity_index),
             U256::default(),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.liquidity.read().await.0[2].index),
+                .to_scaled(liquidity_index2),
         ]
     );
+
+    let variable_borrow_index =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[0], now)?;
+    let variable_borrow_index1 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[1], now)?;
+    let variable_borrow_index2 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[2], now)?;
     assert_eq!(
         borrowed_scaled,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+                .to_scaled(variable_borrow_index),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.variable_borrow.read().await.0[1].index),
+                .to_scaled(variable_borrow_index1),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.variable_borrow.read().await.0[2].index),
+                .to_scaled(variable_borrow_index2),
         ]
     );
     assert_eq!(user_settings.row_num, 0);
@@ -1612,7 +1677,7 @@ async fn test_supply() -> eyre::Result<()> {
 
     supply(
         cache.clone(),
-        dummy_data_provider,
+        dummy_data_provider.clone(),
         Arc::new(tokens),
         (
             event,
@@ -1631,40 +1696,53 @@ async fn test_supply() -> eyre::Result<()> {
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
     let (decimals, _) = &*cache.decimals.read().await;
 
+    let now = dummy_data_provider.now().timestamp_micros();
+
+    let liquidity_index1 = get_latest_liquidity_index(&cache.liquidity.read().await.0[1], now)?;
     assert_eq!(
         collateral,
         vec![
             U256::default(),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.liquidity.read().await.0[1].index),
+                .to_scaled(liquidity_index1),
             U256::default()
         ]
     );
+
+    let liquidity_index = get_latest_liquidity_index(&cache.liquidity.read().await.0[0], now)?;
+    let liquidity_index2 = get_latest_liquidity_index(&cache.liquidity.read().await.0[2], now)?;
     assert_eq!(
         reserve,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.liquidity.read().await.0[0].index),
+                .to_scaled(liquidity_index),
             U256::default(),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.liquidity.read().await.0[2].index),
+                .to_scaled(liquidity_index2),
         ]
     );
+
+    let variable_borrow_index =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[0], now)?;
+    let variable_borrow_index1 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[1], now)?;
+    let variable_borrow_index2 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[2], now)?;
     assert_eq!(
         borrowed,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+                .to_scaled(variable_borrow_index),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.variable_borrow.read().await.0[1].index),
+                .to_scaled(variable_borrow_index1),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.variable_borrow.read().await.0[2].index),
+                .to_scaled(variable_borrow_index2),
         ]
     );
 
@@ -1682,7 +1760,7 @@ async fn test_supply() -> eyre::Result<()> {
         .clone();
     let token = Address::from_str("0x1Ac54C113cefD1792CbFcF41B711824d657eb61D")?;
 
-    let rq_date = Utc::now().timestamp_micros();
+    let rq_date = dummy_data_provider.now().timestamp_micros();
 
     let event = Supply {
         reserve: token.clone(),
@@ -1734,7 +1812,7 @@ async fn test_supply() -> eyre::Result<()> {
         vec![
             20.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.liquidity.read().await.0[0].index),
+                .to_scaled(get_latest_liquidity_index(&cache.liquidity.read().await.0[0], now)?),
             U256::default(),
             U256::default()
         ]
@@ -1756,7 +1834,7 @@ async fn test_supply() -> eyre::Result<()> {
         .clone();
     let token = Address::from_str("0x1Af54C113cefD1792CbFcF41B711834d657ea61D")?;
 
-    let rq_date = Utc::now().timestamp_micros();
+    let rq_date = dummy_data_provider.now().timestamp_micros();
 
     let event = Supply {
         reserve: token.clone(),
@@ -1773,7 +1851,7 @@ async fn test_supply() -> eyre::Result<()> {
 
     supply(
         cache.clone(),
-        dummy_data_provider,
+        dummy_data_provider.clone(),
         Arc::new(tokens),
         (
             event,
@@ -1796,7 +1874,7 @@ async fn test_supply() -> eyre::Result<()> {
             U256::default(),
             30.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.liquidity.read().await.0[1].index),
+                .to_scaled(get_latest_liquidity_index(&cache.liquidity.read().await.0[1], now)?),
             U256::default()
         ]
     );
@@ -1804,7 +1882,9 @@ async fn test_supply() -> eyre::Result<()> {
 
     // 4 case - collateral skip event
 
-    let rq_date = Utc::now().timestamp_micros();
+    let rq_date = dummy_data_provider.now()
+        .timestamp_micros()
+        .saturating_sub(24 * 60 * 60 * 1000_000);
     let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1).await?;
     let cache = Arc::new(cache);
@@ -1832,7 +1912,7 @@ async fn test_supply() -> eyre::Result<()> {
 
     supply(
         cache.clone(),
-        dummy_data_provider,
+        dummy_data_provider.clone(),
         Arc::new(tokens),
         (
             event,
@@ -1854,7 +1934,7 @@ async fn test_supply() -> eyre::Result<()> {
 
     // 5 case - reserve skip event
 
-    let rq_date = Utc::now().timestamp_micros();
+    let rq_date = now.saturating_sub(24 * 60 * 60 * 1000_000);
     let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1).await?;
     let cache = Arc::new(cache);
@@ -1964,40 +2044,51 @@ async fn test_supply() -> eyre::Result<()> {
 
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
 
+    let liquidity_index1 = get_latest_liquidity_index(&cache.liquidity.read().await.0[1], now)?;
     assert_eq!(
         collateral,
         vec![
             U256::default(),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.liquidity.read().await.0[1].index),
+                .to_scaled(liquidity_index1),
             U256::default()
         ]
     );
+
+    let liquidity_index = get_latest_liquidity_index(&cache.liquidity.read().await.0[0], now)?;
+    let liquidity_index2 = get_latest_liquidity_index(&cache.liquidity.read().await.0[2], now)?;
     assert_eq!(
         reserve,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.liquidity.read().await.0[0].index),
+                .to_scaled(liquidity_index),
             U256::default(),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.liquidity.read().await.0[2].index),
+                .to_scaled(liquidity_index2),
         ]
     );
+
+    let variable_borrow_index =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[0], now)?;
+    let variable_borrow_index1 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[1], now)?;
+    let variable_borrow_index2 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[2], now)?;
     assert_eq!(
         borrowed,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+                .to_scaled(variable_borrow_index),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.variable_borrow.read().await.0[1].index),
+                .to_scaled(variable_borrow_index1),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.variable_borrow.read().await.0[2].index),
+                .to_scaled(variable_borrow_index2),
         ]
     );
 
@@ -2124,7 +2215,9 @@ async fn test_liquidation_threshold_update() -> eyre::Result<()> {
         let (lt, _) = &mut *cache.liquidation_threshold.write().await;
         *lt = Array1::from_vec(vec![0.9, 0.9, 0.9]);
     }
-    let now = Utc::now().timestamp_micros();
+    let now = dummy_data_provider.now()
+        .timestamp_micros()
+        .saturating_sub(24 * 60 * 60 * 1000_000);
     let new_update = now;
     let hf_handler = task::spawn(async move {
         let msg = hf_rc
@@ -2468,7 +2561,7 @@ async fn test_withdraw() -> eyre::Result<()> {
 
     withdraw(
         cache.clone(),
-        dummy_data_provider,
+        dummy_data_provider.clone(),
         tokens,
         (
             event,
@@ -2487,40 +2580,53 @@ async fn test_withdraw() -> eyre::Result<()> {
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
     let (decimals, _) = &*cache.decimals.read().await;
 
+    let now = dummy_data_provider.now().timestamp_micros();
+
+    let liquidity_index1 = get_latest_liquidity_index(&cache.liquidity.read().await.0[1], now)?;
     assert_eq!(
         collateral,
         vec![
             U256::default(),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.liquidity.read().await.0[1].index),
+                .to_scaled(liquidity_index1),
             U256::default()
         ]
     );
+
+    let liquidity_index = get_latest_liquidity_index(&cache.liquidity.read().await.0[0], now)?;
+    let liquidity_index2 = get_latest_liquidity_index(&cache.liquidity.read().await.0[2], now)?;
     assert_eq!(
         reserve,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.liquidity.read().await.0[0].index),
+                .to_scaled(liquidity_index),
             U256::default(),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.liquidity.read().await.0[2].index),
+                .to_scaled(liquidity_index2),
         ]
     );
+
+    let variable_borrow_index =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[0], now)?;
+    let variable_borrow_index1 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[1], now)?;
+    let variable_borrow_index2 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[2], now)?;
     assert_eq!(
         borrowed,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+                .to_scaled(variable_borrow_index),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.variable_borrow.read().await.0[1].index),
+                .to_scaled(variable_borrow_index1),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.variable_borrow.read().await.0[2].index),
+                .to_scaled(variable_borrow_index2),
         ]
     );
 
@@ -2556,7 +2662,7 @@ async fn test_withdraw() -> eyre::Result<()> {
         .clone();
     let token = Address::from_str("0x1Ac54C113cefD1792CbFcF41B711824d657eb61D")?;
 
-    let rq_date = Utc::now().timestamp_micros();
+    let rq_date = dummy_data_provider.now().timestamp_micros();
 
     let event = Withdraw {
         reserve: token.clone(),
@@ -2585,7 +2691,7 @@ async fn test_withdraw() -> eyre::Result<()> {
 
     withdraw(
         cache.clone(),
-        dummy_data_provider,
+        dummy_data_provider.clone(),
         tokens,
         (
             event,
@@ -2602,12 +2708,23 @@ async fn test_withdraw() -> eyre::Result<()> {
 
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
 
+    let now1 = dummy_data_provider.now()
+        .timestamp_micros()
+        .saturating_sub(24 * 60 * 60 * 1000_000);
+
+    let part1 =
+        100.as_u256_decimal_18()
+            .to_ray(decimals[0])
+            .to_scaled(get_latest_liquidity_index(&cache.liquidity.read().await.0[0], now1)?);
+    let part2 =
+        20.as_u256_decimal_18()
+            .to_ray(decimals[0])
+            .to_scaled(get_latest_liquidity_index(&cache.liquidity.read().await.0[0], now)?);
+
     assert_eq!(
         collateral,
         vec![
-            80.as_u256_decimal_18()
-                .to_ray(decimals[0])
-                .to_scaled(cache.liquidity.read().await.0[0].index),
+            part1.saturating_sub(part2),
             U256::default(),
             U256::default()
         ]
@@ -2663,7 +2780,7 @@ async fn test_withdraw() -> eyre::Result<()> {
 
     withdraw(
         cache.clone(),
-        dummy_data_provider,
+        dummy_data_provider.clone(),
         tokens,
         (
             event,
@@ -2680,13 +2797,21 @@ async fn test_withdraw() -> eyre::Result<()> {
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
 
     assert_eq!(collateral, vec![U256::default(); 3]);
+
+    let part1 =
+        100.as_u256_decimal_6()
+            .to_ray(decimals[1])
+            .to_scaled(get_latest_liquidity_index(&cache.liquidity.read().await.0[1], now1)?);
+    let part2 =
+        30.as_u256_decimal_6()
+            .to_ray(decimals[1])
+            .to_scaled(get_latest_liquidity_index(&cache.liquidity.read().await.0[1], now)?);
+
     assert_eq!(
         reserve,
         vec![
             U256::default(),
-            70.as_u256_decimal_6()
-                .to_ray(decimals[1])
-                .to_scaled(cache.liquidity.read().await.0[1].index),
+            part1.saturating_sub(part2),
             U256::default()
         ]
     );
@@ -2694,7 +2819,9 @@ async fn test_withdraw() -> eyre::Result<()> {
 
     // 4 case - collateral skip event
 
-    let rq_date = Utc::now().timestamp_micros();
+    let rq_date = dummy_data_provider.now()
+        .timestamp_micros()
+        .saturating_sub(24 * 60 * 60 * 1000_000);;
     let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1)
         .await
@@ -2854,40 +2981,51 @@ async fn test_withdraw() -> eyre::Result<()> {
 
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
 
+    let liquidity_index1 = get_latest_liquidity_index(&cache.liquidity.read().await.0[1], now)?;
     assert_eq!(
         collateral,
         vec![
             U256::default(),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.liquidity.read().await.0[1].index),
+                .to_scaled(liquidity_index1),
             U256::default()
         ]
     );
+
+    let liquidity_index = get_latest_liquidity_index(&cache.liquidity.read().await.0[0], now)?;
+    let liquidity_index2 = get_latest_liquidity_index(&cache.liquidity.read().await.0[2], now)?;
     assert_eq!(
         reserve,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.liquidity.read().await.0[0].index),
+                .to_scaled(liquidity_index),
             U256::default(),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.liquidity.read().await.0[2].index),
+                .to_scaled(liquidity_index2),
         ]
     );
+
+    let variable_borrow_index =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[0], now)?;
+    let variable_borrow_index1 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[1], now)?;
+    let variable_borrow_index2 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[2], now)?;
     assert_eq!(
         borrowed,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+                .to_scaled(variable_borrow_index),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.variable_borrow.read().await.0[1].index),
+                .to_scaled(variable_borrow_index1),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.variable_borrow.read().await.0[2].index),
+                .to_scaled(variable_borrow_index2),
         ]
     );
 
@@ -2938,7 +3076,7 @@ async fn test_borrow() -> eyre::Result<()> {
 
     borrow(
         cache.clone(),
-        dummy_data_provider,
+        dummy_data_provider.clone(),
         tokens,
         (
             event,
@@ -2957,7 +3095,7 @@ async fn test_borrow() -> eyre::Result<()> {
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
     let (decimals, _) = &*cache.decimals.read().await;
 
-    let now = Utc::now().timestamp_micros();
+    let now = dummy_data_provider.now().timestamp_micros();
 
     let liquidity_index1 = get_latest_liquidity_index(&cache.liquidity.read().await.0[1], now)?;
     assert_eq!(
@@ -3088,12 +3226,26 @@ async fn test_borrow() -> eyre::Result<()> {
 
     assert_eq!(collateral, vec![U256::default(); 3]);
     assert_eq!(reserve, vec![U256::default(); 3]);
+
+    let now1 = now.saturating_sub(24 * 60 * 60 * 1000_000);
+    let part1 =
+        100.as_u256_decimal_18()
+            .to_ray(decimals[0])
+            .to_scaled(get_latest_variable_borrow_index(
+                &cache.variable_borrow.read().await.0[0],
+                now1,
+            )?);
+    let part2 =
+        20.as_u256_decimal_18()
+            .to_ray(decimals[0])
+            .to_scaled(get_latest_variable_borrow_index(
+                &cache.variable_borrow.read().await.0[0],
+                now,
+            )?);
     assert_eq!(
         borrowed,
         vec![
-            120.as_u256_decimal_18()
-                .to_ray(decimals[0])
-                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+            part1.saturating_add(part2),
             U256::default(),
             U256::default()
         ]
@@ -3101,7 +3253,7 @@ async fn test_borrow() -> eyre::Result<()> {
 
     // 3 case - borrowed skip event
 
-    let rq_date = Utc::now().timestamp_micros();
+    let rq_date = now.saturating_sub(24 * 60 * 60 * 1000_000);
     let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1)
         .await
@@ -3222,40 +3374,51 @@ async fn test_borrow() -> eyre::Result<()> {
 
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
 
+    let liquidity_index1 = get_latest_liquidity_index(&cache.liquidity.read().await.0[1], now)?;
     assert_eq!(
         collateral,
         vec![
             U256::default(),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.liquidity.read().await.0[1].index),
+                .to_scaled(liquidity_index1),
             U256::default()
         ]
     );
+
+    let liquidity_index = get_latest_liquidity_index(&cache.liquidity.read().await.0[0], now)?;
+    let liquidity_index2 = get_latest_liquidity_index(&cache.liquidity.read().await.0[2], now)?;
     assert_eq!(
         reserve,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.liquidity.read().await.0[0].index),
+                .to_scaled(liquidity_index),
             U256::default(),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.liquidity.read().await.0[2].index)
+                .to_scaled(liquidity_index2)
         ]
     );
+
+    let variable_borrow_index =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[0], now)?;
+    let variable_borrow_index1 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[1], now)?;
+    let variable_borrow_index2 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[2], now)?;
     assert_eq!(
         borrowed,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+                .to_scaled(variable_borrow_index),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.variable_borrow.read().await.0[1].index),
+                .to_scaled(variable_borrow_index1),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.variable_borrow.read().await.0[2].index)
+                .to_scaled(variable_borrow_index2)
         ]
     );
 
@@ -3304,7 +3467,7 @@ async fn test_repay() -> eyre::Result<()> {
 
     repay(
         cache.clone(),
-        dummy_data_provider,
+        dummy_data_provider.clone(),
         tokens,
         (
             event,
@@ -3323,40 +3486,53 @@ async fn test_repay() -> eyre::Result<()> {
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
     let (decimals, _) = &*cache.decimals.read().await;
 
+    let now = dummy_data_provider.now().timestamp_micros();
+
+    let liquidity_index1 = get_latest_liquidity_index(&cache.liquidity.read().await.0[1], now)?;
     assert_eq!(
         collateral,
         vec![
             U256::default(),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.liquidity.read().await.0[1].index),
+                .to_scaled(liquidity_index1),
             U256::default()
         ]
     );
+
+    let liquidity_index = get_latest_liquidity_index(&cache.liquidity.read().await.0[0], now)?;
+    let liquidity_index2 = get_latest_liquidity_index(&cache.liquidity.read().await.0[2], now)?;
     assert_eq!(
         reserve,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.liquidity.read().await.0[0].index),
+                .to_scaled(liquidity_index),
             U256::default(),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.liquidity.read().await.0[2].index),
+                .to_scaled(liquidity_index2),
         ]
     );
+
+    let variable_borrow_index =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[0], now)?;
+    let variable_borrow_index1 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[1], now)?;
+    let variable_borrow_index2 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[2], now)?;
     assert_eq!(
         borrowed,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+                .to_scaled(variable_borrow_index),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.variable_borrow.read().await.0[1].index),
+                .to_scaled(variable_borrow_index1),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.variable_borrow.read().await.0[2].index),
+                .to_scaled(variable_borrow_index2),
         ]
     );
 
@@ -3438,12 +3614,21 @@ async fn test_repay() -> eyre::Result<()> {
 
     assert_eq!(collateral, vec![U256::default(); 3]);
     assert_eq!(reserve, vec![U256::default(); 3]);
+
+    let now1 = now.saturating_sub(24 * 60 * 60 * 1000_000);
+
+    let part1 =
+        100.as_u256_decimal_18()
+            .to_ray(decimals[0])
+            .to_scaled(get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[0], now1)?);
+    let part2 =
+        10.as_u256_decimal_18()
+            .to_ray(decimals[0])
+            .to_scaled(get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[0], now)?);
     assert_eq!(
         borrowed,
         vec![
-            90.as_u256_decimal_18()
-                .to_ray(decimals[0])
-                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+            part1.saturating_sub(part2),
             U256::default(),
             U256::default()
         ]
@@ -3451,7 +3636,7 @@ async fn test_repay() -> eyre::Result<()> {
 
     // 3 case - borrowed skip event
 
-    let rq_date = Utc::now().timestamp_micros();
+    let rq_date = now.saturating_sub(24 * 60 * 60 * 1000_000);
     let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1)
         .await
@@ -3563,40 +3748,51 @@ async fn test_repay() -> eyre::Result<()> {
 
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
 
+    let liquidity_index1 = get_latest_liquidity_index(&cache.liquidity.read().await.0[1], now)?;
     assert_eq!(
         collateral,
         vec![
             U256::default(),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.liquidity.read().await.0[1].index),
+                .to_scaled(liquidity_index1),
             U256::default()
         ]
     );
+
+    let liquidity_index = get_latest_liquidity_index(&cache.liquidity.read().await.0[0], now)?;
+    let liquidity_index2 = get_latest_liquidity_index(&cache.liquidity.read().await.0[2], now)?;
     assert_eq!(
         reserve,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.liquidity.read().await.0[0].index),
+                .to_scaled(liquidity_index),
             U256::default(),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.liquidity.read().await.0[2].index),
+                .to_scaled(liquidity_index2),
         ]
     );
+
+    let variable_borrow_index =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[0], now)?;
+    let variable_borrow_index1 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[1], now)?;
+    let variable_borrow_index2 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[2], now)?;
     assert_eq!(
         borrowed,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+                .to_scaled(variable_borrow_index),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.variable_borrow.read().await.0[1].index),
+                .to_scaled(variable_borrow_index1),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.variable_borrow.read().await.0[2].index),
+                .to_scaled(variable_borrow_index2),
         ]
     );
 
@@ -3642,7 +3838,7 @@ async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
 
     reserve_used_as_collateral_enabled(
         cache.clone(),
-        dummy_data_provider,
+        dummy_data_provider.clone(),
         tokens,
         (
             event,
@@ -3661,40 +3857,53 @@ async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
     let (decimals, _) = &*cache.decimals.read().await;
 
+    let now = dummy_data_provider.now().timestamp_micros();
+
+    let liquidity_index1 = get_latest_liquidity_index(&cache.liquidity.read().await.0[1], now)?;
     assert_eq!(
         collateral,
         vec![
             U256::default(),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.liquidity.read().await.0[1].index),
+                .to_scaled(liquidity_index1),
             U256::default()
         ]
     );
+
+    let liquidity_index = get_latest_liquidity_index(&cache.liquidity.read().await.0[0], now)?;
+    let liquidity_index2 = get_latest_liquidity_index(&cache.liquidity.read().await.0[2], now)?;
     assert_eq!(
         reserve,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.liquidity.read().await.0[0].index),
+                .to_scaled(liquidity_index),
             U256::default(),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.liquidity.read().await.0[2].index),
+                .to_scaled(liquidity_index2),
         ]
     );
+
+    let variable_borrow_index =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[0], now)?;
+    let variable_borrow_index1 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[1], now)?;
+    let variable_borrow_index2 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[2], now)?;
     assert_eq!(
         borrowed,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+                .to_scaled(variable_borrow_index),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.variable_borrow.read().await.0[1].index),
+                .to_scaled(variable_borrow_index1),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.variable_borrow.read().await.0[2].index),
+                .to_scaled(variable_borrow_index2),
         ]
     );
 
@@ -3730,7 +3939,7 @@ async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
         .clone();
     let token = Address::from_str("0x1Af54C113cefD1792CbFcF41B711824d657eb61D")?;
 
-    let rq_date = Utc::now().timestamp_micros();
+    let rq_date = dummy_data_provider.now().timestamp_micros();
     let block_timestamp = rq_date;
 
     let event = ReserveUsedAsCollateralEnabled {
@@ -3758,7 +3967,7 @@ async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
 
     reserve_used_as_collateral_enabled(
         cache.clone(),
-        dummy_data_provider,
+        dummy_data_provider.clone(),
         tokens,
         (
             event,
@@ -3790,7 +3999,9 @@ async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
 
     // 3 case - reserve_used_as_collateral_enabled skip event
 
-    let rq_date = Utc::now().timestamp_micros();
+    let rq_date = dummy_data_provider.now()
+        .timestamp_micros()
+        .saturating_sub(24 * 60 * 60 * 1000_000);
     let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1)
         .await
@@ -3895,40 +4106,51 @@ async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
 
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
 
+    let liquidity_index1 = get_latest_liquidity_index(&cache.liquidity.read().await.0[1], now)?;
     assert_eq!(
         collateral,
         vec![
             U256::default(),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.liquidity.read().await.0[1].index),
+                .to_scaled(liquidity_index1),
             U256::default()
         ]
     );
+
+    let liquidity_index = get_latest_liquidity_index(&cache.liquidity.read().await.0[0], now)?;
+    let liquidity_index2 = get_latest_liquidity_index(&cache.liquidity.read().await.0[2], now)?;
     assert_eq!(
         reserve,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.liquidity.read().await.0[0].index),
+                .to_scaled(liquidity_index),
             U256::default(),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.liquidity.read().await.0[2].index),
+                .to_scaled(liquidity_index2),
         ]
     );
+
+    let variable_borrow_index =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[0], now)?;
+    let variable_borrow_index1 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[1], now)?;
+    let variable_borrow_index2 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[2], now)?;
     assert_eq!(
         borrowed,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+                .to_scaled(variable_borrow_index),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.variable_borrow.read().await.0[1].index),
+                .to_scaled(variable_borrow_index1),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.variable_borrow.read().await.0[2].index),
+                .to_scaled(variable_borrow_index2),
         ]
     );
 
@@ -3974,7 +4196,7 @@ async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
 
     reserve_used_as_collateral_disabled(
         cache.clone(),
-        dummy_data_provider,
+        dummy_data_provider.clone(),
         tokens,
         (
             event,
@@ -3993,40 +4215,53 @@ async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
     let (decimals, _) = &*cache.decimals.read().await;
 
+    let now = dummy_data_provider.now().timestamp_micros();
+
+    let liquidity_index1 = get_latest_liquidity_index(&cache.liquidity.read().await.0[1], now)?;
     assert_eq!(
         collateral,
         vec![
             U256::default(),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.liquidity.read().await.0[1].index),
+                .to_scaled(liquidity_index1),
             U256::default()
         ]
     );
+
+    let liquidity_index = get_latest_liquidity_index(&cache.liquidity.read().await.0[0], now)?;
+    let liquidity_index2 = get_latest_liquidity_index(&cache.liquidity.read().await.0[2], now)?;
     assert_eq!(
         reserve,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.liquidity.read().await.0[0].index),
+                .to_scaled(liquidity_index),
             U256::default(),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.liquidity.read().await.0[2].index),
+                .to_scaled(liquidity_index2),
         ]
     );
+
+    let variable_borrow_index =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[0], now)?;
+    let variable_borrow_index1 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[1], now)?;
+    let variable_borrow_index2 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[2], now)?;
     assert_eq!(
         borrowed,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+                .to_scaled(variable_borrow_index),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.variable_borrow.read().await.0[1].index),
+                .to_scaled(variable_borrow_index1),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.variable_borrow.read().await.0[2].index),
+                .to_scaled(variable_borrow_index2),
         ]
     );
 
@@ -4062,7 +4297,7 @@ async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
         .clone();
     let token = Address::from_str("0x1Af54C113cefD1792CbFcF41B711824d657eb61D")?;
 
-    let rq_date = Utc::now().timestamp_micros();
+    let rq_date = dummy_data_provider.now().timestamp_micros();
 
     let event = ReserveUsedAsCollateralDisabled {
         reserve: token,
@@ -4089,7 +4324,7 @@ async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
 
     reserve_used_as_collateral_disabled(
         cache.clone(),
-        dummy_data_provider,
+        dummy_data_provider.clone(),
         tokens,
         (
             event,
@@ -4121,7 +4356,9 @@ async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
 
     // 3 case - reserve_used_as_collateral_disabled skip event
 
-    let rq_date = Utc::now().timestamp_micros();
+    let rq_date = dummy_data_provider.now()
+        .timestamp_micros()
+        .saturating_sub(24 * 60 * 60 * 1000_000);
     let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1)
         .await
@@ -4227,40 +4464,51 @@ async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
 
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
 
+    let liquidity_index1 = get_latest_liquidity_index(&cache.liquidity.read().await.0[1], now)?;
     assert_eq!(
         collateral,
         vec![
             U256::default(),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.liquidity.read().await.0[1].index),
+                .to_scaled(liquidity_index1),
             U256::default()
         ]
     );
+
+    let liquidity_index = get_latest_liquidity_index(&cache.liquidity.read().await.0[0], now)?;
+    let liquidity_index2 = get_latest_liquidity_index(&cache.liquidity.read().await.0[2], now)?;
     assert_eq!(
         reserve,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.liquidity.read().await.0[0].index),
+                .to_scaled(liquidity_index),
             U256::default(),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.liquidity.read().await.0[2].index),
+                .to_scaled(liquidity_index2),
         ]
     );
+
+    let variable_borrow_index =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[0], now)?;
+    let variable_borrow_index1 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[1], now)?;
+    let variable_borrow_index2 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[2], now)?;
     assert_eq!(
         borrowed,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+                .to_scaled(variable_borrow_index),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.variable_borrow.read().await.0[1].index),
+                .to_scaled(variable_borrow_index1),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.variable_borrow.read().await.0[2].index),
+                .to_scaled(variable_borrow_index2),
         ]
     );
 
@@ -4310,7 +4558,7 @@ async fn test_liquidation_call() -> eyre::Result<()> {
 
     liquidation_call(
         cache.clone(),
-        dummy_data_provider,
+        dummy_data_provider.clone(),
         tokens,
         (
             event,
@@ -4329,40 +4577,53 @@ async fn test_liquidation_call() -> eyre::Result<()> {
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
     let (decimals, _) = &*cache.decimals.read().await;
 
+    let now = dummy_data_provider.now().timestamp_micros();
+
+    let liquidity_index1 = get_latest_liquidity_index(&cache.liquidity.read().await.0[1], now)?;
     assert_eq!(
         collateral,
         vec![
             U256::default(),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.liquidity.read().await.0[1].index),
+                .to_scaled(liquidity_index1),
             U256::default()
         ]
     );
+
+    let liquidity_index = get_latest_liquidity_index(&cache.liquidity.read().await.0[0], now)?;
+    let liquidity_index2 = get_latest_liquidity_index(&cache.liquidity.read().await.0[2], now)?;
     assert_eq!(
         reserve,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.liquidity.read().await.0[0].index),
+                .to_scaled(liquidity_index),
             U256::default(),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.liquidity.read().await.0[2].index),
+                .to_scaled(liquidity_index2),
         ]
     );
+
+    let variable_borrow_index =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[0], now)?;
+    let variable_borrow_index1 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[1], now)?;
+    let variable_borrow_index2 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[2], now)?;
     assert_eq!(
         borrowed,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+                .to_scaled(variable_borrow_index),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.variable_borrow.read().await.0[1].index),
+                .to_scaled(variable_borrow_index1),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.variable_borrow.read().await.0[2].index),
+                .to_scaled(variable_borrow_index2),
         ]
     );
 
@@ -4455,7 +4716,7 @@ async fn test_liquidation_call() -> eyre::Result<()> {
 
     liquidation_call(
         cache.clone(),
-        dummy_data_provider,
+        dummy_data_provider.clone(),
         tokens,
         (
             event,
@@ -4476,31 +4737,60 @@ async fn test_liquidation_call() -> eyre::Result<()> {
         reserve,
         vec![U256::default(), U256::default(), U256::default()]
     );
+
+    let now1 = now.saturating_sub(24 * 60 * 60 * 1000_000);
+    let part1 = 30
+        .as_u256_decimal_18()
+        .to_ray(decimals[0])
+        .to_scaled(get_latest_liquidity_index(
+            &cache.liquidity.read().await.0[0],
+            now1,
+        )?);
+    let part2 = 10
+        .as_u256_decimal_18()
+        .to_ray(decimals[0])
+        .to_scaled(get_latest_liquidity_index(
+            &cache.liquidity.read().await.0[0],
+            now,
+        )?);
+
     assert_eq!(
         collateral,
         vec![
-            20.as_u256_decimal_18()
-                .to_ray(decimal[0])
-                .to_scaled(cache.liquidity.read().await.0[0].index),
+            part1.saturating_sub(part2),
             U256::default(),
             U256::default()
         ]
     );
+
+    let part1 =
+        100_000
+            .as_u256_decimal_6()
+            .to_ray(decimal[1])
+            .to_scaled(get_latest_variable_borrow_index(
+                &cache.variable_borrow.read().await.0[1],
+                now1,
+            )?);
+    let part2 =
+        50_000
+            .as_u256_decimal_6()
+            .to_ray(decimal[1])
+            .to_scaled(get_latest_variable_borrow_index(
+                &cache.variable_borrow.read().await.0[1],
+                now,
+            )?);
     assert_eq!(
         borrowed,
         vec![
             U256::default(),
-            50_000
-                .as_u256_decimal_6()
-                .to_ray(decimal[1])
-                .to_scaled(cache.variable_borrow.read().await.0[1].index),
+            part1.saturating_sub(part2),
             U256::default()
         ]
     );
 
     // 3 case - liquidation_call skip event
 
-    let rq_date = Utc::now().timestamp_micros();
+    let rq_date = now.saturating_sub(24 * 60 * 60 * 1000_000);
     let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1)
         .await
@@ -4619,40 +4909,51 @@ async fn test_liquidation_call() -> eyre::Result<()> {
 
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
 
+    let liquidity_index1 = get_latest_liquidity_index(&cache.liquidity.read().await.0[1], now)?;
     assert_eq!(
         collateral,
         vec![
             U256::default(),
             20.as_u256_decimal_6()
-                .to_ray(decimal[1])
-                .to_scaled(cache.liquidity.read().await.0[1].index),
+                .to_ray(decimals[1])
+                .to_scaled(liquidity_index1),
             U256::default()
         ]
     );
+
+    let liquidity_index = get_latest_liquidity_index(&cache.liquidity.read().await.0[0], now)?;
+    let liquidity_index2 = get_latest_liquidity_index(&cache.liquidity.read().await.0[2], now)?;
     assert_eq!(
         reserve,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimal[0])
-                .to_scaled(cache.liquidity.read().await.0[0].index),
+                .to_scaled(liquidity_index),
             U256::default(),
             30.as_u256_decimal_12()
                 .to_ray(decimal[2])
-                .to_scaled(cache.liquidity.read().await.0[2].index),
+                .to_scaled(liquidity_index2),
         ]
     );
+
+    let variable_borrow_index =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[0], now)?;
+    let variable_borrow_index1 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[1], now)?;
+    let variable_borrow_index2 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[2], now)?;
     assert_eq!(
         borrowed,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimal[0])
-                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+                .to_scaled(variable_borrow_index),
             20.as_u256_decimal_6()
                 .to_ray(decimal[1])
-                .to_scaled(cache.variable_borrow.read().await.0[1].index),
+                .to_scaled(variable_borrow_index1),
             30.as_u256_decimal_12()
                 .to_ray(decimal[2])
-                .to_scaled(cache.variable_borrow.read().await.0[2].index),
+                .to_scaled(variable_borrow_index2),
         ]
     );
 
@@ -4702,8 +5003,11 @@ async fn test_reserve_data_updated() -> eyre::Result<()> {
         variableBorrowIndex: 105.as_u256(25),
     };
 
-    let rq_date = Utc::now().timestamp_micros();
-    let block_timestamp = rq_date;
+    let rq_date = dummy_data_provider.now()
+        .timestamp_micros()
+        .saturating_sub(24 * 60 * 60 * 1000_000);
+    let block_timestamp = dummy_data_provider.now()
+        .timestamp_micros();
 
     let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
 
@@ -4736,8 +5040,8 @@ async fn test_reserve_data_updated() -> eyre::Result<()> {
     let (liquidity, _) = &*cache.liquidity.read().await;
     let (li1, li2, li3) = (
         U256::from(1045.as_u256(24)),
-        U256::from(1035000057434360730593607306_u128),
-        U256::from(1025000040628170979198376459_u128),
+        get_latest_liquidity_index(&liquidity[1], block_timestamp)?,
+        get_latest_liquidity_index(&liquidity[2], block_timestamp)?,
     );
 
     assert_eq!(liquidity[0].index, li1);
@@ -4761,8 +5065,8 @@ async fn test_reserve_data_updated() -> eyre::Result<()> {
     let (vb, _) = &*cache.variable_borrow.read().await;
     let (vbi1, vbi2, vbi3) = (
         U256::from(105.as_u256(25)),
-        U256::from(1040000065956367326230339929_u128),
-        U256::from(1030000048991628614916286150_u128),
+        get_latest_variable_borrow_index(&vb[1], block_timestamp)?,
+        get_latest_variable_borrow_index(&vb[2], block_timestamp)?,
     );
 
     assert_eq!(vb[0].index, vbi1);
