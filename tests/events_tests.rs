@@ -3,7 +3,7 @@ use alloy_primitives::{Address, U256, U512};
 use async_trait::async_trait;
 use bitvec::bitvec;
 use bitvec::prelude::Lsb0;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
 use eyre::eyre;
 use liquidation_bot::arbitrum::arbitrum::IAaveProtocolDataProvider::TokenData;
 use liquidation_bot::arbitrum::arbitrum::IL2Pool::{
@@ -11,13 +11,15 @@ use liquidation_bot::arbitrum::arbitrum::IL2Pool::{
     ReserveUsedAsCollateralDisabled, ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
 use liquidation_bot::arbitrum::arbitrum::{
-    start, BlockTimeStamp, Cache, Clock, DataProvider, Index, ReserveData,
-    UserAccountData, UserReserveData, UserSettings,
+    BlockTimeStamp, Cache, Clock, DataProvider, Index, ReserveData, UserAccountData,
+    UserReserveData, UserSettings, start,
 };
 use ndarray::{Array1, Array2};
 use std::fmt::Debug;
+use std::ops::Add;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::sleep;
@@ -156,14 +158,6 @@ impl Scaler for U256 {
 
 struct SharedProvider;
 
-impl Clock for SharedProvider {
-
-    #[inline]
-    fn now(&self) -> DateTime<Utc> {
-        Utc::now()
-    }
-}
-
 #[async_trait]
 impl DataProvider for SharedProvider {
     async fn get_all_reserves_tokens(&self) -> eyre::Result<Vec<TokenData>> {
@@ -254,7 +248,7 @@ impl DataProvider for SharedProvider {
     }
 
     async fn get_reserve_data(&self, token: &Address) -> eyre::Result<ReserveData> {
-        let now = Utc::now().timestamp();
+        let now = generate_dt().timestamp();
         let rd = match token {
             t if *t == Address::from_str(AAVE)? => ReserveData::new(
                 45.as_u256(25),
@@ -366,6 +360,7 @@ impl DataProvider for SharedProvider {
 }
 
 struct DummyProvider {
+    clock_counter: AtomicU64,
     shared_data_provider: SharedProvider,
     listen_events_call_counter: Mutex<usize>,
     listen_price_update_call_counter: Mutex<usize>,
@@ -376,6 +371,7 @@ struct DummyProvider {
 impl DummyProvider {
     fn new() -> Self {
         Self {
+            clock_counter: AtomicU64::new(0),
             shared_data_provider: SharedProvider {},
             listen_events_call_counter: Mutex::new(0),
             listen_price_update_call_counter: Mutex::new(0),
@@ -386,10 +382,20 @@ impl DummyProvider {
 }
 
 impl Clock for DummyProvider {
-
     #[inline]
     fn now(&self) -> DateTime<Utc> {
-        Utc::now()
+        let v = self.clock_counter.fetch_add(1, Ordering::Relaxed) + 1;
+        let dt = generate_dt();
+
+        if v > 1 {
+            let dt = dt.add(chrono::Duration::days(2));
+
+            println!("dt = {}", dt);
+            return dt;
+        }
+
+        println!("dt = {}", dt);
+        dt
     }
 }
 
@@ -418,7 +424,7 @@ impl DataProvider for DummyProvider {
             *count
         };
 
-        let block_timestamp = BlockTimeStamp(Utc::now().timestamp_micros());
+        let block_timestamp = BlockTimeStamp(generate_dt().timestamp_micros());
 
         match count {
             1 => {
@@ -969,7 +975,7 @@ async fn test_events() -> eyre::Result<()> {
 
     let expected = Cache::default();
     {
-        let now = Utc::now().timestamp_micros();
+        let now = generate_dt().timestamp_micros();
 
         *expected.decimals.write().await = (
             Array1::from_vec(vec![
@@ -1048,6 +1054,23 @@ async fn test_events() -> eyre::Result<()> {
             .as_u256_decimal_18()
             .to_ray(decimals[0])
             .to_scaled(1054.as_u256(24));
+
+        println!("res1 = {:?}", res1);
+
+        // let mut res1 = 1
+        //     .as_u256_decimal_18()
+        //     .to_ray(decimals[0])
+        //     .to_scaled(1045.as_u256(24));
+        //
+        // res1 -= 1
+        //     .as_u256_decimal_18()
+        //     .to_ray(decimals[0])
+        //     .to_scaled(1051.as_u256(24));
+        //
+        // res1 += 10
+        //     .as_u256_decimal_18()
+        //     .to_ray(decimals[0])
+        //     .to_scaled(1054.as_u256(24));
 
         let reserves = &mut *expected.reserve.write().await;
         reserves.push(Arc::new(RwLock::new((
@@ -1210,7 +1233,7 @@ async fn test_events() -> eyre::Result<()> {
         let (lt, last_modified) = &*cache.liquidation_threshold.read().await;
         let (lt_expected, last_modified_expected) = &*expected.liquidation_threshold.read().await;
 
-        assert!(last_modified < last_modified_expected);
+        assert!(last_modified > last_modified_expected);
         assert_eq!(lt, lt_expected);
     }
 
@@ -1218,7 +1241,7 @@ async fn test_events() -> eyre::Result<()> {
         let (price, last_modified) = &*cache.prices.read().await;
         let (price_expected, last_modified_expected) = &*expected.prices.read().await;
 
-        assert!(last_modified < last_modified_expected);
+        assert_eq!(last_modified, last_modified_expected);
 
         let price = price.iter().map(|p| p.clone() as f32).collect::<Vec<f32>>();
         let price_expected = price_expected
@@ -1244,8 +1267,8 @@ async fn test_events() -> eyre::Result<()> {
             .write()
             .await;
 
-        assert!(last_sync < last_sync_expected);
-        assert!(last_modified < last_modified_expected);
+        assert!(last_sync > last_sync_expected);
+        assert!(last_modified > last_modified_expected);
         assert_eq!(res, res_expected);
     }
 
@@ -1312,4 +1335,13 @@ async fn test_events() -> eyre::Result<()> {
     }
 
     Ok(())
+}
+
+fn generate_dt() -> DateTime<Utc> {
+    let date = NaiveDate::from_ymd_opt(2025, 1, 2).unwrap();
+    let time = NaiveTime::from_hms_opt(0, 0, 0).unwrap();
+
+    let naive = date.and_time(time);
+    let dt: DateTime<Utc> = DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc);
+    dt
 }
