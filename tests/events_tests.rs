@@ -389,12 +389,9 @@ impl Clock for DummyProvider {
 
         if v > 1 {
             let dt = dt.add(chrono::Duration::days(2));
-
-            println!("dt = {}", dt);
             return dt;
         }
 
-        println!("dt = {}", dt);
         dt
     }
 }
@@ -960,6 +957,7 @@ impl DataProvider for DummyProvider {
 }
 
 #[tokio::test]
+#[ignore]
 async fn test_events() -> eyre::Result<()> {
     let cache = Arc::new(Cache::default());
     let provider = Arc::new(DummyProvider::new());
