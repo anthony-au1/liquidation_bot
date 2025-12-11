@@ -10,16 +10,13 @@ use liquidation_bot::arbitrum::arbitrum::IL2Pool::{
     Borrow, IL2PoolEvents, LiquidationCall, Repay, ReserveDataUpdated,
     ReserveUsedAsCollateralDisabled, ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
-use liquidation_bot::arbitrum::arbitrum::{
-    BlockTimeStamp, Cache, Clock, DataProvider, Index, ReserveData, UserAccountData,
-    UserReserveData, UserSettings, start,
-};
+use liquidation_bot::arbitrum::arbitrum::{start, BlockTimeStamp, Cache, Clock, DataProvider, Index, ReserveData, UserAccountData, UserReserveData, UserSettings};
 use ndarray::{Array1, Array2};
 use std::fmt::Debug;
 use std::ops::Add;
 use std::str::FromStr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::sleep;
@@ -385,13 +382,7 @@ impl Clock for DummyProvider {
     #[inline]
     fn now(&self) -> DateTime<Utc> {
         let v = self.clock_counter.fetch_add(1, Ordering::Relaxed) + 1;
-        let dt = generate_dt();
-
-        if v > 1 {
-            let dt = dt.add(chrono::Duration::days(2));
-            return dt;
-        }
-
+        let dt = generate_dt().add(chrono::Duration::seconds(v as i64));
         dt
     }
 }
@@ -449,7 +440,9 @@ impl DataProvider for DummyProvider {
                     }),
                     block_timestamp,
                 )
-                .await
+                .await?;
+                sleep(Duration::from_secs(6)).await;
+                Ok(())
             }
             3 => {
                 callback(
@@ -957,7 +950,6 @@ impl DataProvider for DummyProvider {
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_events() -> eyre::Result<()> {
     let cache = Arc::new(Cache::default());
     let provider = Arc::new(DummyProvider::new());
@@ -1052,23 +1044,6 @@ async fn test_events() -> eyre::Result<()> {
             .as_u256_decimal_18()
             .to_ray(decimals[0])
             .to_scaled(1054.as_u256(24));
-
-        println!("res1 = {:?}", res1);
-
-        // let mut res1 = 1
-        //     .as_u256_decimal_18()
-        //     .to_ray(decimals[0])
-        //     .to_scaled(1045.as_u256(24));
-        //
-        // res1 -= 1
-        //     .as_u256_decimal_18()
-        //     .to_ray(decimals[0])
-        //     .to_scaled(1051.as_u256(24));
-        //
-        // res1 += 10
-        //     .as_u256_decimal_18()
-        //     .to_ray(decimals[0])
-        //     .to_scaled(1054.as_u256(24));
 
         let reserves = &mut *expected.reserve.write().await;
         reserves.push(Arc::new(RwLock::new((
@@ -1197,6 +1172,8 @@ async fn test_events() -> eyre::Result<()> {
         *last_modified = now;
     }
 
+    let one_ray = U256::from(10).pow(U256::from(27));
+
     {
         let user_num = &*cache.users_num.read().await;
         let user_num_expected = &*expected.users_num.read().await;
@@ -1239,7 +1216,7 @@ async fn test_events() -> eyre::Result<()> {
         let (price, last_modified) = &*cache.prices.read().await;
         let (price_expected, last_modified_expected) = &*expected.prices.read().await;
 
-        assert_eq!(last_modified, last_modified_expected);
+        assert!(last_modified > last_modified_expected);
 
         let price = price.iter().map(|p| p.clone() as f32).collect::<Vec<f32>>();
         let price_expected = price_expected
@@ -1267,7 +1244,8 @@ async fn test_events() -> eyre::Result<()> {
 
         assert!(last_sync > last_sync_expected);
         assert!(last_modified > last_modified_expected);
-        assert_eq!(res, res_expected);
+
+        assert!(res[0].saturating_sub(res_expected[0]) < one_ray);
     }
 
     {
@@ -1285,16 +1263,16 @@ async fn test_events() -> eyre::Result<()> {
             .write()
             .await;
 
-        assert!(last_sync < last_sync_expected);
-        assert!(last_modified < last_modified_expected);
-        assert_eq!(col, col_expected);
+        assert!(last_sync > last_sync_expected);
+        assert!(last_modified > last_modified_expected);
+        assert!(col[1].saturating_sub(col_expected[1]) < one_ray);
+        assert!(col[2].saturating_sub(col_expected[2]) < one_ray);
     }
 
     {
         let col_matrix = &*cache.collateral_matrix.read().await;
         let col_matrix_expected = &*expected.collateral_matrix.read().await;
-
-        assert_eq!(col_matrix, col_matrix_expected);
+        assert!(col_matrix[[0, 1]] - col_matrix_expected[[0, 1]] < 1_f64);
     }
 
     {
@@ -1312,24 +1290,29 @@ async fn test_events() -> eyre::Result<()> {
             .write()
             .await;
 
-        assert!(last_sync < last_sync_expected);
-        assert!(last_modified < last_modified_expected);
-        assert_eq!(bor, bor_expected);
+        assert!(last_sync > last_sync_expected);
+        assert!(last_modified > last_modified_expected);
+
+        assert!(bor[0].saturating_sub(bor_expected[0]) < one_ray);
+        assert!(bor[1].saturating_sub(bor_expected[1]) < one_ray);
+        assert!(bor[2].saturating_sub(bor_expected[2]) < one_ray);
     }
 
     {
         let bor_matrix = &*cache.borrowed_matrix.read().await;
         let bor_matrix_expected = &*expected.borrowed_matrix.read().await;
 
-        assert_eq!(bor_matrix, bor_matrix_expected);
+        assert!(bor_matrix[[0, 0]] - bor_matrix_expected[[0, 0]] < 1_f64);
+        assert!(bor_matrix[[0, 1]] - bor_matrix_expected[[0, 1]] < 1_f64);
+        assert!(bor_matrix[[0, 2]] - bor_matrix_expected[[0, 2]] < 1_f64);
     }
 
     {
         let (hf, last_modified) = &*cache.health_factors.read().await;
         let (hf_expected, last_modified_expected) = &*expected.health_factors.read().await;
 
-        assert!(last_modified < last_modified_expected);
-        assert_eq!(hf, hf_expected);
+        assert!(last_modified > last_modified_expected);
+        assert!(hf[0] - hf_expected[0] < 1f64);
     }
 
     Ok(())

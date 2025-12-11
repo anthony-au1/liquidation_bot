@@ -14,7 +14,7 @@ use alloy::rpc::types::Filter;
 use alloy::sol;
 use alloy::sol_types::SolEventInterface;
 use alloy_primitives::aliases::U40;
-use alloy_primitives::{Sign, I256, U256, U512};
+use alloy_primitives::{I256, Sign, U256, U512};
 use async_trait::async_trait;
 use bitvec::prelude::*;
 use chrono::{DateTime, Utc};
@@ -22,7 +22,7 @@ use circuitbreaker_rs::{CircuitBreaker, DefaultPolicy};
 use dashmap::DashMap;
 use eyre::eyre;
 use futures::future::try_join_all;
-use ndarray::{concatenate, Array1, Array2, Axis};
+use ndarray::{Array1, Array2, Axis, concatenate};
 use std::collections::HashMap;
 use std::default::Default;
 use std::error::Error;
@@ -30,11 +30,11 @@ use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::RwLock;
+use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::{task, time, try_join};
-use tokio_retry::strategy::FixedInterval;
 use tokio_retry::Retry;
+use tokio_retry::strategy::FixedInterval;
 use tracing::{debug, error, info};
 
 // antonanohin@gmail.com
@@ -1850,6 +1850,7 @@ impl Cache {
     where
         P: DataProvider + Clock + 'static,
     {
+        println!("sync_user: before sleep");
         // aave doesn't update straight so we have to wait to make sure it has been updated
         tokio::time::sleep(Duration::from_secs(5)).await;
 

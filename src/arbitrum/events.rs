@@ -1439,6 +1439,7 @@ where
         Ok(())
     };
 
+    println!("liquidation_call");
     handle_event(
         &event.user,
         &cache,
