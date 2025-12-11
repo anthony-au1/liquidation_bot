@@ -4,11 +4,12 @@ use crate::arbitrum::arbitrum::IL2Pool::{
     ReserveUsedAsCollateralDisabled, ReserveUsedAsCollateralEnabled, Supply, Withdraw,
 };
 use crate::arbitrum::arbitrum::{
-    build_breaker, liquidation, liquidation_lookup, liquidation_threshold_update, listen_events, listen_hf_calc, listen_prices_update, listen_sync,
-    setup, AaveEvents, ApiError, Cache, DataProvider, F64Converter, HFRequest, Index,
-    RayOperations, ReserveData, RqDate, Scaler, SyncRequest,
-    SyncTarget, TokenDetails, UserAccountData, UserData, UserReserveData,
-    UserSettings,
+    build_breaker, get_latest_liquidity_index, get_latest_variable_borrow_index, liquidation, liquidation_lookup, liquidation_threshold_update, listen_events, listen_hf_calc,
+    listen_prices_update, listen_sync, setup, AaveEvents, ApiError, BlockTimeStamp, Cache, Clock,
+    DataProvider, F64Converter, HFRequest, Index, RayOperations, ReserveData,
+    RqDate, Scaler, SyncRequest, SyncTarget,
+    TokenDetails, UserAccountData, UserData, UserReserveData, UserSettings,
+    SECONDS_PER_YEAR,
 };
 use crate::arbitrum::events::{
     borrow, create_user, liquidation_call, repay, reserve_data_updated,
@@ -20,7 +21,7 @@ use async_trait::async_trait;
 use bitvec::bitvec;
 use bitvec::order::Lsb0;
 use bitvec::prelude::BitVec;
-use chrono::Utc;
+use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
 use circuitbreaker_rs::{CircuitBreaker, DefaultPolicy};
 use eyre::eyre;
 use ndarray::{Array1, Array2};
@@ -95,16 +96,28 @@ impl F64Helper for U256 {
     }
 }
 
-struct DummyDataProvider;
+struct DummyProvider;
 
-impl DummyDataProvider {
+impl DummyProvider {
     fn new() -> Self {
         Self {}
     }
 }
 
+impl Clock for DummyProvider {
+    #[inline]
+    fn now(&self) -> DateTime<Utc> {
+        let date = NaiveDate::from_ymd_opt(2025, 1, 2).unwrap();
+        let time = NaiveTime::from_hms_opt(0, 0, 0).unwrap();
+
+        let naive = date.and_time(time);
+        let dt: DateTime<Utc> = DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc);
+        dt
+    }
+}
+
 #[async_trait]
-impl DataProvider for DummyDataProvider {
+impl DataProvider for DummyProvider {
     async fn get_all_reserves_tokens(&self) -> eyre::Result<Vec<TokenData>> {
         let mut token_data = vec![];
         let (_, tokens) = generate_cache_and_tokens(0).await?;
@@ -130,7 +143,7 @@ impl DataProvider for DummyDataProvider {
 
     async fn listen_events<F, Fut>(&self, callback: F) -> eyre::Result<()>
     where
-        F: Fn(IL2PoolEvents) -> Fut + Send + 'static,
+        F: Fn(IL2PoolEvents, BlockTimeStamp) -> Fut + Send + 'static,
         Fut: Future<Output = eyre::Result<()>> + Send,
     {
         let user = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
@@ -141,7 +154,11 @@ impl DataProvider for DummyDataProvider {
             amount: 6.as_u256_decimal_18(),
             referralCode: 0,
         };
-        callback(IL2PoolEvents::Supply(event)).await
+        callback(
+            IL2PoolEvents::Supply(event),
+            BlockTimeStamp(Utc::now().timestamp_micros()),
+        )
+        .await
     }
 
     async fn get_reserve_configuration_data(&self, token: &Address) -> eyre::Result<f64> {
@@ -351,7 +368,13 @@ async fn generate_cache_and_tokens(
         ),
     );
 
-    let now = Utc::now().timestamp_micros();
+    let date = NaiveDate::from_ymd_opt(2025, 1, 1).unwrap();
+    let time = NaiveTime::from_hms_opt(0, 0, 0).unwrap();
+
+    let naive = date.and_time(time);
+    let dt: DateTime<Utc> = DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc);
+    let now = dt.timestamp_micros();
+
     *cache.health_factors.write().await = (Array1::from_elem(0, 0.0), now);
     if user_num > 0 {
         let mut user_addr = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
@@ -844,7 +867,7 @@ async fn test_sync_borrowed() -> eyre::Result<()> {
 
 #[tokio::test]
 async fn test_sync_user() -> eyre::Result<()> {
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1).await?;
     let user = cache
         .users
@@ -863,40 +886,53 @@ async fn test_sync_user() -> eyre::Result<()> {
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
     let (decimal, _) = &*cache.decimals.read().await;
 
+    let now = dummy_data_provider.now().timestamp_micros();
+
+    let liquidity_index1 = get_latest_liquidity_index(&cache.liquidity.read().await.0[1], now)?;
     assert_eq!(
         collateral,
         vec![
             U256::default(),
             20.as_u256_decimal_6()
                 .to_ray(decimal[1])
-                .to_scaled(cache.liquidity.read().await.0[1].index),
+                .to_scaled(liquidity_index1),
             U256::default()
         ]
     );
+
+    let liquidity_index = get_latest_liquidity_index(&cache.liquidity.read().await.0[0], now)?;
+    let liquidity_index2 = get_latest_liquidity_index(&cache.liquidity.read().await.0[2], now)?;
     assert_eq!(
         reserve,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimal[0])
-                .to_scaled(cache.liquidity.read().await.0[0].index),
+                .to_scaled(liquidity_index),
             U256::default(),
             30.as_u256_decimal_12()
                 .to_ray(decimal[2])
-                .to_scaled(cache.liquidity.read().await.0[2].index),
+                .to_scaled(liquidity_index2),
         ]
     );
+
+    let variable_borrow_index =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[0], now)?;
+    let variable_borrow_index1 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[1], now)?;
+    let variable_borrow_index2 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[2], now)?;
     assert_eq!(
         borrowed,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimal[0])
-                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+                .to_scaled(variable_borrow_index),
             20.as_u256_decimal_6()
                 .to_ray(decimal[1])
-                .to_scaled(cache.variable_borrow.read().await.0[1].index),
+                .to_scaled(variable_borrow_index1),
             30.as_u256_decimal_12()
                 .to_ray(decimal[2])
-                .to_scaled(cache.variable_borrow.read().await.0[2].index),
+                .to_scaled(variable_borrow_index2),
         ]
     );
 
@@ -907,7 +943,7 @@ async fn test_sync_user() -> eyre::Result<()> {
 async fn test_init_user() -> eyre::Result<()> {
     // 1 case - cache has this user
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1).await?;
     let user = cache
         .users
@@ -924,11 +960,13 @@ async fn test_init_user() -> eyre::Result<()> {
 
     // 2 case - new user
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(0).await?;
     let user = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
 
-    cache.init_user(&user, &tokens, dummy_data_provider).await?;
+    cache
+        .init_user(&user, &tokens, dummy_data_provider.clone())
+        .await?;
 
     assert_eq!(cache.contains(&user), true);
     assert_eq!(cache.users.len(), 1);
@@ -936,40 +974,53 @@ async fn test_init_user() -> eyre::Result<()> {
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
     let (decimals, _) = &*cache.decimals.read().await;
 
+    let now = dummy_data_provider.now().timestamp_micros();
+
+    let liquidity_index1 = get_latest_liquidity_index(&cache.liquidity.read().await.0[1], now)?;
     assert_eq!(
         collateral,
         vec![
             U256::default(),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.liquidity.read().await.0[1].index),
+                .to_scaled(liquidity_index1),
             U256::default()
         ]
     );
+
+    let liquidity_index = get_latest_liquidity_index(&cache.liquidity.read().await.0[0], now)?;
+    let liquidity_index2 = get_latest_liquidity_index(&cache.liquidity.read().await.0[2], now)?;
     assert_eq!(
         reserve,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.liquidity.read().await.0[0].index),
+                .to_scaled(liquidity_index),
             U256::default(),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.liquidity.read().await.0[2].index),
+                .to_scaled(liquidity_index2),
         ]
     );
+
+    let variable_borrow_index =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[0], now)?;
+    let variable_borrow_index1 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[1], now)?;
+    let variable_borrow_index2 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[2], now)?;
     assert_eq!(
         borrowed,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+                .to_scaled(variable_borrow_index),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.variable_borrow.read().await.0[1].index),
+                .to_scaled(variable_borrow_index1),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.variable_borrow.read().await.0[2].index),
+                .to_scaled(variable_borrow_index2),
         ]
     );
 
@@ -978,7 +1029,7 @@ async fn test_init_user() -> eyre::Result<()> {
 
 #[tokio::test]
 async fn test_get_user_data() -> eyre::Result<()> {
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1).await?;
     let user = cache
         .users
@@ -992,14 +1043,9 @@ async fn test_get_user_data() -> eyre::Result<()> {
         reserve_scaled,
         collateral_scaled,
         borrowed_scaled,
-        liquidity_indexes,
-        liquidity_rates,
-        variable_borrow_indexes,
-        variable_borrow_rates,
-        last_update_timestamps,
         user_settings,
     } = cache
-        .get_user_data(dummy_data_provider, &tokens, &user)
+        .get_user_data(dummy_data_provider.clone(), &tokens, &user)
         .await?;
 
     assert_eq!(cache.contains(&user), true);
@@ -1007,63 +1053,56 @@ async fn test_get_user_data() -> eyre::Result<()> {
 
     let (decimals, _) = &*cache.decimals.read().await;
 
+    let now = dummy_data_provider.now().timestamp_micros();
+
+    let liquidity_index1 = get_latest_liquidity_index(&cache.liquidity.read().await.0[1], now)?;
     assert_eq!(
         collateral_scaled,
         vec![
             U256::default(),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.liquidity.read().await.0[1].index),
+                .to_scaled(liquidity_index1),
             U256::default()
         ]
     );
+
+    let liquidity_index = get_latest_liquidity_index(&cache.liquidity.read().await.0[0], now)?;
+    let liquidity_index2 = get_latest_liquidity_index(&cache.liquidity.read().await.0[2], now)?;
     assert_eq!(
         reserve_scaled,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.liquidity.read().await.0[0].index),
+                .to_scaled(liquidity_index),
             U256::default(),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.liquidity.read().await.0[2].index),
+                .to_scaled(liquidity_index2),
         ]
     );
+
+    let variable_borrow_index =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[0], now)?;
+    let variable_borrow_index1 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[1], now)?;
+    let variable_borrow_index2 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[2], now)?;
     assert_eq!(
         borrowed_scaled,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+                .to_scaled(variable_borrow_index),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.variable_borrow.read().await.0[1].index),
+                .to_scaled(variable_borrow_index1),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.variable_borrow.read().await.0[2].index),
+                .to_scaled(variable_borrow_index2),
         ]
     );
 
-    assert_eq!(
-        liquidity_indexes,
-        vec![1045.as_u256(24), 1035.as_u256(24), 1025.as_u256(24)]
-    );
-    assert_eq!(
-        liquidity_rates,
-        vec![45.as_u256(24), 35.as_u256(24), 25.as_u256(24)]
-    );
-    assert_eq!(
-        variable_borrow_indexes,
-        vec![105.as_u256(25), 104.as_u256(25), 103.as_u256(25)]
-    );
-    assert_eq!(
-        variable_borrow_rates,
-        vec![5.as_u256(25), 4.as_u256(25), 3.as_u256(25)]
-    );
-    assert_eq!(
-        last_update_timestamps,
-        vec![U40::from(Utc::now().timestamp()); 3]
-    );
     assert_eq!(user_settings.row_num, 0);
     assert_eq!(user_settings.use_as_collateral, bitvec![0, 1, 0]);
 
@@ -1105,7 +1144,7 @@ async fn test_remove_user() -> eyre::Result<()> {
 
 #[tokio::test]
 async fn test_subscribe() -> eyre::Result<()> {
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1).await?;
     let test_message = String::from("test_message");
     struct Message(String);
@@ -1230,7 +1269,11 @@ async fn test_calc_hf() -> eyre::Result<()> {
     }
 
     cache
-        .calc_hf(Some(&user), Utc::now().timestamp_millis())
+        .calc_hf(
+            Some(&user),
+            &DummyProvider::new(),
+            Utc::now().timestamp_micros(),
+        )
         .await?;
 
     let hf = {
@@ -1336,7 +1379,9 @@ async fn test_calc_hf() -> eyre::Result<()> {
             .push_row(Array1::from_vec(vec![bor.as_f64_ray(), bor2.as_f64_ray(), 0.0]).view())?;
     }
 
-    cache.calc_hf(None, Utc::now().timestamp_millis()).await?;
+    cache
+        .calc_hf(None, &DummyProvider::new(), Utc::now().timestamp_millis())
+        .await?;
 
     let hf = {
         let (hf, _) = &*cache.health_factors.read().await;
@@ -1355,16 +1400,23 @@ async fn test_calc_hf() -> eyre::Result<()> {
     Ok(())
 }
 
-struct CreateUserDataProvider;
+struct CreateUserProvider;
 
-impl CreateUserDataProvider {
+impl CreateUserProvider {
     fn new() -> Self {
         Self {}
     }
 }
 
+impl Clock for CreateUserProvider {
+    #[inline]
+    fn now(&self) -> DateTime<Utc> {
+        Utc::now()
+    }
+}
+
 #[async_trait]
-impl DataProvider for CreateUserDataProvider {
+impl DataProvider for CreateUserProvider {
     async fn get_all_reserves_tokens(&self) -> eyre::Result<Vec<TokenData>> {
         todo!()
     }
@@ -1375,7 +1427,7 @@ impl DataProvider for CreateUserDataProvider {
 
     async fn listen_events<F, Fut>(&self, _: F) -> eyre::Result<()>
     where
-        F: Fn(IL2PoolEvents) -> Fut + Send + 'static,
+        F: Fn(IL2PoolEvents, BlockTimeStamp) -> Fut + Send + 'static,
         Fut: Future<Output = eyre::Result<()>> + Send,
     {
         todo!()
@@ -1435,7 +1487,7 @@ impl DataProvider for CreateUserDataProvider {
 async fn test_create_user() -> eyre::Result<()> {
     // 1 case - user exists
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1).await?;
     let user = cache
         .users
@@ -1465,7 +1517,7 @@ async fn test_create_user() -> eyre::Result<()> {
 
     // 2 case - create new user
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(0).await?;
     let rq_date = Utc::now().timestamp_micros();
     let user = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
@@ -1499,14 +1551,9 @@ async fn test_create_user() -> eyre::Result<()> {
         reserve_scaled,
         collateral_scaled,
         borrowed_scaled,
-        liquidity_indexes,
-        liquidity_rates,
-        variable_borrow_indexes,
-        variable_borrow_rates,
-        last_update_timestamps,
         user_settings,
     } = cache
-        .get_user_data(dummy_data_provider, &tokens, &user)
+        .get_user_data(dummy_data_provider.clone(), &tokens, &user)
         .await?;
 
     assert_eq!(cache.contains(&user), true);
@@ -1514,68 +1561,61 @@ async fn test_create_user() -> eyre::Result<()> {
 
     let (decimals, _) = &*cache.decimals.read().await;
 
+    let now = dummy_data_provider.now().timestamp_micros();
+
+    let liquidity_index1 = get_latest_liquidity_index(&cache.liquidity.read().await.0[1], now)?;
     assert_eq!(
         collateral_scaled,
         vec![
             U256::default(),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.liquidity.read().await.0[1].index),
+                .to_scaled(liquidity_index1),
             U256::default()
         ]
     );
+
+    let liquidity_index = get_latest_liquidity_index(&cache.liquidity.read().await.0[0], now)?;
+    let liquidity_index2 = get_latest_liquidity_index(&cache.liquidity.read().await.0[2], now)?;
     assert_eq!(
         reserve_scaled,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.liquidity.read().await.0[0].index),
+                .to_scaled(liquidity_index),
             U256::default(),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.liquidity.read().await.0[2].index),
+                .to_scaled(liquidity_index2),
         ]
     );
+
+    let variable_borrow_index =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[0], now)?;
+    let variable_borrow_index1 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[1], now)?;
+    let variable_borrow_index2 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[2], now)?;
     assert_eq!(
         borrowed_scaled,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+                .to_scaled(variable_borrow_index),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.variable_borrow.read().await.0[1].index),
+                .to_scaled(variable_borrow_index1),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.variable_borrow.read().await.0[2].index),
+                .to_scaled(variable_borrow_index2),
         ]
-    );
-    assert_eq!(
-        liquidity_indexes,
-        vec![1045.as_u256(24), 1035.as_u256(24), 1025.as_u256(24)]
-    );
-    assert_eq!(
-        liquidity_rates,
-        vec![45.as_u256(24), 35.as_u256(24), 25.as_u256(24)]
-    );
-    assert_eq!(
-        variable_borrow_indexes,
-        vec![105.as_u256(25), 104.as_u256(25), 103.as_u256(25)]
-    );
-    assert_eq!(
-        variable_borrow_rates,
-        vec![5.as_u256(25), 4.as_u256(25), 3.as_u256(25)]
-    );
-    assert_eq!(
-        last_update_timestamps,
-        vec![U40::from(Utc::now().timestamp()); 3]
     );
     assert_eq!(user_settings.row_num, 0);
     assert_eq!(user_settings.use_as_collateral, bitvec![0, 1, 0]);
 
     // 3 case - error
 
-    let create_user_data_provider = Arc::new(CreateUserDataProvider::new());
+    let create_user_data_provider = Arc::new(CreateUserProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(0).await?;
 
     let err = create_user(
@@ -1600,11 +1640,12 @@ async fn test_create_user() -> eyre::Result<()> {
 async fn test_supply() -> eyre::Result<()> {
     // 1 case - create new user
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(0).await?;
 
     let user = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
     let rq_date = Utc::now().timestamp_micros();
+    let block_timestamp = rq_date;
 
     let event = Supply {
         reserve: tokens
@@ -1636,9 +1677,15 @@ async fn test_supply() -> eyre::Result<()> {
 
     supply(
         cache.clone(),
-        dummy_data_provider,
+        dummy_data_provider.clone(),
         Arc::new(tokens),
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
     let _ = sync_handler.await?;
@@ -1649,46 +1696,59 @@ async fn test_supply() -> eyre::Result<()> {
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
     let (decimals, _) = &*cache.decimals.read().await;
 
+    let now = dummy_data_provider.now().timestamp_micros();
+
+    let liquidity_index1 = get_latest_liquidity_index(&cache.liquidity.read().await.0[1], now)?;
     assert_eq!(
         collateral,
         vec![
             U256::default(),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.liquidity.read().await.0[1].index),
+                .to_scaled(liquidity_index1),
             U256::default()
         ]
     );
+
+    let liquidity_index = get_latest_liquidity_index(&cache.liquidity.read().await.0[0], now)?;
+    let liquidity_index2 = get_latest_liquidity_index(&cache.liquidity.read().await.0[2], now)?;
     assert_eq!(
         reserve,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.liquidity.read().await.0[0].index),
+                .to_scaled(liquidity_index),
             U256::default(),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.liquidity.read().await.0[2].index),
+                .to_scaled(liquidity_index2),
         ]
     );
+
+    let variable_borrow_index =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[0], now)?;
+    let variable_borrow_index1 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[1], now)?;
+    let variable_borrow_index2 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[2], now)?;
     assert_eq!(
         borrowed,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+                .to_scaled(variable_borrow_index),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.variable_borrow.read().await.0[1].index),
+                .to_scaled(variable_borrow_index1),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.variable_borrow.read().await.0[2].index),
+                .to_scaled(variable_borrow_index2),
         ]
     );
 
     // 2 case - collateral new event
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1).await?;
     let cache = Arc::new(cache);
     let user = cache
@@ -1700,7 +1760,7 @@ async fn test_supply() -> eyre::Result<()> {
         .clone();
     let token = Address::from_str("0x1Ac54C113cefD1792CbFcF41B711824d657eb61D")?;
 
-    let rq_date = Utc::now().timestamp_micros();
+    let rq_date = dummy_data_provider.now().timestamp_micros();
 
     let event = Supply {
         reserve: token.clone(),
@@ -1732,7 +1792,13 @@ async fn test_supply() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         Arc::new(tokens),
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
     let _ = sync_handler.await?;
@@ -1746,7 +1812,7 @@ async fn test_supply() -> eyre::Result<()> {
         vec![
             20.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.liquidity.read().await.0[0].index),
+                .to_scaled(get_latest_liquidity_index(&cache.liquidity.read().await.0[0], now)?),
             U256::default(),
             U256::default()
         ]
@@ -1756,7 +1822,7 @@ async fn test_supply() -> eyre::Result<()> {
 
     // 3 case - reserve new event
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1).await?;
     let cache = Arc::new(cache);
     let user = cache
@@ -1768,7 +1834,7 @@ async fn test_supply() -> eyre::Result<()> {
         .clone();
     let token = Address::from_str("0x1Af54C113cefD1792CbFcF41B711834d657ea61D")?;
 
-    let rq_date = Utc::now().timestamp_micros();
+    let rq_date = dummy_data_provider.now().timestamp_micros();
 
     let event = Supply {
         reserve: token.clone(),
@@ -1785,9 +1851,15 @@ async fn test_supply() -> eyre::Result<()> {
 
     supply(
         cache.clone(),
-        dummy_data_provider,
+        dummy_data_provider.clone(),
         Arc::new(tokens),
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
 
@@ -1802,7 +1874,7 @@ async fn test_supply() -> eyre::Result<()> {
             U256::default(),
             30.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.liquidity.read().await.0[1].index),
+                .to_scaled(get_latest_liquidity_index(&cache.liquidity.read().await.0[1], now)?),
             U256::default()
         ]
     );
@@ -1810,8 +1882,10 @@ async fn test_supply() -> eyre::Result<()> {
 
     // 4 case - collateral skip event
 
-    let rq_date = Utc::now().timestamp_micros();
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let rq_date = dummy_data_provider.now()
+        .timestamp_micros()
+        .saturating_sub(24 * 60 * 60 * 1000_000);
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1).await?;
     let cache = Arc::new(cache);
     let user = cache
@@ -1838,9 +1912,15 @@ async fn test_supply() -> eyre::Result<()> {
 
     supply(
         cache.clone(),
-        dummy_data_provider,
+        dummy_data_provider.clone(),
         Arc::new(tokens),
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
 
@@ -1854,8 +1934,8 @@ async fn test_supply() -> eyre::Result<()> {
 
     // 5 case - reserve skip event
 
-    let rq_date = Utc::now().timestamp_micros();
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let rq_date = now.saturating_sub(24 * 60 * 60 * 1000_000);
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1).await?;
     let cache = Arc::new(cache);
     let user = cache
@@ -1884,7 +1964,13 @@ async fn test_supply() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         Arc::new(tokens),
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
 
@@ -1898,7 +1984,7 @@ async fn test_supply() -> eyre::Result<()> {
 
     // 6 case - sync event
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(10).await?;
     let cache = Arc::new(cache);
     let rq_date = Utc::now().timestamp_micros();
@@ -1943,7 +2029,13 @@ async fn test_supply() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         Arc::new(tokens),
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
     let _ = sync_handler.await?;
@@ -1952,40 +2044,51 @@ async fn test_supply() -> eyre::Result<()> {
 
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
 
+    let liquidity_index1 = get_latest_liquidity_index(&cache.liquidity.read().await.0[1], now)?;
     assert_eq!(
         collateral,
         vec![
             U256::default(),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.liquidity.read().await.0[1].index),
+                .to_scaled(liquidity_index1),
             U256::default()
         ]
     );
+
+    let liquidity_index = get_latest_liquidity_index(&cache.liquidity.read().await.0[0], now)?;
+    let liquidity_index2 = get_latest_liquidity_index(&cache.liquidity.read().await.0[2], now)?;
     assert_eq!(
         reserve,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.liquidity.read().await.0[0].index),
+                .to_scaled(liquidity_index),
             U256::default(),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.liquidity.read().await.0[2].index),
+                .to_scaled(liquidity_index2),
         ]
     );
+
+    let variable_borrow_index =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[0], now)?;
+    let variable_borrow_index1 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[1], now)?;
+    let variable_borrow_index2 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[2], now)?;
     assert_eq!(
         borrowed,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+                .to_scaled(variable_borrow_index),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.variable_borrow.read().await.0[1].index),
+                .to_scaled(variable_borrow_index1),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.variable_borrow.read().await.0[2].index),
+                .to_scaled(variable_borrow_index2),
         ]
     );
 
@@ -1994,7 +2097,7 @@ async fn test_supply() -> eyre::Result<()> {
 
 #[tokio::test]
 async fn test_setup() -> eyre::Result<()> {
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (_, t) = generate_cache_and_tokens(0).await?;
 
     let tokens = setup(dummy_data_provider).await?;
@@ -2027,7 +2130,7 @@ async fn test_setup() -> eyre::Result<()> {
 
 #[tokio::test]
 async fn test_listen_events() -> eyre::Result<()> {
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (event_tx, mut event_rc) = channel::<AaveEvents>(1);
 
     let user = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
@@ -2045,9 +2148,9 @@ async fn test_listen_events() -> eyre::Result<()> {
             .await
             .ok_or_else(|| eyre::eyre!("event channel closed"))?;
 
-        assert!(matches!(event, AaveEvents::IL2PoolEvents(_, _)));
+        assert!(matches!(event, AaveEvents::IL2PoolEvents(_, _, _)));
 
-        if let AaveEvents::IL2PoolEvents(event, _) = event {
+        if let AaveEvents::IL2PoolEvents(event, _, _) = event {
             let supply = {
                 if let IL2PoolEvents::Supply(s) = event {
                     assert_eq!(s.reserve, supply_event.reserve);
@@ -2075,7 +2178,7 @@ async fn test_listen_events() -> eyre::Result<()> {
 
 #[tokio::test]
 async fn test_listen_prices_update() -> eyre::Result<()> {
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
 
     let cache = generate_cache_and_tokens(1)
         .await
@@ -2103,7 +2206,7 @@ async fn test_listen_prices_update() -> eyre::Result<()> {
 
 #[tokio::test]
 async fn test_liquidation_threshold_update() -> eyre::Result<()> {
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1).await?;
     let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
     let cache = Arc::new(cache);
@@ -2112,7 +2215,9 @@ async fn test_liquidation_threshold_update() -> eyre::Result<()> {
         let (lt, _) = &mut *cache.liquidation_threshold.write().await;
         *lt = Array1::from_vec(vec![0.9, 0.9, 0.9]);
     }
-    let now = Utc::now().timestamp_micros();
+    let now = dummy_data_provider.now()
+        .timestamp_micros()
+        .saturating_sub(24 * 60 * 60 * 1000_000);
     let new_update = now;
     let hf_handler = task::spawn(async move {
         let msg = hf_rc
@@ -2342,7 +2447,14 @@ async fn test_hf_calc() -> eyre::Result<()> {
         Ok::<_, eyre::Error>(call_counter)
     });
 
-    let senders = listen_hf_calc(cache.clone(), lq_lookup_tx, 1, 1).await?;
+    let senders = listen_hf_calc(
+        cache.clone(),
+        Arc::new(DummyProvider::new()),
+        lq_lookup_tx,
+        1,
+        1,
+    )
+    .await?;
     let sender = senders.get(0).ok_or_else(|| eyre::eyre!("senders empty"))?;
     let rq_date = Utc::now().timestamp_micros();
     sender.send(HFRequest::User(user.clone(), rq_date)).await?;
@@ -2412,13 +2524,14 @@ async fn test_hf_calc() -> eyre::Result<()> {
 async fn test_withdraw() -> eyre::Result<()> {
     // 1 case - create new user
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(0)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
 
     let user = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
     let rq_date = Utc::now().timestamp_micros();
+    let block_timestamp = rq_date;
 
     let event = Withdraw {
         reserve: tokens
@@ -2448,9 +2561,15 @@ async fn test_withdraw() -> eyre::Result<()> {
 
     withdraw(
         cache.clone(),
-        dummy_data_provider,
+        dummy_data_provider.clone(),
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
     let _ = sync_handler.await?;
@@ -2461,46 +2580,59 @@ async fn test_withdraw() -> eyre::Result<()> {
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
     let (decimals, _) = &*cache.decimals.read().await;
 
+    let now = dummy_data_provider.now().timestamp_micros();
+
+    let liquidity_index1 = get_latest_liquidity_index(&cache.liquidity.read().await.0[1], now)?;
     assert_eq!(
         collateral,
         vec![
             U256::default(),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.liquidity.read().await.0[1].index),
+                .to_scaled(liquidity_index1),
             U256::default()
         ]
     );
+
+    let liquidity_index = get_latest_liquidity_index(&cache.liquidity.read().await.0[0], now)?;
+    let liquidity_index2 = get_latest_liquidity_index(&cache.liquidity.read().await.0[2], now)?;
     assert_eq!(
         reserve,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.liquidity.read().await.0[0].index),
+                .to_scaled(liquidity_index),
             U256::default(),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.liquidity.read().await.0[2].index),
+                .to_scaled(liquidity_index2),
         ]
     );
+
+    let variable_borrow_index =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[0], now)?;
+    let variable_borrow_index1 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[1], now)?;
+    let variable_borrow_index2 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[2], now)?;
     assert_eq!(
         borrowed,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+                .to_scaled(variable_borrow_index),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.variable_borrow.read().await.0[1].index),
+                .to_scaled(variable_borrow_index1),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.variable_borrow.read().await.0[2].index),
+                .to_scaled(variable_borrow_index2),
         ]
     );
 
     // 2 case - collateral new event
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
@@ -2530,7 +2662,7 @@ async fn test_withdraw() -> eyre::Result<()> {
         .clone();
     let token = Address::from_str("0x1Ac54C113cefD1792CbFcF41B711824d657eb61D")?;
 
-    let rq_date = Utc::now().timestamp_micros();
+    let rq_date = dummy_data_provider.now().timestamp_micros();
 
     let event = Withdraw {
         reserve: token.clone(),
@@ -2559,9 +2691,15 @@ async fn test_withdraw() -> eyre::Result<()> {
 
     withdraw(
         cache.clone(),
-        dummy_data_provider,
+        dummy_data_provider.clone(),
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
     let _ = sync_handler.await?;
@@ -2570,12 +2708,23 @@ async fn test_withdraw() -> eyre::Result<()> {
 
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
 
+    let now1 = dummy_data_provider.now()
+        .timestamp_micros()
+        .saturating_sub(24 * 60 * 60 * 1000_000);
+
+    let part1 =
+        100.as_u256_decimal_18()
+            .to_ray(decimals[0])
+            .to_scaled(get_latest_liquidity_index(&cache.liquidity.read().await.0[0], now1)?);
+    let part2 =
+        20.as_u256_decimal_18()
+            .to_ray(decimals[0])
+            .to_scaled(get_latest_liquidity_index(&cache.liquidity.read().await.0[0], now)?);
+
     assert_eq!(
         collateral,
         vec![
-            80.as_u256_decimal_18()
-                .to_ray(decimals[0])
-                .to_scaled(cache.liquidity.read().await.0[0].index),
+            part1.saturating_sub(part2),
             U256::default(),
             U256::default()
         ]
@@ -2585,7 +2734,7 @@ async fn test_withdraw() -> eyre::Result<()> {
 
     // 3 case - reserve new event
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
@@ -2631,9 +2780,15 @@ async fn test_withdraw() -> eyre::Result<()> {
 
     withdraw(
         cache.clone(),
-        dummy_data_provider,
+        dummy_data_provider.clone(),
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
 
@@ -2642,13 +2797,21 @@ async fn test_withdraw() -> eyre::Result<()> {
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
 
     assert_eq!(collateral, vec![U256::default(); 3]);
+
+    let part1 =
+        100.as_u256_decimal_6()
+            .to_ray(decimals[1])
+            .to_scaled(get_latest_liquidity_index(&cache.liquidity.read().await.0[1], now1)?);
+    let part2 =
+        30.as_u256_decimal_6()
+            .to_ray(decimals[1])
+            .to_scaled(get_latest_liquidity_index(&cache.liquidity.read().await.0[1], now)?);
+
     assert_eq!(
         reserve,
         vec![
             U256::default(),
-            70.as_u256_decimal_6()
-                .to_ray(decimals[1])
-                .to_scaled(cache.liquidity.read().await.0[1].index),
+            part1.saturating_sub(part2),
             U256::default()
         ]
     );
@@ -2656,8 +2819,10 @@ async fn test_withdraw() -> eyre::Result<()> {
 
     // 4 case - collateral skip event
 
-    let rq_date = Utc::now().timestamp_micros();
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let rq_date = dummy_data_provider.now()
+        .timestamp_micros()
+        .saturating_sub(24 * 60 * 60 * 1000_000);;
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
@@ -2686,7 +2851,13 @@ async fn test_withdraw() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
 
@@ -2701,7 +2872,7 @@ async fn test_withdraw() -> eyre::Result<()> {
     // 5 case - reserve skip event
 
     let rq_date = Utc::now().timestamp_micros();
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
@@ -2730,7 +2901,13 @@ async fn test_withdraw() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
 
@@ -2744,7 +2921,7 @@ async fn test_withdraw() -> eyre::Result<()> {
 
     // 6 case - sync event
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(10)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
@@ -2789,7 +2966,13 @@ async fn test_withdraw() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
     let _ = sync_handler.await?;
@@ -2798,40 +2981,51 @@ async fn test_withdraw() -> eyre::Result<()> {
 
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
 
+    let liquidity_index1 = get_latest_liquidity_index(&cache.liquidity.read().await.0[1], now)?;
     assert_eq!(
         collateral,
         vec![
             U256::default(),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.liquidity.read().await.0[1].index),
+                .to_scaled(liquidity_index1),
             U256::default()
         ]
     );
+
+    let liquidity_index = get_latest_liquidity_index(&cache.liquidity.read().await.0[0], now)?;
+    let liquidity_index2 = get_latest_liquidity_index(&cache.liquidity.read().await.0[2], now)?;
     assert_eq!(
         reserve,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.liquidity.read().await.0[0].index),
+                .to_scaled(liquidity_index),
             U256::default(),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.liquidity.read().await.0[2].index),
+                .to_scaled(liquidity_index2),
         ]
     );
+
+    let variable_borrow_index =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[0], now)?;
+    let variable_borrow_index1 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[1], now)?;
+    let variable_borrow_index2 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[2], now)?;
     assert_eq!(
         borrowed,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+                .to_scaled(variable_borrow_index),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.variable_borrow.read().await.0[1].index),
+                .to_scaled(variable_borrow_index1),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.variable_borrow.read().await.0[2].index),
+                .to_scaled(variable_borrow_index2),
         ]
     );
 
@@ -2842,13 +3036,14 @@ async fn test_withdraw() -> eyre::Result<()> {
 async fn test_borrow() -> eyre::Result<()> {
     // 1 case - create new user
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(0)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
 
     let user = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
     let rq_date = Utc::now().timestamp_micros();
+    let block_timestamp = rq_date;
 
     let event = Borrow {
         reserve: tokens
@@ -2881,9 +3076,15 @@ async fn test_borrow() -> eyre::Result<()> {
 
     borrow(
         cache.clone(),
-        dummy_data_provider,
+        dummy_data_provider.clone(),
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
     let _ = sync_handler.await?;
@@ -2894,46 +3095,59 @@ async fn test_borrow() -> eyre::Result<()> {
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
     let (decimals, _) = &*cache.decimals.read().await;
 
+    let now = dummy_data_provider.now().timestamp_micros();
+
+    let liquidity_index1 = get_latest_liquidity_index(&cache.liquidity.read().await.0[1], now)?;
     assert_eq!(
         collateral,
         vec![
             U256::default(),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.liquidity.read().await.0[1].index),
+                .to_scaled(liquidity_index1),
             U256::default()
         ]
     );
+
+    let liquidity_index = get_latest_liquidity_index(&cache.liquidity.read().await.0[0], now)?;
+    let liquidity_index2 = get_latest_liquidity_index(&cache.liquidity.read().await.0[2], now)?;
     assert_eq!(
         reserve,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.liquidity.read().await.0[0].index),
+                .to_scaled(liquidity_index),
             U256::default(),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.liquidity.read().await.0[2].index),
+                .to_scaled(liquidity_index2),
         ]
     );
+
+    let variable_borrow_index =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[0], now)?;
+    let variable_borrow_index1 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[1], now)?;
+    let variable_borrow_index2 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[2], now)?;
     assert_eq!(
         borrowed,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+                .to_scaled(variable_borrow_index),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.variable_borrow.read().await.0[1].index),
+                .to_scaled(variable_borrow_index1),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.variable_borrow.read().await.0[2].index),
+                .to_scaled(variable_borrow_index2),
         ]
     );
 
     // 2 case - borrowed new event
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
@@ -2995,7 +3209,13 @@ async fn test_borrow() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
     let _ = sync_handler.await?;
@@ -3006,12 +3226,26 @@ async fn test_borrow() -> eyre::Result<()> {
 
     assert_eq!(collateral, vec![U256::default(); 3]);
     assert_eq!(reserve, vec![U256::default(); 3]);
+
+    let now1 = now.saturating_sub(24 * 60 * 60 * 1000_000);
+    let part1 =
+        100.as_u256_decimal_18()
+            .to_ray(decimals[0])
+            .to_scaled(get_latest_variable_borrow_index(
+                &cache.variable_borrow.read().await.0[0],
+                now1,
+            )?);
+    let part2 =
+        20.as_u256_decimal_18()
+            .to_ray(decimals[0])
+            .to_scaled(get_latest_variable_borrow_index(
+                &cache.variable_borrow.read().await.0[0],
+                now,
+            )?);
     assert_eq!(
         borrowed,
         vec![
-            120.as_u256_decimal_18()
-                .to_ray(decimals[0])
-                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+            part1.saturating_add(part2),
             U256::default(),
             U256::default()
         ]
@@ -3019,8 +3253,8 @@ async fn test_borrow() -> eyre::Result<()> {
 
     // 3 case - borrowed skip event
 
-    let rq_date = Utc::now().timestamp_micros();
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let rq_date = now.saturating_sub(24 * 60 * 60 * 1000_000);
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
@@ -3055,7 +3289,13 @@ async fn test_borrow() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
 
@@ -3069,7 +3309,7 @@ async fn test_borrow() -> eyre::Result<()> {
 
     // 4 case - sync event
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(10)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
@@ -3119,7 +3359,13 @@ async fn test_borrow() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
     let _ = sync_handler.await?;
@@ -3128,40 +3374,51 @@ async fn test_borrow() -> eyre::Result<()> {
 
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
 
+    let liquidity_index1 = get_latest_liquidity_index(&cache.liquidity.read().await.0[1], now)?;
     assert_eq!(
         collateral,
         vec![
             U256::default(),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.liquidity.read().await.0[1].index),
+                .to_scaled(liquidity_index1),
             U256::default()
         ]
     );
+
+    let liquidity_index = get_latest_liquidity_index(&cache.liquidity.read().await.0[0], now)?;
+    let liquidity_index2 = get_latest_liquidity_index(&cache.liquidity.read().await.0[2], now)?;
     assert_eq!(
         reserve,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.liquidity.read().await.0[0].index),
+                .to_scaled(liquidity_index),
             U256::default(),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.liquidity.read().await.0[2].index)
+                .to_scaled(liquidity_index2)
         ]
     );
+
+    let variable_borrow_index =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[0], now)?;
+    let variable_borrow_index1 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[1], now)?;
+    let variable_borrow_index2 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[2], now)?;
     assert_eq!(
         borrowed,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+                .to_scaled(variable_borrow_index),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.variable_borrow.read().await.0[1].index),
+                .to_scaled(variable_borrow_index1),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.variable_borrow.read().await.0[2].index)
+                .to_scaled(variable_borrow_index2)
         ]
     );
 
@@ -3172,13 +3429,14 @@ async fn test_borrow() -> eyre::Result<()> {
 async fn test_repay() -> eyre::Result<()> {
     // 1 case - create new user
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(0)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
 
     let user = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
     let rq_date = Utc::now().timestamp_micros();
+    let block_timestamp = rq_date;
 
     let event = Repay {
         reserve: tokens
@@ -3209,9 +3467,15 @@ async fn test_repay() -> eyre::Result<()> {
 
     repay(
         cache.clone(),
-        dummy_data_provider,
+        dummy_data_provider.clone(),
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
     let _ = sync_handler.await?;
@@ -3222,46 +3486,59 @@ async fn test_repay() -> eyre::Result<()> {
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
     let (decimals, _) = &*cache.decimals.read().await;
 
+    let now = dummy_data_provider.now().timestamp_micros();
+
+    let liquidity_index1 = get_latest_liquidity_index(&cache.liquidity.read().await.0[1], now)?;
     assert_eq!(
         collateral,
         vec![
             U256::default(),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.liquidity.read().await.0[1].index),
+                .to_scaled(liquidity_index1),
             U256::default()
         ]
     );
+
+    let liquidity_index = get_latest_liquidity_index(&cache.liquidity.read().await.0[0], now)?;
+    let liquidity_index2 = get_latest_liquidity_index(&cache.liquidity.read().await.0[2], now)?;
     assert_eq!(
         reserve,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.liquidity.read().await.0[0].index),
+                .to_scaled(liquidity_index),
             U256::default(),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.liquidity.read().await.0[2].index),
+                .to_scaled(liquidity_index2),
         ]
     );
+
+    let variable_borrow_index =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[0], now)?;
+    let variable_borrow_index1 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[1], now)?;
+    let variable_borrow_index2 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[2], now)?;
     assert_eq!(
         borrowed,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+                .to_scaled(variable_borrow_index),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.variable_borrow.read().await.0[1].index),
+                .to_scaled(variable_borrow_index1),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.variable_borrow.read().await.0[2].index),
+                .to_scaled(variable_borrow_index2),
         ]
     );
 
     // 2 case - repay new event
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
@@ -3320,7 +3597,13 @@ async fn test_repay() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
     let _ = sync_handler.await?;
@@ -3331,12 +3614,21 @@ async fn test_repay() -> eyre::Result<()> {
 
     assert_eq!(collateral, vec![U256::default(); 3]);
     assert_eq!(reserve, vec![U256::default(); 3]);
+
+    let now1 = now.saturating_sub(24 * 60 * 60 * 1000_000);
+
+    let part1 =
+        100.as_u256_decimal_18()
+            .to_ray(decimals[0])
+            .to_scaled(get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[0], now1)?);
+    let part2 =
+        10.as_u256_decimal_18()
+            .to_ray(decimals[0])
+            .to_scaled(get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[0], now)?);
     assert_eq!(
         borrowed,
         vec![
-            90.as_u256_decimal_18()
-                .to_ray(decimals[0])
-                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+            part1.saturating_sub(part2),
             U256::default(),
             U256::default()
         ]
@@ -3344,8 +3636,8 @@ async fn test_repay() -> eyre::Result<()> {
 
     // 3 case - borrowed skip event
 
-    let rq_date = Utc::now().timestamp_micros();
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let rq_date = now.saturating_sub(24 * 60 * 60 * 1000_000);
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
@@ -3375,7 +3667,13 @@ async fn test_repay() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
 
@@ -3389,11 +3687,12 @@ async fn test_repay() -> eyre::Result<()> {
 
     // 4 case - sync event
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(10)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
     let rq_date = Utc::now().timestamp_micros();
+    let block_timestamp = rq_date;
     let user = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
     let token = Address::from_str("0x1Ac54C113cefD1792CbFcF41B711824d657eb61D")?;
 
@@ -3434,7 +3733,13 @@ async fn test_repay() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
     let _ = sync_handler.await?;
@@ -3443,40 +3748,51 @@ async fn test_repay() -> eyre::Result<()> {
 
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
 
+    let liquidity_index1 = get_latest_liquidity_index(&cache.liquidity.read().await.0[1], now)?;
     assert_eq!(
         collateral,
         vec![
             U256::default(),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.liquidity.read().await.0[1].index),
+                .to_scaled(liquidity_index1),
             U256::default()
         ]
     );
+
+    let liquidity_index = get_latest_liquidity_index(&cache.liquidity.read().await.0[0], now)?;
+    let liquidity_index2 = get_latest_liquidity_index(&cache.liquidity.read().await.0[2], now)?;
     assert_eq!(
         reserve,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.liquidity.read().await.0[0].index),
+                .to_scaled(liquidity_index),
             U256::default(),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.liquidity.read().await.0[2].index),
+                .to_scaled(liquidity_index2),
         ]
     );
+
+    let variable_borrow_index =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[0], now)?;
+    let variable_borrow_index1 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[1], now)?;
+    let variable_borrow_index2 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[2], now)?;
     assert_eq!(
         borrowed,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+                .to_scaled(variable_borrow_index),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.variable_borrow.read().await.0[1].index),
+                .to_scaled(variable_borrow_index1),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.variable_borrow.read().await.0[2].index),
+                .to_scaled(variable_borrow_index2),
         ]
     );
 
@@ -3487,13 +3803,14 @@ async fn test_repay() -> eyre::Result<()> {
 async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
     // 1 case - create new user
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(0)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
 
     let user = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
     let rq_date = Utc::now().timestamp_micros();
+    let block_timestamp = rq_date;
 
     let event = ReserveUsedAsCollateralEnabled {
         reserve: tokens
@@ -3521,9 +3838,15 @@ async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
 
     reserve_used_as_collateral_enabled(
         cache.clone(),
-        dummy_data_provider,
+        dummy_data_provider.clone(),
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
     let _ = sync_handler.await?;
@@ -3534,46 +3857,59 @@ async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
     let (decimals, _) = &*cache.decimals.read().await;
 
+    let now = dummy_data_provider.now().timestamp_micros();
+
+    let liquidity_index1 = get_latest_liquidity_index(&cache.liquidity.read().await.0[1], now)?;
     assert_eq!(
         collateral,
         vec![
             U256::default(),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.liquidity.read().await.0[1].index),
+                .to_scaled(liquidity_index1),
             U256::default()
         ]
     );
+
+    let liquidity_index = get_latest_liquidity_index(&cache.liquidity.read().await.0[0], now)?;
+    let liquidity_index2 = get_latest_liquidity_index(&cache.liquidity.read().await.0[2], now)?;
     assert_eq!(
         reserve,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.liquidity.read().await.0[0].index),
+                .to_scaled(liquidity_index),
             U256::default(),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.liquidity.read().await.0[2].index),
+                .to_scaled(liquidity_index2),
         ]
     );
+
+    let variable_borrow_index =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[0], now)?;
+    let variable_borrow_index1 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[1], now)?;
+    let variable_borrow_index2 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[2], now)?;
     assert_eq!(
         borrowed,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+                .to_scaled(variable_borrow_index),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.variable_borrow.read().await.0[1].index),
+                .to_scaled(variable_borrow_index1),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.variable_borrow.read().await.0[2].index),
+                .to_scaled(variable_borrow_index2),
         ]
     );
 
     // 2 case - reserve_used_as_collateral_enabled new event
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
@@ -3603,7 +3939,8 @@ async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
         .clone();
     let token = Address::from_str("0x1Af54C113cefD1792CbFcF41B711824d657eb61D")?;
 
-    let rq_date = Utc::now().timestamp_micros();
+    let rq_date = dummy_data_provider.now().timestamp_micros();
+    let block_timestamp = rq_date;
 
     let event = ReserveUsedAsCollateralEnabled {
         reserve: token,
@@ -3630,9 +3967,15 @@ async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
 
     reserve_used_as_collateral_enabled(
         cache.clone(),
-        dummy_data_provider,
+        dummy_data_provider.clone(),
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
     let _ = sync_handler.await?;
@@ -3656,8 +3999,10 @@ async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
 
     // 3 case - reserve_used_as_collateral_enabled skip event
 
-    let rq_date = Utc::now().timestamp_micros();
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let rq_date = dummy_data_provider.now()
+        .timestamp_micros()
+        .saturating_sub(24 * 60 * 60 * 1000_000);
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
@@ -3684,7 +4029,13 @@ async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
 
@@ -3698,7 +4049,7 @@ async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
 
     // 4 case - reserve_used_as_collateral_enabled sync event
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(10)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
@@ -3740,7 +4091,13 @@ async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
     let _ = sync_handler.await?;
@@ -3749,40 +4106,51 @@ async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
 
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
 
+    let liquidity_index1 = get_latest_liquidity_index(&cache.liquidity.read().await.0[1], now)?;
     assert_eq!(
         collateral,
         vec![
             U256::default(),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.liquidity.read().await.0[1].index),
+                .to_scaled(liquidity_index1),
             U256::default()
         ]
     );
+
+    let liquidity_index = get_latest_liquidity_index(&cache.liquidity.read().await.0[0], now)?;
+    let liquidity_index2 = get_latest_liquidity_index(&cache.liquidity.read().await.0[2], now)?;
     assert_eq!(
         reserve,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.liquidity.read().await.0[0].index),
+                .to_scaled(liquidity_index),
             U256::default(),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.liquidity.read().await.0[2].index),
+                .to_scaled(liquidity_index2),
         ]
     );
+
+    let variable_borrow_index =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[0], now)?;
+    let variable_borrow_index1 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[1], now)?;
+    let variable_borrow_index2 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[2], now)?;
     assert_eq!(
         borrowed,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+                .to_scaled(variable_borrow_index),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.variable_borrow.read().await.0[1].index),
+                .to_scaled(variable_borrow_index1),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.variable_borrow.read().await.0[2].index),
+                .to_scaled(variable_borrow_index2),
         ]
     );
 
@@ -3793,13 +4161,14 @@ async fn test_reserve_used_as_collateral_enabled() -> eyre::Result<()> {
 async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
     // 1 case - create new user
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(0)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
 
     let user = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
     let rq_date = Utc::now().timestamp_micros();
+    let block_timestamp = rq_date;
 
     let event = ReserveUsedAsCollateralDisabled {
         reserve: tokens
@@ -3827,9 +4196,15 @@ async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
 
     reserve_used_as_collateral_disabled(
         cache.clone(),
-        dummy_data_provider,
+        dummy_data_provider.clone(),
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
     let _ = sync_handler.await?;
@@ -3840,46 +4215,59 @@ async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
     let (decimals, _) = &*cache.decimals.read().await;
 
+    let now = dummy_data_provider.now().timestamp_micros();
+
+    let liquidity_index1 = get_latest_liquidity_index(&cache.liquidity.read().await.0[1], now)?;
     assert_eq!(
         collateral,
         vec![
             U256::default(),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.liquidity.read().await.0[1].index),
+                .to_scaled(liquidity_index1),
             U256::default()
         ]
     );
+
+    let liquidity_index = get_latest_liquidity_index(&cache.liquidity.read().await.0[0], now)?;
+    let liquidity_index2 = get_latest_liquidity_index(&cache.liquidity.read().await.0[2], now)?;
     assert_eq!(
         reserve,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.liquidity.read().await.0[0].index),
+                .to_scaled(liquidity_index),
             U256::default(),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.liquidity.read().await.0[2].index),
+                .to_scaled(liquidity_index2),
         ]
     );
+
+    let variable_borrow_index =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[0], now)?;
+    let variable_borrow_index1 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[1], now)?;
+    let variable_borrow_index2 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[2], now)?;
     assert_eq!(
         borrowed,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+                .to_scaled(variable_borrow_index),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.variable_borrow.read().await.0[1].index),
+                .to_scaled(variable_borrow_index1),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.variable_borrow.read().await.0[2].index),
+                .to_scaled(variable_borrow_index2),
         ]
     );
 
     // 2 case - reserve_used_as_collateral_disabled new event
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
@@ -3909,7 +4297,7 @@ async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
         .clone();
     let token = Address::from_str("0x1Af54C113cefD1792CbFcF41B711824d657eb61D")?;
 
-    let rq_date = Utc::now().timestamp_micros();
+    let rq_date = dummy_data_provider.now().timestamp_micros();
 
     let event = ReserveUsedAsCollateralDisabled {
         reserve: token,
@@ -3936,9 +4324,15 @@ async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
 
     reserve_used_as_collateral_disabled(
         cache.clone(),
-        dummy_data_provider,
+        dummy_data_provider.clone(),
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
     let _ = sync_handler.await?;
@@ -3962,8 +4356,10 @@ async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
 
     // 3 case - reserve_used_as_collateral_disabled skip event
 
-    let rq_date = Utc::now().timestamp_micros();
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let rq_date = dummy_data_provider.now()
+        .timestamp_micros()
+        .saturating_sub(24 * 60 * 60 * 1000_000);
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
@@ -3990,7 +4386,13 @@ async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
 
@@ -4004,11 +4406,12 @@ async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
 
     // 4 case - reserve_used_as_collateral_disabled sync event
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(10)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
     let rq_date = Utc::now().timestamp_micros();
+    let block_timestamp = rq_date;
     let user = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
     let token = Address::from_str("0x1Ac54C113cefD1792CbFcF41B711824d657eb61D")?;
 
@@ -4046,7 +4449,13 @@ async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
     let _ = sync_handler.await?;
@@ -4055,40 +4464,51 @@ async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
 
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
 
+    let liquidity_index1 = get_latest_liquidity_index(&cache.liquidity.read().await.0[1], now)?;
     assert_eq!(
         collateral,
         vec![
             U256::default(),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.liquidity.read().await.0[1].index),
+                .to_scaled(liquidity_index1),
             U256::default()
         ]
     );
+
+    let liquidity_index = get_latest_liquidity_index(&cache.liquidity.read().await.0[0], now)?;
+    let liquidity_index2 = get_latest_liquidity_index(&cache.liquidity.read().await.0[2], now)?;
     assert_eq!(
         reserve,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.liquidity.read().await.0[0].index),
+                .to_scaled(liquidity_index),
             U256::default(),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.liquidity.read().await.0[2].index),
+                .to_scaled(liquidity_index2),
         ]
     );
+
+    let variable_borrow_index =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[0], now)?;
+    let variable_borrow_index1 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[1], now)?;
+    let variable_borrow_index2 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[2], now)?;
     assert_eq!(
         borrowed,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+                .to_scaled(variable_borrow_index),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.variable_borrow.read().await.0[1].index),
+                .to_scaled(variable_borrow_index1),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.variable_borrow.read().await.0[2].index),
+                .to_scaled(variable_borrow_index2),
         ]
     );
 
@@ -4099,13 +4519,14 @@ async fn test_reserve_used_as_collateral_disabled() -> eyre::Result<()> {
 async fn test_liquidation_call() -> eyre::Result<()> {
     // 1 case - create new user
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(0)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
 
     let user = Address::from_str("0x1Af54C553cefD1792CbFcF41B711834d657ea61D")?;
     let rq_date = Utc::now().timestamp_micros();
+    let block_timestamp = rq_date;
 
     let col_token = Address::from_str("0x1Ac54C113cefD1792CbFcF41B711824d657eb61D")?;
     let bor_token = Address::from_str("0x1Af54C113cefD1792CbFcF41B711834d657ea61D")?;
@@ -4137,9 +4558,15 @@ async fn test_liquidation_call() -> eyre::Result<()> {
 
     liquidation_call(
         cache.clone(),
-        dummy_data_provider,
+        dummy_data_provider.clone(),
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
     let _ = sync_handler.await?;
@@ -4150,46 +4577,59 @@ async fn test_liquidation_call() -> eyre::Result<()> {
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
     let (decimals, _) = &*cache.decimals.read().await;
 
+    let now = dummy_data_provider.now().timestamp_micros();
+
+    let liquidity_index1 = get_latest_liquidity_index(&cache.liquidity.read().await.0[1], now)?;
     assert_eq!(
         collateral,
         vec![
             U256::default(),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.liquidity.read().await.0[1].index),
+                .to_scaled(liquidity_index1),
             U256::default()
         ]
     );
+
+    let liquidity_index = get_latest_liquidity_index(&cache.liquidity.read().await.0[0], now)?;
+    let liquidity_index2 = get_latest_liquidity_index(&cache.liquidity.read().await.0[2], now)?;
     assert_eq!(
         reserve,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.liquidity.read().await.0[0].index),
+                .to_scaled(liquidity_index),
             U256::default(),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.liquidity.read().await.0[2].index),
+                .to_scaled(liquidity_index2),
         ]
     );
+
+    let variable_borrow_index =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[0], now)?;
+    let variable_borrow_index1 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[1], now)?;
+    let variable_borrow_index2 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[2], now)?;
     assert_eq!(
         borrowed,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimals[0])
-                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+                .to_scaled(variable_borrow_index),
             20.as_u256_decimal_6()
                 .to_ray(decimals[1])
-                .to_scaled(cache.variable_borrow.read().await.0[1].index),
+                .to_scaled(variable_borrow_index1),
             30.as_u256_decimal_12()
                 .to_ray(decimals[2])
-                .to_scaled(cache.variable_borrow.read().await.0[2].index),
+                .to_scaled(variable_borrow_index2),
         ]
     );
 
     // 2 case - liquidation_call new event
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
@@ -4238,6 +4678,7 @@ async fn test_liquidation_call() -> eyre::Result<()> {
     let bor_token = Address::from_str("0x1Af54C113cefD1792CbFcF41B711834d657ea61D")?;
 
     let rq_date = Utc::now().timestamp_micros();
+    let block_timestamp = rq_date;
 
     let event = LiquidationCall {
         collateralAsset: col_token,
@@ -4275,9 +4716,15 @@ async fn test_liquidation_call() -> eyre::Result<()> {
 
     liquidation_call(
         cache.clone(),
-        dummy_data_provider,
+        dummy_data_provider.clone(),
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
     let _ = sync_handler.await?;
@@ -4290,32 +4737,61 @@ async fn test_liquidation_call() -> eyre::Result<()> {
         reserve,
         vec![U256::default(), U256::default(), U256::default()]
     );
+
+    let now1 = now.saturating_sub(24 * 60 * 60 * 1000_000);
+    let part1 = 30
+        .as_u256_decimal_18()
+        .to_ray(decimals[0])
+        .to_scaled(get_latest_liquidity_index(
+            &cache.liquidity.read().await.0[0],
+            now1,
+        )?);
+    let part2 = 10
+        .as_u256_decimal_18()
+        .to_ray(decimals[0])
+        .to_scaled(get_latest_liquidity_index(
+            &cache.liquidity.read().await.0[0],
+            now,
+        )?);
+
     assert_eq!(
         collateral,
         vec![
-            20.as_u256_decimal_18()
-                .to_ray(decimal[0])
-                .to_scaled(cache.liquidity.read().await.0[0].index),
+            part1.saturating_sub(part2),
             U256::default(),
             U256::default()
         ]
     );
+
+    let part1 =
+        100_000
+            .as_u256_decimal_6()
+            .to_ray(decimal[1])
+            .to_scaled(get_latest_variable_borrow_index(
+                &cache.variable_borrow.read().await.0[1],
+                now1,
+            )?);
+    let part2 =
+        50_000
+            .as_u256_decimal_6()
+            .to_ray(decimal[1])
+            .to_scaled(get_latest_variable_borrow_index(
+                &cache.variable_borrow.read().await.0[1],
+                now,
+            )?);
     assert_eq!(
         borrowed,
         vec![
             U256::default(),
-            50_000
-                .as_u256_decimal_6()
-                .to_ray(decimal[1])
-                .to_scaled(cache.variable_borrow.read().await.0[1].index),
+            part1.saturating_sub(part2),
             U256::default()
         ]
     );
 
     // 3 case - liquidation_call skip event
 
-    let rq_date = Utc::now().timestamp_micros();
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let rq_date = now.saturating_sub(24 * 60 * 60 * 1000_000);
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(1)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
@@ -4349,7 +4825,13 @@ async fn test_liquidation_call() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
 
@@ -4363,7 +4845,7 @@ async fn test_liquidation_call() -> eyre::Result<()> {
 
     // 4 case - liquidation_call sync event
 
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
     let (cache, tokens) = generate_cache_and_tokens(10)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
@@ -4412,7 +4894,13 @@ async fn test_liquidation_call() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         tokens,
-        (event, sync_tx, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            sync_tx,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
     let _ = sync_handler.await?;
@@ -4421,40 +4909,51 @@ async fn test_liquidation_call() -> eyre::Result<()> {
 
     let (collateral, reserve, borrowed) = get_all_user_data(&cache, 0).await?;
 
+    let liquidity_index1 = get_latest_liquidity_index(&cache.liquidity.read().await.0[1], now)?;
     assert_eq!(
         collateral,
         vec![
             U256::default(),
             20.as_u256_decimal_6()
-                .to_ray(decimal[1])
-                .to_scaled(cache.liquidity.read().await.0[1].index),
+                .to_ray(decimals[1])
+                .to_scaled(liquidity_index1),
             U256::default()
         ]
     );
+
+    let liquidity_index = get_latest_liquidity_index(&cache.liquidity.read().await.0[0], now)?;
+    let liquidity_index2 = get_latest_liquidity_index(&cache.liquidity.read().await.0[2], now)?;
     assert_eq!(
         reserve,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimal[0])
-                .to_scaled(cache.liquidity.read().await.0[0].index),
+                .to_scaled(liquidity_index),
             U256::default(),
             30.as_u256_decimal_12()
                 .to_ray(decimal[2])
-                .to_scaled(cache.liquidity.read().await.0[2].index),
+                .to_scaled(liquidity_index2),
         ]
     );
+
+    let variable_borrow_index =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[0], now)?;
+    let variable_borrow_index1 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[1], now)?;
+    let variable_borrow_index2 =
+        get_latest_variable_borrow_index(&cache.variable_borrow.read().await.0[2], now)?;
     assert_eq!(
         borrowed,
         vec![
             10.as_u256_decimal_18()
                 .to_ray(decimal[0])
-                .to_scaled(cache.variable_borrow.read().await.0[0].index),
+                .to_scaled(variable_borrow_index),
             20.as_u256_decimal_6()
                 .to_ray(decimal[1])
-                .to_scaled(cache.variable_borrow.read().await.0[1].index),
+                .to_scaled(variable_borrow_index1),
             30.as_u256_decimal_12()
                 .to_ray(decimal[2])
-                .to_scaled(cache.variable_borrow.read().await.0[2].index),
+                .to_scaled(variable_borrow_index2),
         ]
     );
 
@@ -4491,7 +4990,7 @@ async fn test_reserve_data_updated() -> eyre::Result<()> {
     let (cache, tokens) = generate_cache_and_tokens(1)
         .await
         .map(|(cache, tokens)| (Arc::new(cache), Arc::new(tokens)))?;
-    let dummy_data_provider = Arc::new(DummyDataProvider::new());
+    let dummy_data_provider = Arc::new(DummyProvider::new());
 
     let token = Address::from_str("0x1Ac54C113cefD1792CbFcF41B711824d657eb61D")?;
 
@@ -4504,7 +5003,11 @@ async fn test_reserve_data_updated() -> eyre::Result<()> {
         variableBorrowIndex: 105.as_u256(25),
     };
 
-    let rq_date = Utc::now().timestamp_micros();
+    let rq_date = dummy_data_provider.now()
+        .timestamp_micros()
+        .saturating_sub(24 * 60 * 60 * 1000_000);
+    let block_timestamp = dummy_data_provider.now()
+        .timestamp_micros();
 
     let (hf_tx, mut hf_rc) = channel::<HFRequest>(1);
 
@@ -4524,7 +5027,12 @@ async fn test_reserve_data_updated() -> eyre::Result<()> {
         cache.clone(),
         dummy_data_provider,
         tokens.clone(),
-        (event, hf_tx, RqDate(rq_date)),
+        (
+            event,
+            hf_tx,
+            BlockTimeStamp(block_timestamp),
+            RqDate(rq_date),
+        ),
     )
     .await?;
     let _ = hf_handler.await?;
@@ -4532,8 +5040,8 @@ async fn test_reserve_data_updated() -> eyre::Result<()> {
     let (liquidity, _) = &*cache.liquidity.read().await;
     let (li1, li2, li3) = (
         U256::from(1045.as_u256(24)),
-        U256::from(1035000057434360730593607306_u128),
-        U256::from(1025000040628170979198376459_u128),
+        get_latest_liquidity_index(&liquidity[1], block_timestamp)?,
+        get_latest_liquidity_index(&liquidity[2], block_timestamp)?,
     );
 
     assert_eq!(liquidity[0].index, li1);
@@ -4557,8 +5065,8 @@ async fn test_reserve_data_updated() -> eyre::Result<()> {
     let (vb, _) = &*cache.variable_borrow.read().await;
     let (vbi1, vbi2, vbi3) = (
         U256::from(105.as_u256(25)),
-        U256::from(1040000065956367326230339929_u128),
-        U256::from(1030000048991628614916286150_u128),
+        get_latest_variable_borrow_index(&vb[1], block_timestamp)?,
+        get_latest_variable_borrow_index(&vb[2], block_timestamp)?,
     );
 
     assert_eq!(vb[0].index, vbi1);
@@ -4643,7 +5151,7 @@ async fn test_some_numbers() -> eyre::Result<()> {
         .to_scaled(1058.as_u256(24));
 
     let dt = U256::from(1);
-    let dt_spy = dt.ray_div(U256::from(31_536_000));
+    let dt_spy = dt.ray_div(U256::from(SECONDS_PER_YEAR));
     let vbi_new = 106.as_u256(25).ray_mul(
         U256::from(1_000_000_000_000_000_000_000_000_000_u128)
             + U256::from(6.as_u256(26)).ray_mul(dt_spy),
@@ -4840,7 +5348,9 @@ async fn test_providers() -> eyre::Result<()> {
 
             let r = breaker
                 .call_async(|| async {
-                    let res = api.call().await
+                    let res = api
+                        .call()
+                        .await
                         .map_err(|e| ApiError::new(format!("{e:?}")))?;
                     Ok(res)
                 })
@@ -4870,23 +5380,4 @@ async fn test_providers() -> eyre::Result<()> {
     }
 
     Err(eyre::eyre!("failed test"))
-}
-
-#[tokio::test]
-async fn test_calculations() -> eyre::Result<()> {
-    let base = U256::from(11659502822736252202798490923468_u128);
-    let amount = U256::from(14000153720_u128);
-    let target = amount.to_ray(1000_000_f64);
-
-    assert_eq!(target, U256::from(14000153720000000000000000000000_u128));
-
-    let scaled = target.to_scaled(U256::from(1200750489194593789906695605_u128));
-
-    assert_eq!(scaled, U256::from(11659502824263378798423098554681_u128));
-
-    let total = scaled - base;
-
-    assert_eq!(total, U256::from(1527126595624607631213_u128));
-
-   Ok(())
 }

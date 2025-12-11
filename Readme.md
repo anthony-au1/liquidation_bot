@@ -83,4 +83,5 @@
 
 **Future Improvements**
 
-1. transfer from user to user affects collateral
+1. we need to catch event when we move collateral from user to user
+2. we need to lock user info when enable or disable collateral

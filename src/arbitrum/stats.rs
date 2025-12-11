@@ -1,14 +1,14 @@
 use crate::arbitrum::arbitrum::{
-    build_breaker, AaveDataProvider, Cache, DataProvider,
-    F64Converter, IAaveOracle, IAaveProtocolDataProvider, IL2Pool, Index, RayOperations,
-    ReserveData, Scaler, UserReserveData, AAVE_ORACLE_ADDRESS, AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS, L2_POOL_ADDRESS,
+    AAVE_ORACLE_ADDRESS, AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS, AaveProvider, Cache,
+    DataProvider, F64Converter, IAaveOracle, IAaveProtocolDataProvider, IL2Pool, Index,
+    L2_POOL_ADDRESS, RayOperations, ReserveData, Scaler, UserReserveData, build_breaker,
 };
 use alloy::providers::Provider;
 use alloy::transports::http::reqwest::StatusCode;
 use alloy_primitives::{Address, U256};
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;
-use axum::Json;
 use bitvec::order::Lsb0;
 use bitvec::prelude::BitVec;
 use futures::future::try_join_all;
@@ -19,7 +19,7 @@ use serde::ser::SerializeSeq;
 use serde::{Serialize, Serializer};
 use std::sync::Arc;
 use tokio::try_join;
-use tracing::info;
+use tracing::{debug, info};
 
 #[derive(Clone)]
 pub struct AppState<P>
@@ -110,11 +110,11 @@ async fn build_data_provider<P>(
     grove_provider: &P,
     drpc_provider: &P,
     ankr_provider: &P,
-) -> eyre::Result<AaveDataProvider<P>>
+) -> eyre::Result<AaveProvider<P>>
 where
     P: Provider + Clone + Send + Sync + 'static,
 {
-    Ok(AaveDataProvider {
+    Ok(AaveProvider {
         aave_protocol_data_provider: IAaveProtocolDataProvider::new(
             AAVE_PROTOCOL_DATA_PROVIDER_ADDRESS.parse()?,
             provider2.clone(),
@@ -1177,6 +1177,11 @@ where
         let user = user.clone();
         let provider = data_provider.clone();
 
+        debug!(
+            "get_test_probe_state: urd_tasks = (row = {}, user = {})",
+            row, user
+        );
+
         tokens.iter().enumerate().map(move |(col, token)| {
             let provider = provider.clone();
             let token = token.clone();
@@ -1209,6 +1214,8 @@ where
     let mut variable_borrow_aave = vec![U256::default(); tokens.len()];
     let mut variable_borrow_index_aave = vec![0.0; tokens.len()];
 
+    let mut rd_result_log = String::new();
+    rd_result_log.push_str("[");
     for (
         col,
         ReserveData {
@@ -1218,12 +1225,23 @@ where
         },
     ) in rd_results
     {
+        rd_result_log.push_str(
+            format!(
+                "(col = {}, ReserveData {{liquidity_index = {}, variable_borrow_index = {}}})",
+                col, liquidity_index, variable_borrow_index
+            )
+            .as_str(),
+        );
+
         liquidity_aave[col] = liquidity_index;
         liquidity_index_aave[col] = liquidity_index.as_f64_ray();
 
         variable_borrow_aave[col] = variable_borrow_index;
         variable_borrow_index_aave[col] = variable_borrow_index.as_f64_ray();
     }
+
+    rd_result_log.push_str("]");
+    debug!("get_test_probe_state: rd_results = {}", rd_result_log);
 
     let mut reserve_scaled_aave = vec![vec![U256::default(); tokens.len()]; window_size];
     let mut reserve_aave = vec![vec![0.0; tokens.len()]; window_size];
@@ -1233,6 +1251,9 @@ where
 
     let mut borrowed_scaled_aave = vec![vec![U256::default(); tokens.len()]; window_size];
     let mut borrowed_aave = vec![vec![0.0; tokens.len()]; window_size];
+
+    let mut urd_result_log = String::new();
+    urd_result_log.push_str("[");
 
     for (
         row,
@@ -1244,6 +1265,9 @@ where
         },
     ) in urd_results
     {
+        urd_result_log.push_str(format!("(row = {}, col = {}, UserReserveData {{ current_atoken_balance = {}, current_variable_debt = {}, usage_as_collateral_enabled = {}}})",
+                                        row, col, current_atoken_balance, current_variable_debt, usage_as_collateral_enabled).as_str());
+
         if usage_as_collateral_enabled {
             collateral_scaled_aave[row][col] = current_atoken_balance
                 .to_ray(decimals[col])
@@ -1260,6 +1284,9 @@ where
             .to_scaled(variable_borrow_aave[col]);
         borrowed_aave[row][col] = current_variable_debt.as_f64(decimals[col]);
     }
+
+    urd_result_log.push_str("]");
+    debug!("get_test_probe_state: urd_results = {}", urd_result_log);
 
     let hf_diff = {
         hf_aave

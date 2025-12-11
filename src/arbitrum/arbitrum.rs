@@ -7,21 +7,22 @@ use crate::arbitrum::events::{
     borrow, liquidation_call, repay, reserve_data_updated, reserve_used_as_collateral_disabled,
     reserve_used_as_collateral_enabled, supply, withdraw,
 };
+use alloy::eips::BlockId;
 use alloy::primitives::{Address, Log};
 use alloy::providers::Provider;
 use alloy::rpc::types::Filter;
 use alloy::sol;
 use alloy::sol_types::SolEventInterface;
 use alloy_primitives::aliases::U40;
-use alloy_primitives::{Sign, I256, U256, U512};
+use alloy_primitives::{I256, Sign, U256, U512};
 use async_trait::async_trait;
 use bitvec::prelude::*;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use circuitbreaker_rs::{CircuitBreaker, DefaultPolicy};
 use dashmap::DashMap;
 use eyre::eyre;
 use futures::future::try_join_all;
-use ndarray::{concatenate, Array1, Array2, Axis};
+use ndarray::{Array1, Array2, Axis, concatenate};
 use std::collections::HashMap;
 use std::default::Default;
 use std::error::Error;
@@ -29,11 +30,11 @@ use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::RwLock;
+use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::{task, time, try_join};
-use tokio_retry::strategy::FixedInterval;
 use tokio_retry::Retry;
+use tokio_retry::strategy::FixedInterval;
 use tracing::{debug, error, info};
 
 // antonanohin@gmail.com
@@ -199,13 +200,17 @@ sol! {
     }
 }
 
+pub trait Clock {
+    fn now(&self) -> DateTime<Utc>;
+}
+
 #[async_trait]
 pub trait DataProvider: Send + Sync {
     async fn get_all_reserves_tokens(&self) -> eyre::Result<Vec<TokenData>>;
     async fn get_source_of_asset(&self, token: &Address) -> eyre::Result<Address>;
     async fn listen_events<F, Fut>(&self, callback: F) -> eyre::Result<()>
     where
-        F: Fn(IL2PoolEvents) -> Fut + Send + 'static,
+        F: Fn(IL2PoolEvents, BlockTimeStamp) -> Fut + Send + 'static,
         Fut: Future<Output = eyre::Result<()>> + Send;
     async fn get_reserve_configuration_data(&self, token: &Address) -> eyre::Result<f64>;
     async fn get_user_reserve_data(
@@ -333,7 +338,7 @@ pub fn build_breaker() -> ApiCircuitBreaker {
         .build()
 }
 
-pub struct AaveDataProvider<P>
+pub struct AaveProvider<P>
 where
     P: Provider + Clone + Send + Sync + 'static,
 {
@@ -348,9 +353,18 @@ where
     pub aave_l2_pool_fallback: Vec<(ApiCircuitBreaker, IL2PoolInstance<P>)>,
     pub provider_fallback: Vec<(ApiCircuitBreaker, P)>,
 }
+impl<P> Clock for AaveProvider<P>
+where
+    P: Provider + Clone + Send + Sync + 'static,
+{
+    #[inline]
+    fn now(&self) -> DateTime<Utc> {
+        Utc::now()
+    }
+}
 
 #[async_trait]
-impl<P> DataProvider for AaveDataProvider<P>
+impl<P> DataProvider for AaveProvider<P>
 where
     P: Provider + Clone + Send + Sync + 'static,
 {
@@ -457,7 +471,7 @@ where
 
     async fn listen_events<F, Fut>(&self, callback: F) -> eyre::Result<()>
     where
-        F: Fn(IL2PoolEvents) -> Fut + Send + 'static,
+        F: Fn(IL2PoolEvents, BlockTimeStamp) -> Fut + Send + 'static,
         Fut: Future<Output = eyre::Result<()>> + Send,
     {
         let l2_pool = IL2Pool::new(L2_POOL_ADDRESS.parse()?, self.provider.clone());
@@ -473,11 +487,18 @@ where
             }
 
             let mut stream = stream?;
+            let mut block_cache = BlockCache::default();
             loop {
                 match stream.recv().await {
                     Ok(log) => match IL2PoolEvents::decode_log(log.as_ref()) {
                         Ok(Log { data, .. }) => {
-                            callback(data).await?;
+                            let block_number =
+                                log.block_number.ok_or_else(|| eyre!("no block number"))?;
+
+                            let block_timestamp =
+                                block_cache.get(&self.provider, block_number).await?;
+
+                            callback(data, BlockTimeStamp(block_timestamp)).await?;
                         }
                         Err(e) => {
                             debug!("listen_events: error decoding logs: {e:?}");
@@ -954,11 +975,12 @@ impl TokenDetails {
     }
 }
 
-pub(crate) struct RqDate(pub(crate) TimeStamp);
+pub struct RqDate(pub TimeStamp);
+pub struct BlockTimeStamp(pub TimeStamp);
 
 pub async fn start<P>(cache: Arc<Cache>, provider: Arc<P>) -> eyre::Result<()>
 where
-    P: DataProvider + 'static,
+    P: DataProvider + Clock + 'static,
 {
     let tokens = Arc::new(setup(provider.clone()).await?);
 
@@ -980,7 +1002,7 @@ where
     let (mut sync_counter, sync_senders) = (0, listen_sync(cache.clone(), w_num, bound).await?);
     let (mut hf_counter, hf_senders) = (
         0,
-        listen_hf_calc(cache.clone(), lq_lookup_tx, w_num, bound).await?,
+        listen_hf_calc(cache.clone(), provider.clone(), lq_lookup_tx, w_num, bound).await?,
     );
 
     liquidation_threshold_update(
@@ -1087,7 +1109,7 @@ where
     let mut counters = EventCounter::default();
     while let Some(event) = rc_events.recv().await {
         match event {
-            AaveEvents::IL2PoolEvents(event, rq_date) => match event {
+            AaveEvents::IL2PoolEvents(event, block_timestamp, rq_date) => match event {
                 IL2PoolEvents::Supply(ev) => {
                     debug!("start: supply");
                     supply_txs[counters.supply % w_num]
@@ -1095,7 +1117,8 @@ where
                             ev,
                             sync_senders[sync_counter % w_num].clone(),
                             hf_senders[hf_counter % w_num].clone(),
-                            RqDate(rq_date),
+                            block_timestamp,
+                            rq_date,
                         ))
                         .await?;
                     counters.supply = counters.supply.wrapping_add(1);
@@ -1108,7 +1131,8 @@ where
                             ev,
                             sync_senders[sync_counter % w_num].clone(),
                             hf_senders[hf_counter % w_num].clone(),
-                            RqDate(rq_date),
+                            block_timestamp,
+                            rq_date,
                         ))
                         .await?;
                     counters.withdraw = counters.withdraw.wrapping_add(1);
@@ -1121,7 +1145,8 @@ where
                             ev,
                             sync_senders[sync_counter % w_num].clone(),
                             hf_senders[hf_counter % w_num].clone(),
-                            RqDate(rq_date),
+                            block_timestamp,
+                            rq_date,
                         ))
                         .await?;
                     counters.borrow = counters.borrow.wrapping_add(1);
@@ -1134,7 +1159,8 @@ where
                             ev,
                             sync_senders[sync_counter % w_num].clone(),
                             hf_senders[hf_counter % w_num].clone(),
-                            RqDate(rq_date),
+                            block_timestamp,
+                            rq_date,
                         ))
                         .await?;
                     counters.repay = counters.repay.wrapping_add(1);
@@ -1148,7 +1174,8 @@ where
                             ev,
                             sync_senders[sync_counter % w_num].clone(),
                             hf_senders[hf_counter % w_num].clone(),
-                            RqDate(rq_date),
+                            block_timestamp,
+                            rq_date,
                         ))
                         .await?;
                     counters.reserve_used_as_collateral_enabled =
@@ -1163,7 +1190,8 @@ where
                             ev,
                             sync_senders[sync_counter % w_num].clone(),
                             hf_senders[hf_counter % w_num].clone(),
-                            RqDate(rq_date),
+                            block_timestamp,
+                            rq_date,
                         ))
                         .await?;
                     counters.reserve_used_as_collateral_disabled =
@@ -1177,7 +1205,8 @@ where
                             ev,
                             sync_senders[sync_counter % w_num].clone(),
                             hf_senders[hf_counter % w_num].clone(),
-                            RqDate(rq_date),
+                            block_timestamp,
+                            rq_date,
                         ))
                         .await?;
                     counters.liquidation_call = counters.liquidation_call.wrapping_add(1);
@@ -1186,7 +1215,12 @@ where
                 IL2PoolEvents::ReserveDataUpdated(ev) => {
                     debug!("start: reserve data updated");
                     reserve_data_updated_txs[counters.reserve_data_updated % w_num]
-                        .send((ev, hf_senders[hf_counter % w_num].clone(), RqDate(rq_date)))
+                        .send((
+                            ev,
+                            hf_senders[hf_counter % w_num].clone(),
+                            block_timestamp,
+                            rq_date,
+                        ))
                         .await?;
                     counters.reserve_data_updated = counters.reserve_data_updated.wrapping_add(1);
                 }
@@ -1200,7 +1234,7 @@ where
 
 pub(crate) async fn setup<P>(provider: Arc<P>) -> eyre::Result<Tokens>
 where
-    P: DataProvider,
+    P: DataProvider + Clock + 'static,
 {
     let token_data = provider.get_all_reserves_tokens().await?;
 
@@ -1232,26 +1266,30 @@ where
 pub type TimeStamp = i64;
 
 pub(crate) enum AaveEvents {
-    IL2PoolEvents(IL2PoolEvents, TimeStamp),
+    IL2PoolEvents(IL2PoolEvents, BlockTimeStamp, RqDate),
 }
 
 pub(crate) async fn listen_events<P>(provider: Arc<P>, tx: Sender<AaveEvents>) -> eyre::Result<()>
 where
-    P: DataProvider + 'static,
+    P: DataProvider + Clock + 'static,
 {
     task::spawn(async move {
         loop {
             debug!("listen_events: created thread");
 
             let tx = tx.clone();
+            let p = provider.clone();
             match provider
-                .listen_events(move |data| {
+                .listen_events(move |data, block_timestamp| {
                     let tx = tx.clone();
+                    let p = p.clone();
+
                     async move {
                         if let Err(e) = tx
                             .send(AaveEvents::IL2PoolEvents(
                                 data,
-                                Utc::now().timestamp_micros(),
+                                block_timestamp,
+                                RqDate(p.now().timestamp_micros()),
                             ))
                             .await
                         {
@@ -1278,7 +1316,7 @@ pub(crate) async fn listen_prices_update<P>(
     hf_tx: Sender<HFRequest>,
 ) -> eyre::Result<()>
 where
-    P: DataProvider + 'static,
+    P: DataProvider + Clock + 'static,
 {
     task::spawn(async move {
         debug!("listen_prices_update: created thread");
@@ -1294,12 +1332,14 @@ where
 
         let hf_tx = hf_tx.clone();
         let cache = cache.clone();
+        let p = provider.clone();
         match provider
             .listen_prices_update(&tokens, &price_decimals, move |prices| {
                 let hf_tx = hf_tx.clone();
                 let cache = cache.clone();
+                let p = p.clone();
                 async move {
-                    let now = Utc::now().timestamp_micros();
+                    let now = p.now().timestamp_micros();
 
                     {
                         let (prices_current, _) = &mut *cache.prices.write().await;
@@ -1311,7 +1351,7 @@ where
                             debug!("listen_prices_update: prices_current = {}", prices_current);
 
                             if let Err(e) = hf_tx.send(HFRequest::Full(now)).await {
-                                    error!(
+                                error!(
                                     "listen_prices_update: failed to send to hf calculation channel: {:?}",
                                     e
                                 );
@@ -1339,7 +1379,7 @@ pub(crate) async fn liquidation_threshold_update<P>(
     hf_tx: Sender<HFRequest>,
 ) -> eyre::Result<()>
 where
-    P: DataProvider + 'static,
+    P: DataProvider + Clock + 'static,
 {
     task::spawn(async move {
         debug!("liquidation_threshold_update: created thread");
@@ -1367,7 +1407,7 @@ async fn liquidation_threshold_update_handler<P>(
     hf_tx: &Sender<HFRequest>,
 ) -> eyre::Result<()>
 where
-    P: DataProvider + 'static,
+    P: DataProvider + Clock + 'static,
 {
     let mut data = vec![0.0; tokens.len()];
     let tasks = tokens.iter().map(
@@ -1400,7 +1440,7 @@ where
     };
 
     if lt_modified {
-        let rq_date = Utc::now().timestamp_micros();
+        let rq_date = provider.now().timestamp_micros();
         *cache.liquidation_threshold.write().await = (d, rq_date);
 
         if let Err(e) = hf_tx.send(HFRequest::Full(rq_date)).await {
@@ -1474,20 +1514,24 @@ pub(crate) enum HFRequest {
     Full(TimeStamp),
 }
 
-pub(crate) async fn listen_hf_calc(
+pub(crate) async fn listen_hf_calc<C>(
     cache: Arc<Cache>,
+    clock: Arc<C>,
     lq_lookup_tx: Sender<()>,
     workers: usize,
     bound: usize,
-) -> eyre::Result<Vec<Sender<HFRequest>>> {
+) -> eyre::Result<Vec<Sender<HFRequest>>>
+where
+    C: Clock + Send + Sync + 'static,
+{
     let mut senders = Vec::with_capacity(workers);
     for worker in 0..workers {
         let (tx, mut rc) = channel::<HFRequest>(bound);
-        let (cache, lq_lookup_tx) = (cache.clone(), lq_lookup_tx.clone());
+        let (cache, clock, lq_lookup_tx) = (cache.clone(), clock.clone(), lq_lookup_tx.clone());
         task::spawn(async move {
             debug!("listen_hf_calc (worker = {}): created thread", worker);
 
-            match listen_hf_calc_handler(&cache, &mut rc, &lq_lookup_tx).await {
+            match listen_hf_calc_handler(&cache, clock, &mut rc, &lq_lookup_tx).await {
                 Ok(_) => {
                     debug!("listen_hf_calc (worker = {}): Ok", worker);
                 }
@@ -1500,15 +1544,19 @@ pub(crate) async fn listen_hf_calc(
     Ok(senders)
 }
 
-async fn listen_hf_calc_handler(
+async fn listen_hf_calc_handler<C>(
     cache: &Cache,
+    clock: Arc<C>,
     rc: &mut Receiver<HFRequest>,
     lq_lookup_tx: &Sender<()>,
-) -> eyre::Result<()> {
+) -> eyre::Result<()>
+where
+    C: Clock + 'static,
+{
     while let Some(hf_rq) = rc.recv().await {
         match hf_rq {
-            HFRequest::User(user, rq_date) => cache.calc_hf(Some(&user), rq_date).await?,
-            HFRequest::Full(rq_date) => cache.calc_hf(None, rq_date).await?,
+            HFRequest::User(user, rq_date) => cache.calc_hf(Some(&user), &*clock, rq_date).await?,
+            HFRequest::Full(rq_date) => cache.calc_hf(None, &*clock, rq_date).await?,
         }
 
         if let Err(e) = lq_lookup_tx.send(()).await {
@@ -1626,11 +1674,6 @@ pub(in crate::arbitrum) struct UserData {
     pub(in crate::arbitrum) reserve_scaled: Vec<U256>,
     pub(in crate::arbitrum) collateral_scaled: Vec<U256>,
     pub(in crate::arbitrum) borrowed_scaled: Vec<U256>,
-    pub(in crate::arbitrum) liquidity_indexes: Vec<U256>,
-    pub(in crate::arbitrum) liquidity_rates: Vec<U256>,
-    pub(in crate::arbitrum) variable_borrow_indexes: Vec<U256>,
-    pub(in crate::arbitrum) variable_borrow_rates: Vec<U256>,
-    pub(in crate::arbitrum) last_update_timestamps: Vec<U40>,
     pub(in crate::arbitrum) user_settings: UserSettings,
 }
 
@@ -1639,22 +1682,12 @@ impl UserData {
         reserve_scaled: Vec<U256>,
         collateral_scaled: Vec<U256>,
         borrowed_scaled: Vec<U256>,
-        liquidity_indexes: Vec<U256>,
-        liquidity_rates: Vec<U256>,
-        variable_borrow_indexes: Vec<U256>,
-        variable_borrow_rates: Vec<U256>,
-        last_update_timestamps: Vec<U40>,
         user_settings: UserSettings,
     ) -> Self {
         Self {
             reserve_scaled,
             collateral_scaled,
             borrowed_scaled,
-            liquidity_indexes,
-            liquidity_rates,
-            variable_borrow_indexes,
-            variable_borrow_rates,
-            last_update_timestamps,
             user_settings,
         }
     }
@@ -1689,18 +1722,32 @@ pub struct Cache {
 impl Cache {
     pub(crate) async fn init<P>(&self, provider: Arc<P>, tokens: &Tokens) -> eyre::Result<()>
     where
-        P: DataProvider + 'static,
+        P: DataProvider + Clock + 'static,
     {
         let token_num = tokens.len();
         *self.collateral_matrix.write().await = Array2::from_elem((0, token_num), 0.0);
         *self.borrowed_matrix.write().await = Array2::from_elem((0, token_num), 0.0);
 
-        let now = Utc::now().timestamp_micros();
+        let now = provider.now().timestamp_micros();
 
-        let (mut decimals, mut price_decimals, mut token_addresses) = (
+        let (
+            mut decimals,
+            mut price_decimals,
+            mut token_addresses,
+            mut liquidity_indexes,
+            mut liquidity_rates,
+            mut variable_borrow_indexes,
+            mut variable_borrow_rates,
+            mut last_update_timestamps,
+        ) = (
             vec![0.0; token_num],
             vec![0.0; token_num],
             vec![Address::default(); token_num],
+            vec![U256::default(); token_num],
+            vec![U256::default(); token_num],
+            vec![U256::default(); token_num],
+            vec![U256::default(); token_num],
+            vec![U40::default(); token_num],
         );
         for (
             token_address,
@@ -1715,16 +1762,65 @@ impl Cache {
             decimals[*order] = *dec;
             price_decimals[*order] = *pd;
             token_addresses[*order] = token_address.clone();
+
+            let reserve_data = provider.get_reserve_data(token_address).await?;
+
+            liquidity_indexes[*order] = reserve_data.liquidity_index;
+            liquidity_rates[*order] = reserve_data.liquidity_rate;
+            variable_borrow_indexes[*order] = reserve_data.variable_borrow_index;
+            variable_borrow_rates[*order] = reserve_data.variable_borrow_rate;
+            last_update_timestamps[*order] = reserve_data.last_update_timestamp;
         }
         *self.decimals.write().await = (Array1::from_vec(decimals), now);
 
         *self.tokens.write().await = (Array1::from_vec(token_addresses.clone()), now);
         *self.price_decimals.write().await = (Array1::from_vec(price_decimals.clone()), now);
 
-        *self.liquidity.write().await = (Array1::from_elem(token_num, Index::default()), now);
-        *self.liquidity_index.write().await = (Array1::from_elem(token_num, 0.0), now);
-        *self.variable_borrow.write().await = (Array1::from_elem(token_num, Index::default()), now);
-        *self.variable_borrow_index.write().await = (Array1::from_elem(token_num, 0.0), now);
+        {
+            let (indexes, last_modified) = &mut *self.liquidity.write().await;
+            let idx = liquidity_indexes
+                .iter()
+                .zip(liquidity_rates.iter())
+                .zip(last_update_timestamps.iter())
+                .map(|((li, lr), lu)| {
+                    Index::new(li.clone(), lr.clone(), lu.to::<i64>() * 1_000_000)
+                })
+                .collect::<Vec<_>>();
+            (*indexes, *last_modified) = (Array1::from(idx), now);
+            debug!("init: new liquidity = {:?}", indexes);
+        }
+
+        {
+            let (indexes, last_modified) = &mut *self.liquidity_index.write().await;
+            (*indexes, *last_modified) = (
+                Array1::from_iter(liquidity_indexes.iter().map(F64Converter::as_f64_ray)),
+                now,
+            );
+            debug!("init: new liquidity index = {:?}", indexes);
+        }
+
+        {
+            let (indexes, last_modified) = &mut *self.variable_borrow.write().await;
+            let idx = variable_borrow_indexes
+                .iter()
+                .zip(variable_borrow_rates.iter())
+                .zip(last_update_timestamps.iter())
+                .map(|((vbi, vbr), lu)| {
+                    Index::new(vbi.clone(), vbr.clone(), lu.to::<i64>() * 1_000_000)
+                })
+                .collect::<Vec<_>>();
+            (*indexes, *last_modified) = (Array1::from(idx), now);
+            debug!("init: new variable borrow = {:?}", indexes);
+        }
+
+        {
+            let (indexes, last_modified) = &mut *self.variable_borrow_index.write().await;
+            (*indexes, *last_modified) = (
+                Array1::from_iter(variable_borrow_indexes.iter().map(F64Converter::as_f64_ray)),
+                now,
+            );
+            debug!("init: new variable borrow index = {:?}", indexes);
+        }
 
         *self.liquidation_threshold.write().await = (Array1::from_elem(token_num, 0.0), now);
         *self.health_factors.write().await = (Array1::from_elem(0, 0.0), now);
@@ -1752,25 +1848,24 @@ impl Cache {
         provider: Arc<P>,
     ) -> eyre::Result<()>
     where
-        P: DataProvider + 'static,
+        P: DataProvider + Clock + 'static,
     {
+        println!("sync_user: before sleep");
+        // aave doesn't update straight so we have to wait to make sure it has been updated
+        tokio::time::sleep(Duration::from_secs(5)).await;
+
         let UserData {
             reserve_scaled,
             collateral_scaled,
             borrowed_scaled,
-            liquidity_indexes,
-            liquidity_rates,
-            variable_borrow_indexes,
-            variable_borrow_rates,
-            last_update_timestamps,
             user_settings,
-        } = self.get_user_data(provider, tokens, user).await?;
+        } = self.get_user_data(provider.clone(), tokens, user).await?;
         let row_num = self
             .users
             .get(user)
             .ok_or_else(|| eyre!("sync_user: user = {:?} not found", user))?
             .row_num;
-        let now = Utc::now().timestamp_micros();
+        let now = provider.now().timestamp_micros();
 
         self.users.insert(user.clone(), user_settings);
 
@@ -1834,61 +1929,6 @@ impl Cache {
             );
         }
 
-        {
-            let (indexes, last_modified) = &mut *self.liquidity.write().await;
-            let idx = liquidity_indexes
-                .iter()
-                .zip(liquidity_rates.iter())
-                .zip(last_update_timestamps.iter())
-                .map(|((li, lr), lu)| {
-                    Index::new(li.clone(), lr.clone(), lu.to::<i64>() * 1_000_000)
-                })
-                .collect::<Vec<_>>();
-            (*indexes, *last_modified) = (Array1::from(idx), now);
-            debug!("sync_user (user = {}): new liquidity = {:?}", user, indexes);
-        }
-
-        {
-            let (indexes, last_modified) = &mut *self.liquidity_index.write().await;
-            (*indexes, *last_modified) = (
-                Array1::from_iter(liquidity_indexes.iter().map(F64Converter::as_f64_ray)),
-                now,
-            );
-            debug!(
-                "sync_user (user = {}): new liquidity index = {:?}",
-                user, indexes
-            );
-        }
-
-        {
-            let (indexes, last_modified) = &mut *self.variable_borrow.write().await;
-            let idx = variable_borrow_indexes
-                .iter()
-                .zip(variable_borrow_rates.iter())
-                .zip(last_update_timestamps.iter())
-                .map(|((vbi, vbr), lu)| {
-                    Index::new(vbi.clone(), vbr.clone(), lu.to::<i64>() * 1_000_000)
-                })
-                .collect::<Vec<_>>();
-            (*indexes, *last_modified) = (Array1::from(idx), now);
-            debug!(
-                "sync_user (user = {}): new variable borrow = {:?}",
-                user, indexes
-            );
-        }
-
-        {
-            let (indexes, last_modified) = &mut *self.variable_borrow_index.write().await;
-            (*indexes, *last_modified) = (
-                Array1::from_iter(variable_borrow_indexes.iter().map(F64Converter::as_f64_ray)),
-                now,
-            );
-            debug!(
-                "sync_user (user = {}): new variable borrow index = {:?}",
-                user, indexes
-            );
-        }
-
         Ok(())
     }
 
@@ -1899,7 +1939,7 @@ impl Cache {
         provider: Arc<P>,
     ) -> eyre::Result<bool>
     where
-        P: DataProvider + 'static,
+        P: DataProvider + Clock + 'static,
     {
         if self.contains(user) {
             debug!("init_user: existing user = {}", user);
@@ -1965,62 +2005,39 @@ impl Cache {
         user: &Address,
     ) -> eyre::Result<UserData>
     where
-        P: DataProvider + 'static,
+        P: DataProvider + Clock + 'static,
     {
         let tasks = tokens.iter().map(|(token_address, _)| {
             let provider = provider.clone();
             async move {
-                let (reserve_data, user_reserve_data) = try_join!(
-                    provider.get_reserve_data(token_address),
-                    provider.get_user_reserve_data(token_address, user)
-                )?;
-
-                Ok::<_, eyre::Error>((reserve_data, user_reserve_data, token_address.clone()))
+                let user_reserve_data = provider.get_user_reserve_data(token_address, user).await?;
+                Ok::<_, eyre::Error>((token_address.clone(), user_reserve_data))
             }
         });
 
         let task_results = try_join_all(tasks).await?;
         let (decimals, _) = &*self.decimals.read().await;
 
-        let (
-            mut reserve_scaled,
-            mut collateral_scaled,
-            mut borrowed_scaled,
-            mut liquidity_indexes,
-            mut liquidity_rates,
-            mut variable_borrow_indexes,
-            mut variable_borrow_rates,
-            mut last_update_timestamps,
-            mut user_settings,
-        ) = (
+        let (mut reserve_scaled, mut collateral_scaled, mut borrowed_scaled, mut user_settings) = (
             vec![U256::default(); tokens.len()],
             vec![U256::default(); tokens.len()],
             vec![U256::default(); tokens.len()],
-            vec![U256::default(); tokens.len()],
-            vec![U256::default(); tokens.len()],
-            vec![U256::default(); tokens.len()],
-            vec![U256::default(); tokens.len()],
-            vec![U40::default(); tokens.len()],
             self.users
                 .get(user)
                 .ok_or_else(|| eyre!("get_user_data: user = {:?} not found", user))?
                 .clone(),
         );
 
+        let liquidity = self.liquidity.read().await.0.to_vec();
+        let variable_borrow = self.variable_borrow.read().await.0.to_vec();
+
         for (
-            ReserveData {
-                liquidity_rate,
-                variable_borrow_rate,
-                liquidity_index,
-                variable_borrow_index,
-                last_update_timestamp,
-            },
+            token_address,
             UserReserveData {
                 current_atoken_balance,
                 current_variable_debt,
                 usage_as_collateral_enabled,
             },
-            token_address,
         ) in task_results
         {
             let idx = tokens
@@ -2034,11 +2051,25 @@ impl Cache {
                 })?
                 .order;
 
-            liquidity_indexes[idx] = liquidity_index;
-            liquidity_rates[idx] = liquidity_rate;
-            variable_borrow_indexes[idx] = variable_borrow_index;
-            variable_borrow_rates[idx] = variable_borrow_rate;
-            last_update_timestamps[idx] = last_update_timestamp;
+            let now = provider.now().timestamp_micros();
+            let liquidity_index = get_latest_liquidity_index(&liquidity[idx], now)?;
+            let variable_borrow_index =
+                get_latest_variable_borrow_index(&variable_borrow[idx], now)?;
+
+            debug!(
+                "get_user_data: user = {}, token = {}, \
+            current_atoken_balance = {}, usage_as_collateral_enabled = {}, current_variable_debt = {} \
+            liquidity = {:?}, liquidity_index_updated = {}, variable_borrow = {:?}, variable_borrow_index_updated = {}",
+                user,
+                token_address,
+                current_atoken_balance,
+                usage_as_collateral_enabled,
+                current_variable_debt,
+                liquidity[idx],
+                liquidity_index,
+                variable_borrow[idx],
+                variable_borrow_index,
+            );
 
             if usage_as_collateral_enabled {
                 collateral_scaled[idx] = current_atoken_balance
@@ -2060,11 +2091,6 @@ impl Cache {
             reserve_scaled,
             collateral_scaled,
             borrowed_scaled,
-            liquidity_indexes,
-            liquidity_rates,
-            variable_borrow_indexes,
-            variable_borrow_rates,
-            last_update_timestamps,
             user_settings,
         ))
     }
@@ -2082,7 +2108,7 @@ impl Cache {
         callback: F,
     ) -> eyre::Result<Vec<Sender<T>>>
     where
-        P: DataProvider + 'static,
+        P: DataProvider + Clock + 'static,
         T: Send + 'static,
         F: Fn(Arc<Cache>, Arc<P>, Arc<Tokens>, T) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = eyre::Result<()>> + Send + 'static,
@@ -2380,11 +2406,15 @@ impl Cache {
         Ok(())
     }
 
-    pub(in crate::arbitrum) async fn calc_hf(
+    pub(in crate::arbitrum) async fn calc_hf<C>(
         &self,
         user: Option<&Address>,
+        clock: &C,
         rq_date: TimeStamp,
-    ) -> eyre::Result<()> {
+    ) -> eyre::Result<()>
+    where
+        C: Clock + 'static,
+    {
         let lt = {
             let (lt, _) = &*self.liquidation_threshold.read().await;
             lt.view().to_owned()
@@ -2461,7 +2491,7 @@ impl Cache {
                     ],
                 )?;
             }
-            (hf_lock.0[row_num], hf_lock.1) = (col_eff / bor_eff, Utc::now().timestamp_micros());
+            (hf_lock.0[row_num], hf_lock.1) = (col_eff / bor_eff, clock.now().timestamp_micros());
 
             debug!("{}", {
                 let received = Utc::now().timestamp_micros();
@@ -2505,7 +2535,7 @@ impl Cache {
         };
 
         let mut hf_lock = self.health_factors.write().await;
-        (hf_lock.0, hf_lock.1) = (col_eff / bor_eff, Utc::now().timestamp_micros());
+        (hf_lock.0, hf_lock.1) = (col_eff / bor_eff, clock.now().timestamp_micros());
 
         debug!("{}", {
             let received = Utc::now().timestamp_micros();
@@ -2521,6 +2551,75 @@ impl Cache {
 
         Ok(())
     }
+}
+
+pub(in crate::arbitrum) fn get_latest_liquidity_index(
+    liquidity_index: &Index,
+    now: TimeStamp,
+) -> eyre::Result<U256> {
+    let one_ray: U256 = U256::from(RAY);
+    let seconds_per_year = U256::from(SECONDS_PER_YEAR);
+
+    let dt = U256::from(now.saturating_sub(liquidity_index.last_update) / 1_000_000);
+
+    if dt.is_zero() {
+        debug!(
+            "get_latest_liquidity_index: index = {}, rate = {}, last_update = {}, dt = {}",
+            liquidity_index.index, liquidity_index.rate, liquidity_index.last_update, dt
+        );
+
+        return Ok(liquidity_index.index);
+    }
+
+    let dt_spy = dt.ray_div(seconds_per_year);
+    let li_new = liquidity_index
+        .index
+        .ray_mul(one_ray + liquidity_index.rate.ray_mul(dt_spy));
+
+    debug!(
+        "get_latest_liquidity_index: index = {}, rate = {}, last_update = {}, dt = {}, update_index = {}",
+        liquidity_index.index, liquidity_index.rate, liquidity_index.last_update, dt, li_new
+    );
+
+    Ok(li_new)
+}
+
+pub(in crate::arbitrum) fn get_latest_variable_borrow_index(
+    variable_borrow_index: &Index,
+    now: TimeStamp,
+) -> eyre::Result<U256> {
+    let one_ray: U256 = U256::from(RAY);
+    let seconds_per_year = U256::from(SECONDS_PER_YEAR);
+
+    let dt = U256::from(now.saturating_sub(variable_borrow_index.last_update) / 1_000_000);
+
+    if dt.is_zero() {
+        debug!(
+            "get_latest_variable_borrow_index: index = {}, rate = {}, last_update = {}, dt = {} seconds",
+            variable_borrow_index.index,
+            variable_borrow_index.rate,
+            variable_borrow_index.last_update,
+            dt
+        );
+
+        return Ok(variable_borrow_index.index);
+    }
+
+    let dt_spy = dt.ray_div(seconds_per_year);
+    let vbi_new = variable_borrow_index
+        .index
+        .ray_mul(one_ray + variable_borrow_index.rate.ray_mul(dt_spy));
+
+    debug!(
+        "get_latest_variable_borrow_index: index = {}, rate = {}, last_update = {}, dt = {} seconds, update_index = {}",
+        variable_borrow_index.index,
+        variable_borrow_index.rate,
+        variable_borrow_index.last_update,
+        dt,
+        vbi_new
+    );
+
+    Ok(vbi_new)
 }
 
 pub(crate) trait F64Converter {
@@ -2596,6 +2695,8 @@ pub(crate) trait RayOperations {
 }
 
 pub(in crate::arbitrum) const RAY: u128 = 1_000_000_000_000_000_000_000_000_000; // 1e27
+pub(in crate::arbitrum) const SECONDS_PER_YEAR: usize = 31_536_000;
+
 impl RayOperations for U256 {
     fn ray_mul(self, b: U256) -> U256 {
         // (a * b + RAY/2) / RAY
@@ -2609,6 +2710,7 @@ impl RayOperations for U256 {
         let half_b = b / U512::from(2u8);
         let result = (U512::from(self) * U512::from(RAY) + half_b) / b;
         U256::from(result)
+        // U256::from((U512::from(self) * U512::from(RAY)) / U512::from(b))
     }
 
     fn to_ray(self, decimals: f64) -> U256 {
@@ -2628,5 +2730,34 @@ impl Scaler for U256 {
 
     fn to_current(self, index: U256) -> U256 {
         self.ray_mul(index) // (self * index) / RAY
+    }
+}
+
+#[derive(Default, Debug)]
+struct BlockCache {
+    last_block: u64,
+    last_ts: TimeStamp,
+}
+
+impl BlockCache {
+    async fn get<P>(&mut self, provider: &P, block_number: u64) -> eyre::Result<TimeStamp>
+    where
+        P: Provider + Clone + Send + Sync + 'static,
+    {
+        if block_number == self.last_block {
+            return Ok(self.last_ts);
+        }
+
+        let block = provider
+            .get_block(BlockId::from(block_number))
+            .await?
+            .ok_or_else(|| eyre!("block not found"))?;
+
+        let ts_micros = (block.header.timestamp as i64) * 1_000_000;
+
+        self.last_block = block_number;
+        self.last_ts = ts_micros;
+
+        Ok(ts_micros)
     }
 }
